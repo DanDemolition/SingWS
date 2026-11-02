@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import time
 
+import cdg_seek_guard
+
 from PyQt6.QtCore import QObject, QTimer, Qt, pyqtSignal
 from PyQt6.QtWidgets import QWidget
 
@@ -134,6 +136,8 @@ class MpvKaraokeTransport(QObject):
         audio = self.audio_path if self.mode == "cdg" else None
         if not source:
             raise RuntimeError("mpv source path is empty")
+        self._cdg_gap = cdg_seek_guard.load_gap(self.video_path) if self.mode == "cdg" else None
+        start_seconds = cdg_seek_guard.clamp_seek(self._cdg_gap, float(start_seconds or 0.0))
         voice_on = False
         if self._voice is not None:
             voice_on = self._voice_load(start_seconds)
@@ -178,7 +182,7 @@ class MpvKaraokeTransport(QObject):
         self.plugin.stopMedia()
 
     def seek(self, seconds: float):
-        target = max(0.0, float(seconds))
+        target = cdg_seek_guard.clamp_seek(getattr(self, "_cdg_gap", None), max(0.0, float(seconds)))
         if self._voice is not None and self._voice_phase in ("running", "seeking", "voice_wait"):
             # Pause both, move both, and start them together again once the voice's source is ready (it takes a moment to refill).
             try:

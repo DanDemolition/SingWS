@@ -611,6 +611,40 @@ pub fn compose_bridge_background(frame: &[u8], win_w: usize, win_h: usize, bg: &
     out
 }
 
+/// Longest quiet stretch of graphics that still counts as normal (twin of `cdg_seek_guard.MIN_GAP_SECONDS`).
+pub const MIN_GAP_SECONDS: f64 = 1.0;
+
+/// Seconds of every packet FFmpeg would turn into a frame.
+pub fn frame_times(data: &[u8]) -> Vec<f64> {
+    let mut dec = CdgDecoder::new();
+    data.chunks_exact(PACKET_BYTES)
+        .enumerate()
+        .filter(|(_, p)| dec.apply(p))
+        .map(|(i, _)| i as f64 / PACKETS_PER_SECOND)
+        .collect()
+}
+
+/// `(last frame before the gap, first frame after it)` when the graphics go quiet for more than `MIN_GAP_SECONDS` and only a closing burst follows:
+/// an exact seek into that gap makes mpv wait for the closing frame, which ends the song. Twin of `cdg_seek_guard.terminal_gap`.
+pub fn terminal_gap(data: &[u8]) -> Option<(f64, f64)> {
+    let times = frame_times(data);
+    let last = *times.last()?;
+    for i in (0..times.len().saturating_sub(1)).rev() {
+        if times[i + 1] - times[i] > MIN_GAP_SECONDS {
+            return if last - times[i + 1] <= MIN_GAP_SECONDS { Some((times[i], times[i + 1])) } else { None };
+        }
+    }
+    None
+}
+
+/// The seek target to use: inside the gap it moves back to the last frame before it.
+pub fn clamp_seek(gap: Option<(f64, f64)>, seconds: f64) -> f64 {
+    match gap {
+        Some((before, after)) if seconds > before && seconds < after => before,
+        _ => seconds,
+    }
+}
+
 /// A whole CDG file with seek by time.
 pub struct CdgPlayer {
     data: Vec<u8>,
@@ -678,6 +712,40 @@ impl CdgPlayer {
 
 #[cfg(test)]
 mod tests {
+    fn built(frames: &[usize]) -> Vec<u8> {
+        let n = frames.iter().max().unwrap() + 1;
+        let mut d = vec![0u8; n * PACKET_BYTES];
+        for &f in frames {
+            d[f * PACKET_BYTES] = 9;
+            d[f * PACKET_BYTES + 1] = 1;
+        }
+        d
+    }
+
+    #[test]
+    fn quiet_tail_before_the_closing_burst_is_found() {
+        let gap = terminal_gap(&built(&[0, 300, 3000, 3001, 9000, 9001, 9002])).unwrap();
+        assert_eq!(gap, (3001.0 / 300.0, 9000.0 / 300.0));
+    }
+
+    #[test]
+    fn no_tail_when_graphics_run_on_or_the_quiet_stretch_is_in_the_middle() {
+        assert!(terminal_gap(&built(&[0, 300, 600, 900])).is_none());
+        assert!(terminal_gap(&built(&[0, 3000, 6000, 6300, 6600, 6900])).is_none());
+        assert!(terminal_gap(&[]).is_none());
+    }
+
+    #[test]
+    fn clamp_moves_back_only_inside_the_gap() {
+        let g = Some((100.0, 130.0));
+        assert_eq!(clamp_seek(g, 90.0), 90.0);
+        assert_eq!(clamp_seek(g, 100.0), 100.0);
+        assert_eq!(clamp_seek(g, 115.0), 100.0);
+        assert_eq!(clamp_seek(g, 130.0), 130.0);
+        assert_eq!(clamp_seek(g, 200.0), 200.0);
+        assert_eq!(clamp_seek(None, 115.0), 115.0);
+    }
+
     fn solid(w: usize, h: usize, rgb: [u8; 3]) -> Vec<u8> {
         (0..w * h).flat_map(|_| [rgb[0], rgb[1], rgb[2], 255]).collect()
     }
@@ -1287,6 +1355,14 @@ mod tests {
         let out = compose_bridge_background(&f, 3 * WIDTH, 3 * HEIGHT, &v);
         assert_eq!(&out[(301 * 3 * WIDTH + 451) * 4..][..4], &[222, 222, 222, 255]);
         assert_eq!(&out[(301 * 3 * WIDTH + 460) * 4..][..4], &[255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn the_let_down_disc_has_the_documented_tail_when_it_is_on_this_machine() {
+        let path = std::path::Path::new(&std::env::var("HOME").unwrap_or_default()).join("Music/Karaoke/Karaoke Library/CC - Radiohead - Let Down.cdg");
+        let Ok(data) = std::fs::read(path) else { return };
+        let (before, after) = terminal_gap(&data).expect("tail");
+        assert!((before - 278.03).abs() < 0.05 && (after - 300.50).abs() < 0.05, "{before} {after}");
     }
 
     #[test]

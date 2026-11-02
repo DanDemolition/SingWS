@@ -4,6 +4,7 @@
 # mode through LaunchServices (so TCC sees the bundle, not this terminal), which loads the video bridge + BGM engine in-process, hands two Qt Quick
 # windows to the bridge, plays ~5 s through the BGM engine headless, and writes a report.
 #   Usage: spike_host.sh [--arch arm64|x86_64|both] [--out DIR] [--no-build] [--play SONG.cdg]
+#   PLAY_ARGS="--play-demo-seek-end 12" adds options to the play demo (seek that many seconds before the end).
 #   --play: after the selfcheck, also run the SECOND spike (`singws-shell --play-demo SONG.cdg SONG.mp3`, see docs/design/stage-e-no-python-host-spike-2.md):
 #   a real CDG+MP3 song through the Rust video bridge and the Rust karaoke voice, HEADLESS audio (silent), ~45 s; the song files are only read.
 #   Needs: the Qt kit (build_shell.sh), native/mpv_runtime/artifacts/<arch>/Frameworks, ffmpeg (test media), the local signing identity.
@@ -85,7 +86,7 @@ P
     [[ -f "$PLAY" && -f "$MP3" ]] || { echo "--play needs SONG.cdg and SONG.mp3 side by side" >&2; exit 2; }
     PRC=0
     open -n -W --arch $ARCH --env SINGWS_HOME="$H" --stdout "$OUT/play-stdout-$ARCH.txt" --stderr "$OUT/play-stderr-$ARCH.txt" "$A" \
-      --args --play-demo "$PLAY" "$MP3" --play-demo-report "$PJ" --play-demo-frame "$OUT/frame-$ARCH.rgba" || PRC=$?
+      --args --play-demo "$PLAY" "$MP3" --play-demo-report "$PJ" --play-demo-frame "$OUT/frame-$ARCH.rgba" ${PLAY_ARGS:-} || PRC=$?
     echo; echo "play-demo $ARCH exit $PRC, report $([[ -f $PJ ]] && echo "$PJ" || echo MISSING)" | tee -a "$REPORT"
   fi
 

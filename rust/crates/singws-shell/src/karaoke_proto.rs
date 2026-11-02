@@ -89,6 +89,8 @@ pub struct Protocol<P: Picture, V: Voice> {
     pub log: Vec<String>,
     /// Set when the voice was given up on (the song then plays with mpv's own audio): the reason.
     pub dropped: Option<String>,
+    /// A CDG's graphics-free tail (`singws_cdg::terminal_gap`): a seek into it moves back to the last frame before it, for picture and voice alike.
+    pub seek_gap: Option<(f64, f64)>,
     tempo_ratio: f64,
     user_paused: bool,
     stopped: bool,
@@ -115,6 +117,7 @@ impl<P: Picture, V: Voice> Protocol<P, V> {
             phase: Phase::Idle,
             log: Vec::new(),
             dropped: None,
+            seek_gap: None,
             tempo_ratio: 1.0,
             user_paused: false,
             stopped: true,
@@ -140,6 +143,7 @@ impl<P: Picture, V: Voice> Protocol<P, V> {
 
     /// Both are loaded and paused (the voice from `Voice` construction, the picture from the bridge load). Mirrors the tail of `start()`.
     pub fn start(&mut self, now: f64, start_seconds: f64) {
+        let start_seconds = singws_cdg::clamp_seek(self.seek_gap, start_seconds);
         self.user_paused = false;
         if self.voice.is_some() {
             self.phase = Phase::Starting;
@@ -180,7 +184,7 @@ impl<P: Picture, V: Voice> Protocol<P, V> {
     }
 
     pub fn seek(&mut self, now: f64, seconds: f64) {
-        let target = seconds.max(0.0);
+        let target = singws_cdg::clamp_seek(self.seek_gap, seconds.max(0.0));
         if self.voice.is_some() && matches!(self.phase, Phase::Running | Phase::Seeking | Phase::VoiceWait) {
             // Pause both, move both, and start them together again once the voice's source is ready (it takes a moment to refill).
             if let Some(v) = self.voice.as_mut() {
@@ -596,6 +600,21 @@ mod tests {
         v.0.borrow_mut().resync = Some((1, 1, 199.0, 199.9, 199.9, 1));
         run(&mut proto, 1.1, 1.2);
         assert!(proto.log.iter().any(|l| l.contains("voice kept its place (close to the end of the song)")));
+    }
+
+    #[test]
+    fn a_seek_into_the_cdg_tail_moves_both_to_the_last_frame_before_it() {
+        let (mut proto, p, v) = rig();
+        proto.seek_gap = Some((100.0, 130.0));
+        v.0.borrow_mut().ready = true;
+        proto.start(0.0, 0.0);
+        run(&mut proto, 0.0, 2.0);
+        assert_eq!(proto.phase, Phase::Running);
+        proto.seek(2.0, 115.0);
+        assert!(p.0.borrow().calls.contains(&"p.seek 100000".to_string()), "{:?}", p.0.borrow().calls);
+        assert!(v.0.borrow().calls.contains(&"v.seek 100".to_string()), "{:?}", v.0.borrow().calls);
+        proto.seek(2.5, 90.0);
+        assert!(p.0.borrow().calls.contains(&"p.seek 90000".to_string()));
     }
 
     #[test]
