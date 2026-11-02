@@ -53,6 +53,13 @@
           "logs": [
             "singws_2026-11-01.log"
           ]
+        },
+        {
+          "date": "2026-11-02",
+          "label": "show 2026-11-01 intel 1.0.2.8",
+          "logs": [
+            "show.log"
+          ]
         }
       ]
     },
@@ -109,6 +116,13 @@
           "logs": [
             "singws_2026-11-01.log"
           ]
+        },
+        {
+          "date": "2026-11-02",
+          "label": "show 2026-11-01 intel 1.0.2.8",
+          "logs": [
+            "show.log"
+          ]
         }
       ]
     },
@@ -164,6 +178,13 @@
           "label": "rehearsal 2026-11-01 dev Mac arm64 1.0.2.6 (loose cdg+mp3 pair and plain mp3 via Add File)",
           "logs": [
             "singws_2026-11-01.log"
+          ]
+        },
+        {
+          "date": "2026-11-02",
+          "label": "show 2026-11-01 intel 1.0.2.8",
+          "logs": [
+            "show.log"
           ]
         }
       ]
@@ -233,6 +254,13 @@
           "logs": [
             "singws_2026-11-01.log"
           ]
+        },
+        {
+          "date": "2026-11-02",
+          "label": "show 2026-11-01 intel 1.0.2.8",
+          "logs": [
+            "show.log"
+          ]
         }
       ]
     },
@@ -288,6 +316,13 @@
           "label": "rehearsal 2026-11-01 dev Mac arm64 1.0.2.6 (loose cdg+mp3 pair and plain mp3 via Add File)",
           "logs": [
             "singws_2026-11-01.log"
+          ]
+        },
+        {
+          "date": "2026-11-02",
+          "label": "show 2026-11-01 intel 1.0.2.8",
+          "logs": [
+            "show.log"
           ]
         }
       ]
@@ -345,6 +380,13 @@
           "logs": [
             "singws_2026-11-01.log"
           ]
+        },
+        {
+          "date": "2026-11-02",
+          "label": "show 2026-11-01 intel 1.0.2.8",
+          "logs": [
+            "show.log"
+          ]
         }
       ]
     },
@@ -377,6 +419,13 @@
             "singws_2026-10-31.log",
             "singws_2026-10-31.log.2026-10-31"
           ]
+        },
+        {
+          "date": "2026-11-02",
+          "label": "show 2026-11-01 intel 1.0.2.8",
+          "logs": [
+            "show.log"
+          ]
         }
       ]
     },
@@ -389,6 +438,13 @@
           "logs": [
             "singws_2026-10-31.log",
             "singws_2026-10-31.log.2026-10-31"
+          ]
+        },
+        {
+          "date": "2026-11-02",
+          "label": "show 2026-11-01 intel 1.0.2.8",
+          "logs": [
+            "show.log"
           ]
         }
       ]
@@ -403,6 +459,13 @@
             "singws_2026-10-31.log",
             "singws_2026-10-31.log.2026-10-31"
           ]
+        },
+        {
+          "date": "2026-11-02",
+          "label": "show 2026-11-01 intel 1.0.2.8",
+          "logs": [
+            "show.log"
+          ]
         }
       ]
     },
@@ -415,6 +478,13 @@
           "logs": [
             "singws_2026-10-31.log",
             "singws_2026-10-31.log.2026-10-31"
+          ]
+        },
+        {
+          "date": "2026-11-02",
+          "label": "show 2026-11-01 intel 1.0.2.8",
+          "logs": [
+            "show.log"
           ]
         }
       ]
@@ -429,6 +499,13 @@
             "singws_2026-10-31.log",
             "singws_2026-10-31.log.2026-10-31"
           ]
+        },
+        {
+          "date": "2026-11-02",
+          "label": "show 2026-11-01 intel 1.0.2.8",
+          "logs": [
+            "show.log"
+          ]
         }
       ]
     },
@@ -441,6 +518,13 @@
           "logs": [
             "singws_2026-10-31.log",
             "singws_2026-10-31.log.2026-10-31"
+          ]
+        },
+        {
+          "date": "2026-11-02",
+          "label": "show 2026-11-01 intel 1.0.2.8",
+          "logs": [
+            "show.log"
           ]
         }
       ]
@@ -455,6 +539,13 @@
             "singws_2026-10-31.log",
             "singws_2026-10-31.log.2026-10-31"
           ]
+        },
+        {
+          "date": "2026-11-02",
+          "label": "show 2026-11-01 intel 1.0.2.8",
+          "logs": [
+            "show.log"
+          ]
         }
       ]
     },
@@ -467,6 +558,13 @@
           "logs": [
             "singws_2026-10-31.log",
             "singws_2026-10-31.log.2026-10-31"
+          ]
+        },
+        {
+          "date": "2026-11-02",
+          "label": "show 2026-11-01 intel 1.0.2.8",
+          "logs": [
+            "show.log"
           ]
         }
       ]
@@ -481,6 +579,13 @@
             "singws_2026-10-31.log",
             "singws_2026-10-31.log.2026-10-31"
           ]
+        },
+        {
+          "date": "2026-11-02",
+          "label": "show 2026-11-01 intel 1.0.2.8",
+          "logs": [
+            "show.log"
+          ]
         }
       ]
     },
@@ -493,6 +598,13 @@
           "logs": [
             "singws_2026-10-31.log",
             "singws_2026-10-31.log.2026-10-31"
+          ]
+        },
+        {
+          "date": "2026-11-02",
+          "label": "show 2026-11-01 intel 1.0.2.8",
+          "logs": [
+            "show.log"
           ]
         }
       ]
@@ -507,6 +619,13 @@
             "singws_2026-10-31.log",
             "singws_2026-10-31.log.2026-10-31"
           ]
+        },
+        {
+          "date": "2026-11-02",
+          "label": "show 2026-11-01 intel 1.0.2.8",
+          "logs": [
+            "show.log"
+          ]
         }
       ]
     },
@@ -519,6 +638,13 @@
           "logs": [
             "singws_2026-10-31.log",
             "singws_2026-10-31.log.2026-10-31"
+          ]
+        },
+        {
+          "date": "2026-11-02",
+          "label": "show 2026-11-01 intel 1.0.2.8",
+          "logs": [
+            "show.log"
           ]
         }
       ]
@@ -546,6 +672,13 @@
           "label": "rehearsal 2026-11-01 dev Mac arm64 1.0.2.6 (loose cdg+mp3 pair and plain mp3 via Add File)",
           "logs": [
             "singws_2026-11-01.log"
+          ]
+        },
+        {
+          "date": "2026-11-02",
+          "label": "show 2026-11-01 intel 1.0.2.8",
+          "logs": [
+            "show.log"
           ]
         }
       ]
@@ -583,6 +716,13 @@
           "logs": [
             "singws_2026-11-01.log"
           ]
+        },
+        {
+          "date": "2026-11-02",
+          "label": "show 2026-11-01 intel 1.0.2.8",
+          "logs": [
+            "show.log"
+          ]
         }
       ]
     },
@@ -619,6 +759,13 @@
           "logs": [
             "singws_2026-11-01.log"
           ]
+        },
+        {
+          "date": "2026-11-02",
+          "label": "show 2026-11-01 intel 1.0.2.8",
+          "logs": [
+            "show.log"
+          ]
         }
       ]
     },
@@ -645,6 +792,13 @@
           "label": "rehearsal 2026-11-01 dev Mac arm64 1.0.2.6 (loose cdg+mp3 pair and plain mp3 via Add File)",
           "logs": [
             "singws_2026-11-01.log"
+          ]
+        },
+        {
+          "date": "2026-11-02",
+          "label": "show 2026-11-01 intel 1.0.2.8",
+          "logs": [
+            "show.log"
           ]
         }
       ]
@@ -673,6 +827,13 @@
           "logs": [
             "singws_2026-11-01.log"
           ]
+        },
+        {
+          "date": "2026-11-02",
+          "label": "show 2026-11-01 intel 1.0.2.8",
+          "logs": [
+            "show.log"
+          ]
         }
       ]
     },
@@ -699,6 +860,13 @@
           "label": "rehearsal 2026-11-01 dev Mac arm64 1.0.2.6 (loose cdg+mp3 pair and plain mp3 via Add File)",
           "logs": [
             "singws_2026-11-01.log"
+          ]
+        },
+        {
+          "date": "2026-11-02",
+          "label": "show 2026-11-01 intel 1.0.2.8",
+          "logs": [
+            "show.log"
           ]
         }
       ]
@@ -736,6 +904,13 @@
           "logs": [
             "singws_2026-11-01.log"
           ]
+        },
+        {
+          "date": "2026-11-02",
+          "label": "show 2026-11-01 intel 1.0.2.8",
+          "logs": [
+            "show.log"
+          ]
         }
       ]
     },
@@ -762,6 +937,13 @@
           "label": "rehearsal 2026-11-01 dev Mac arm64 1.0.2.6 (loose cdg+mp3 pair and plain mp3 via Add File)",
           "logs": [
             "singws_2026-11-01.log"
+          ]
+        },
+        {
+          "date": "2026-11-02",
+          "label": "show 2026-11-01 intel 1.0.2.8",
+          "logs": [
+            "show.log"
           ]
         }
       ]
@@ -798,6 +980,13 @@
           "label": "rehearsal 2026-11-01 dev Mac arm64 1.0.2.6 (loose cdg+mp3 pair and plain mp3 via Add File)",
           "logs": [
             "singws_2026-11-01.log"
+          ]
+        },
+        {
+          "date": "2026-11-02",
+          "label": "show 2026-11-01 intel 1.0.2.8",
+          "logs": [
+            "show.log"
           ]
         }
       ]
@@ -840,6 +1029,13 @@
             "singws_2026-10-31.log",
             "singws_2026-10-31.log.2026-10-31"
           ]
+        },
+        {
+          "date": "2026-11-02",
+          "label": "show 2026-11-01 intel 1.0.2.8",
+          "logs": [
+            "show.log"
+          ]
         }
       ]
     },
@@ -881,6 +1077,13 @@
             "singws_2026-10-31.log",
             "singws_2026-10-31.log.2026-10-31"
           ]
+        },
+        {
+          "date": "2026-11-02",
+          "label": "show 2026-11-01 intel 1.0.2.8",
+          "logs": [
+            "show.log"
+          ]
         }
       ]
     },
@@ -900,6 +1103,13 @@
           "logs": [
             "singws_2026-10-31.log",
             "singws_2026-10-31.log.2026-10-31"
+          ]
+        },
+        {
+          "date": "2026-11-02",
+          "label": "show 2026-11-01 intel 1.0.2.8",
+          "logs": [
+            "show.log"
           ]
         }
       ]
@@ -921,6 +1131,13 @@
           "label": "show 2026-10-30 intel 1.0.2.5 (two runs, first ended in a native crash during a stall dump)",
           "logs": [
             "singws_2026-10-30.log"
+          ]
+        },
+        {
+          "date": "2026-11-02",
+          "label": "show 2026-11-01 intel 1.0.2.8",
+          "logs": [
+            "show.log"
           ]
         }
       ]
@@ -949,6 +1166,13 @@
           "logs": [
             "singws_2026-11-01.log"
           ]
+        },
+        {
+          "date": "2026-11-02",
+          "label": "show 2026-11-01 intel 1.0.2.8",
+          "logs": [
+            "show.log"
+          ]
         }
       ]
     },
@@ -968,6 +1192,13 @@
           "logs": [
             "singws_2026-10-31.log",
             "singws_2026-10-31.log.2026-10-31"
+          ]
+        },
+        {
+          "date": "2026-11-02",
+          "label": "show 2026-11-01 intel 1.0.2.8",
+          "logs": [
+            "show.log"
           ]
         }
       ]
@@ -996,6 +1227,13 @@
           "logs": [
             "singws_2026-10-31.log",
             "singws_2026-10-31.log.2026-10-31"
+          ]
+        },
+        {
+          "date": "2026-11-02",
+          "label": "show 2026-11-01 intel 1.0.2.8",
+          "logs": [
+            "show.log"
           ]
         }
       ]
@@ -1045,6 +1283,13 @@
           "logs": [
             "singws_2026-11-01.log"
           ]
+        },
+        {
+          "date": "2026-11-02",
+          "label": "show 2026-11-01 intel 1.0.2.8",
+          "logs": [
+            "show.log"
+          ]
         }
       ]
     },
@@ -1079,6 +1324,13 @@
           "label": "rehearsal 2026-11-01 dev Mac arm64 1.0.2.6 (loose cdg+mp3 pair and plain mp3 via Add File)",
           "logs": [
             "singws_2026-11-01.log"
+          ]
+        },
+        {
+          "date": "2026-11-02",
+          "label": "show 2026-11-01 intel 1.0.2.8",
+          "logs": [
+            "show.log"
           ]
         }
       ]
@@ -1136,6 +1388,13 @@
           "logs": [
             "singws_2026-11-01.log"
           ]
+        },
+        {
+          "date": "2026-11-02",
+          "label": "show 2026-11-01 intel 1.0.2.8",
+          "logs": [
+            "show.log"
+          ]
         }
       ]
     },
@@ -1184,6 +1443,13 @@
           "label": "rehearsal 2026-11-01 dev Mac arm64 1.0.2.6 (loose cdg+mp3 pair and plain mp3 via Add File)",
           "logs": [
             "singws_2026-11-01.log"
+          ]
+        },
+        {
+          "date": "2026-11-02",
+          "label": "show 2026-11-01 intel 1.0.2.8",
+          "logs": [
+            "show.log"
           ]
         }
       ]
@@ -1241,6 +1507,13 @@
           "logs": [
             "singws_2026-11-01.log"
           ]
+        },
+        {
+          "date": "2026-11-02",
+          "label": "show 2026-11-01 intel 1.0.2.8",
+          "logs": [
+            "show.log"
+          ]
         }
       ]
     },
@@ -1296,6 +1569,13 @@
           "label": "rehearsal 2026-11-01 dev Mac arm64 1.0.2.6 (loose cdg+mp3 pair and plain mp3 via Add File)",
           "logs": [
             "singws_2026-11-01.log"
+          ]
+        },
+        {
+          "date": "2026-11-02",
+          "label": "show 2026-11-01 intel 1.0.2.8",
+          "logs": [
+            "show.log"
           ]
         }
       ]
@@ -1353,6 +1633,13 @@
           "logs": [
             "singws_2026-11-01.log"
           ]
+        },
+        {
+          "date": "2026-11-02",
+          "label": "show 2026-11-01 intel 1.0.2.8",
+          "logs": [
+            "show.log"
+          ]
         }
       ]
     },
@@ -1379,6 +1666,13 @@
           "label": "rehearsal 2026-11-01 dev Mac arm64 1.0.2.6 (loose cdg+mp3 pair and plain mp3 via Add File)",
           "logs": [
             "singws_2026-11-01.log"
+          ]
+        },
+        {
+          "date": "2026-11-02",
+          "label": "show 2026-11-01 intel 1.0.2.8",
+          "logs": [
+            "show.log"
           ]
         }
       ]
@@ -1411,6 +1705,18 @@
           "label": "show 2026-10-30 intel 1.0.2.5 (two runs, first ended in a native crash during a stall dump)",
           "logs": [
             "singws_2026-10-30.log"
+          ]
+        }
+      ]
+    },
+    "STORE-SHADOW:waitlist_snapshot.json": {
+      "bad": [],
+      "clean": [
+        {
+          "date": "2026-11-02",
+          "label": "show 2026-11-01 intel 1.0.2.8",
+          "logs": [
+            "show.log"
           ]
         }
       ]
@@ -1454,6 +1760,13 @@
             "singws_2026-10-31.log",
             "singws_2026-10-31.log.2026-10-31"
           ]
+        },
+        {
+          "date": "2026-11-02",
+          "label": "show 2026-11-01 intel 1.0.2.8",
+          "logs": [
+            "show.log"
+          ]
         }
       ]
     },
@@ -1488,6 +1801,13 @@
           "label": "rehearsal 2026-11-01 dev Mac arm64 1.0.2.6 (loose cdg+mp3 pair and plain mp3 via Add File)",
           "logs": [
             "singws_2026-11-01.log"
+          ]
+        },
+        {
+          "date": "2026-11-02",
+          "label": "show 2026-11-01 intel 1.0.2.8",
+          "logs": [
+            "show.log"
           ]
         }
       ]
@@ -1546,6 +1866,13 @@
           "logs": [
             "singws_2026-11-01.log"
           ]
+        },
+        {
+          "date": "2026-11-02",
+          "label": "show 2026-11-01 intel 1.0.2.8",
+          "logs": [
+            "show.log"
+          ]
         }
       ]
     },
@@ -1594,6 +1921,13 @@
           "label": "rehearsal 2026-11-01 dev Mac arm64 1.0.2.6 (loose cdg+mp3 pair and plain mp3 via Add File)",
           "logs": [
             "singws_2026-11-01.log"
+          ]
+        },
+        {
+          "date": "2026-11-02",
+          "label": "show 2026-11-01 intel 1.0.2.8",
+          "logs": [
+            "show.log"
           ]
         }
       ]
@@ -1644,6 +1978,13 @@
           "logs": [
             "singws_2026-11-01.log"
           ]
+        },
+        {
+          "date": "2026-11-02",
+          "label": "show 2026-11-01 intel 1.0.2.8",
+          "logs": [
+            "show.log"
+          ]
         }
       ]
     },
@@ -1671,6 +2012,13 @@
           "logs": [
             "singws_2026-10-31.log",
             "singws_2026-10-31.log.2026-10-31"
+          ]
+        },
+        {
+          "date": "2026-11-02",
+          "label": "show 2026-11-01 intel 1.0.2.8",
+          "logs": [
+            "show.log"
           ]
         }
       ]
