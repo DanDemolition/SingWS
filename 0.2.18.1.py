@@ -4535,6 +4535,9 @@ DEFAULTS = {
     # Where the background music's fade IN from silence starts, in dB (the engine clamps it to -60..-20). -60 = the curve measured on the old BASS
     # engine (the first ~1.5 s of a 3 s fade are nearly inaudible); about -40 makes the music audible sooner and the climb gentler. Read at launch.
     "bgm_fade_in_floor_db": -60.0,
+    # Fallback pre-start: when a karaoke song's audio end could not be verified by the file scan, the background music starts fading in this many
+    # seconds before the END OF THE FILE (it was a fixed 3.2). A longer lead covers files with a quiet tail. Songs with a verified end are unaffected.
+    "bgm_fallback_prestart_sec": 5.0,
     "karaoke_allow_early_silence_trim": False, # advanced: may end karaoke early after sustained trailing silence
     "end_silence_trim_enabled": False,     # CDG/ZIP/MP4: optional early trim; off to preserve complete endings
     "end_silence_trim_threshold_sec": 2.5, # sustained low audio before intelligent karaoke early-end
@@ -43662,7 +43665,11 @@ class KaraokeApp(QWidget):
             # Mirrors manual stop behaviour: BG rises underneath karaoke rather than starting after silence.
             # Uses a one-shot flag so we only fire once per song regardless of how many 500ms ticks pass.
             time_remaining_ns = dur - pos
-            crossfade_window_ns = 3_200_000_000  # 3.2s — matches _karaoke_end_overlap_ms
+            try:
+                _lead_s = float(self.settings.get("bgm_fallback_prestart_sec", 5.0))
+            except Exception:
+                _lead_s = 5.0
+            crossfade_window_ns = int(max(2.0, min(8.0, _lead_s)) * 1_000_000_000)  # was a fixed 3.2s
 
             if (crossfade_enabled
                     and time_remaining_ns <= crossfade_window_ns
@@ -43677,7 +43684,7 @@ class KaraokeApp(QWidget):
                 try:
                     self._bg_resume_reason = "karaoke_end_overlap"
                     self.bg_music.fade_in(None, 3000, allow_during_karaoke=True)
-                    _diag("[CROSSFADE] BG pre-start fired (3s remaining)")
+                    _diag(f"[CROSSFADE] BG pre-start fired ({time_remaining_ns / 1e9:.1f}s remaining)")
                 except Exception as e:
                     _diag(f"[CROSSFADE] BG pre-start failed: {e}")
 
