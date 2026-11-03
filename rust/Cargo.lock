@@ -2207,6 +2207,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "singws-karaoke-proto"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "singws-cdg",
+]
+
+[[package]]
 name = "singws-logpack"
 version = "0.1.0"
 dependencies = [

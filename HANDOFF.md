@@ -2,6 +2,10 @@
 
 Updated 2026-11-01.
 
+## STATE 2026-11-02 (transport parity, branch work)
+
+Karaoke transport parity (offline): 67 scripted scenarios give IDENTICAL logs from the real Python `MpvKaraokeTransport` and the Rust protocol machine; `tools/mutate_karaoke_proto.py` ~190 mutants, all killed or documented equivalent. NOT compiled here: `singws-shell` (the worktree's vendored Signalsmith sources are missing, so its build fails in `singws-stretch`); `play_demo.rs` should still compile (new trait methods have defaults, `Event` is no longer `Copy`) but that is unverified. Details and Python oddities: docs/design/stage-e-no-python-host-spike-2.md, last section.
+
 ## STATE 2026-11-02 (newest; read first)
 
 **1.0.2.8 PUBLISHED 2026-11-01** (operator: "release to github"; tag v1.0.2.8, main `c1989d0` pushed, arm64 `c589d0ec...`, x86_64 `a5416039...`; downloads re-verified against docs/release.json; installed on the dev Mac (arm64, backup `SingWS-1.0.2.6-pre-1.0.2.8-20261101-192028.app`); Intel rehearsal folder `local-installs/intel-1.0.2.8`, whose `install_on_intel.sh` also sets overlap 3.0 and `bgm_fade_in_floor_db` -40). **FIRST INTEL SHOW ON 1.0.2.8 (2026-11-01 21:22 to 01:48, logs in ~/Downloads/singws-show-20261102-0218; ledger entry added, commit 67239ef, NOT pushed):** 44 songs (35 CDG, 6 MP4, 3 KaraFun), no traceback or error, transport drives karafun_end 3 and media_end 41 all agreed, start drive and all shadows clean, 55 of 56 ledger decisions have a clean show (only the KaraFun watchdog drive has none). The `-40 dB` fade-in floor was active (`[BG-ENGINE] fade-in start floor -40 dB`). The end-of-song guard fired 4 times (`voice kept its place`; worst case picture clock 20 s behind the song) and the operator confirmed by ear: **no blips, fade-in good**. The CDG seek guard never fired (no seek into a dead zone), still unproven. Memory 2.0 to 3.15 GB, flattening (+969 MB first 22 songs, +126 MB next 21). GUI stalls over 1 s only at launch (max 4.2 s). Song-end handler avg 315 ms, max 549 ms. Local main is ahead of origin by the ledger commit and this note.

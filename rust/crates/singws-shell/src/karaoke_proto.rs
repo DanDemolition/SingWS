@@ -3,8 +3,13 @@
 //! mpv (the "picture") keeps the song's clock; the Rust karaoke voice plays the sound and is slaved to that clock. At the start of a song and after
 //! a seek the voice plays first (its stretcher needs ~130 ms before sound comes out), and the picture plays as soon as the voice's clock moves.
 //! Time is passed in (`now`, seconds) so the machine is tested against fakes; `play_demo.rs` wires the real bridge and engine.
-//! Ported: `start`, `_voice_step`, `_voice_follow` (+ the `_measured_rate` of `rust_karaoke_voice.py`), `seek`, `pause`, `resume`, the fallbacks
-//! (`_drop_voice`), the started/ended events of `_poll`, and the resync log. Not ported: loop, fade_out, volume/EQ/master chain, key/tempo changes.
+//! Ported: `start`/`start_full`, `_voice_step`, `_voice_follow` (+ the `_measured_rate` of `rust_karaoke_voice.py`), `seek` (with the CDG dead-zone
+//! clamp), `pause`, `resume`, `stop`, the fallbacks (`_drop_voice`), the started / ended / visual_stalled events of `_poll`, loop, key and tempo
+//! (`set_modifiers`), volume, `fade_out`, the CDG visual offset, `is_paused`, `apply_audio_spec`, and the resync log.
+//! The timers of the Python transport (10 ms start sequence, the visual-timer poll, fade steps) are modelled as explicit timers on an integer
+//! microsecond clock so `tools/karaoke_transport_parity.py` can run the same scripted scenario through both and compare every command.
+//! `parity_python()` switches the two places where the demo deliberately differs (follow cadence, rate measured here instead of in the voice).
+//! Not ported: voice calls that raise (the Python `except` paths other than load), several fades at once, `query_times_ns`, `engine_at_end`.
 
 /// What the machine needs from the picture (mpv, through the video bridge).
 pub trait Picture {
@@ -18,6 +23,20 @@ pub trait Picture {
     fn seek_ms(&mut self, ms: i64);
     fn stop(&mut self);
     fn set_shadow_audio(&mut self, on: bool);
+    /// `loadSingWSMedia`: false = the picture failed to load.
+    fn load(&mut self, _source: &str, _audio: Option<&str>, _autoplay: bool, _semitones: i32, _tempo_percent: i32) -> bool {
+        true
+    }
+    fn set_volume(&mut self, _v: f64) {}
+    fn set_tempo_ratio(&mut self, _r: f64) {}
+    fn set_pitch_semitones(&mut self, _k: f64) {}
+    /// `setVideoOffsetMs`; false = this backend cannot apply it.
+    fn set_video_offset_ms(&mut self, _v: i32) -> bool {
+        false
+    }
+    fn is_seek_holding(&self) -> bool {
+        false
+    }
 }
 
 /// What the machine needs from the karaoke voice (the Rust engine).
@@ -36,6 +55,16 @@ pub trait Voice {
     fn duration(&self) -> f64 {
         0.0
     }
+    fn load(&mut self, _path: &str, _norm_gain: f64, _volume: f64) -> Result<(), String> {
+        Ok(())
+    }
+    fn set_key_semitones(&mut self, _k: f64) {}
+    fn set_tempo_percent(&mut self, _t: f64) {}
+    fn set_volume(&mut self, _v: f64) {}
+    fn slide_volume(&mut self, _v: f64, _ms: i64) {}
+    fn set_norm_gain(&mut self, _g: f64) {}
+    fn set_eq_gains(&mut self, _on: bool, _gains: &[f64]) {}
+    fn set_master_params(&mut self, _on: bool, _has_params: bool) {}
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -47,10 +76,36 @@ pub enum Phase {
     Running,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
     Started,
     Ended,
+    /// CDG: healthy audio but no picture at 5 s (video path, position ms); report-only.
+    VisualStalled(String, i64),
+    /// The `on_finished` of `fade_out` ran.
+    FadeFinished,
+}
+
+/// The arguments of `MpvKaraokeTransport.__init__` + `start()` that the machine needs.
+#[derive(Clone, Debug, Default)]
+pub struct StartArgs {
+    pub audio_path: String,
+    pub video_path: String,
+    /// "cdg" | "mp4" | anything else = audio only
+    pub mode: String,
+    pub start_seconds: f64,
+    /// The CDG's dead zones (`cdg_seek_guard.load_gap`); only used in cdg mode.
+    pub zones: Vec<(f64, f64)>,
+}
+
+/// `apply_audio_spec`'s dict.
+#[derive(Clone, Debug, Default)]
+pub struct AudioSpec {
+    pub normalize_gain_db: f64,
+    pub eq_enabled: bool,
+    pub eq_gains_db: Vec<f64>,
+    pub master_enabled: bool,
+    pub has_master_params: bool,
 }
 
 /// The pace the picture's clock really runs at over the last ~0.6 s (mpv applies a speed change a little late); `rust_karaoke_voice._measured_rate`.
@@ -82,28 +137,71 @@ impl RateMeter {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TimerKind {
+    Voice,
+    Follow,
+    Poll,
+    FadeStep,
+    FadeEnd,
+}
+
+struct Timer {
+    kind: TimerKind,
+    due: i64,
+    interval: i64,
+    repeat: bool,
+    seq: u64,
+}
+
+struct Fade {
+    start_volume: f64,
+    step: i64,
+    steps: i64,
+    on_finished: bool,
+}
+
+fn us(now: f64) -> i64 {
+    (now * 1e6).round() as i64
+}
+
 pub struct Protocol<P: Picture, V: Voice> {
     pub picture: P,
     pub voice: Option<V>,
     pub phase: Phase,
     pub log: Vec<String>,
+    /// Called with every log line (and every `print:` line) as it happens, so a harness can interleave them with the calls.
+    pub on_log: Option<Box<dyn FnMut(&str)>>,
     /// Set when the voice was given up on (the song then plays with mpv's own audio): the reason.
     pub dropped: Option<String>,
     /// A CDG's graphics-free stretches (`singws_cdg::dead_zones`): a seek into it moves back to the last frame before it, for picture and voice alike.
     pub seek_gap: Vec<(f64, f64)>,
+    /// Report the picture clock to the voice inside the poll, as the Python transport does (false: its own 30 ms timer, as the demo does).
+    pub follow_in_poll: bool,
+    /// Measure the pace of the picture clock here (the demo) instead of passing the commanded rate (the Python transport; the voice measures).
+    pub measure_rate: bool,
+    audio_path: String,
+    video_path: String,
+    cdg: bool,
+    volume: f64,
+    voice_norm: f64,
+    pitch: f64,
     tempo_ratio: f64,
+    looping: Option<(f64, f64)>,
     user_paused: bool,
     stopped: bool,
     started_emitted: bool,
     ended_emitted: bool,
+    visual_stall_emitted: bool,
+    video_offset_warned: bool,
     deadline: f64,
     hard_deadline: f64,
     loaded_at: Option<f64>,
     origin: f64,
-    last_follow: f64,
-    follow_every: f64,
-    last_poll: f64,
-    poll_every: f64,
+    poll_interval_us: i64,
+    timers: Vec<Timer>,
+    seq: u64,
+    fade: Option<Fade>,
     meter: RateMeter,
     resync_seen: Option<(u32, u32)>,
     playing_polls_without_visual: u32,
@@ -116,66 +214,228 @@ impl<P: Picture, V: Voice> Protocol<P, V> {
             voice,
             phase: Phase::Idle,
             log: Vec::new(),
+            on_log: None,
             dropped: None,
             seek_gap: Vec::new(),
+            follow_in_poll: false,
+            measure_rate: true,
+            audio_path: String::new(),
+            video_path: String::new(),
+            cdg: false,
+            volume: 1.0,
+            voice_norm: 1.0,
+            pitch: 0.0,
             tempo_ratio: 1.0,
+            looping: None,
             user_paused: false,
             stopped: true,
             started_emitted: false,
             ended_emitted: false,
+            visual_stall_emitted: false,
+            video_offset_warned: false,
             deadline: 0.0,
             hard_deadline: 0.0,
             loaded_at: None,
             origin: 0.0,
-            last_follow: f64::NEG_INFINITY,
-            follow_every: 0.030,
-            last_poll: f64::NEG_INFINITY,
-            poll_every: 0.050,
+            poll_interval_us: 50_000,
+            timers: Vec::new(),
+            seq: 0,
+            fade: None,
             meter: RateMeter::default(),
             resync_seen: None,
             playing_polls_without_visual: 0,
         }
     }
 
+    /// The configuration of `MpvKaraokeTransport` itself: follow inside the poll, commanded rate to the voice.
+    pub fn parity_python(mut self) -> Self {
+        self.follow_in_poll = true;
+        self.measure_rate = false;
+        self
+    }
+
     pub fn user_paused(&self) -> bool {
         self.user_paused
     }
+
+    fn say(&mut self, line: String) {
+        if let Some(f) = self.on_log.as_mut() {
+            f(&line);
+        }
+        self.log.push(line);
+    }
+
+    // ---- timers (QTimer) ------------------------------------------------------------------------------------------------------------
+
+    fn timer_start(&mut self, kind: TimerKind, now: f64, interval: i64, repeat: bool) {
+        self.timers.retain(|t| t.kind != kind);
+        self.seq += 1;
+        self.timers.push(Timer { kind, due: us(now) + interval, interval, repeat, seq: self.seq });
+    }
+
+    fn timer_stop(&mut self, kind: TimerKind) {
+        self.timers.retain(|t| t.kind != kind);
+    }
+
+    fn timer_active(&self, kind: TimerKind) -> bool {
+        self.timers.iter().any(|t| t.kind == kind)
+    }
+
+    /// When the next timer is due (microseconds on the caller's clock), if any is running.
+    pub fn next_due_us(&self) -> Option<i64> {
+        self.timers.iter().map(|t| t.due).min()
+    }
+
+    /// Fire the earliest timer that is due by `until_us` (ties: shorter interval first, then the older timer; Qt leaves that order undefined).
+    /// Returns None when nothing is due. The handler sees the timer's own due time as `now`.
+    pub fn fire_next(&mut self, until_us: i64) -> Option<Vec<Event>> {
+        let idx = (0..self.timers.len()).filter(|&i| self.timers[i].due <= until_us).min_by_key(|&i| (self.timers[i].due, self.timers[i].interval, self.timers[i].seq))?;
+        let (kind, due, interval, repeat) = {
+            let t = &self.timers[idx];
+            (t.kind, t.due, t.interval, t.repeat)
+        };
+        if repeat {
+            self.timers[idx].due = due + interval;
+        } else {
+            self.timers.remove(idx);
+        }
+        let now = due as f64 / 1e6;
+        let mut events = Vec::new();
+        match kind {
+            TimerKind::Voice => self.voice_step(now),
+            TimerKind::Follow => self.follow(now),
+            TimerKind::Poll => self.poll(now, &mut events),
+            TimerKind::FadeStep => self.fade_step(&mut events),
+            TimerKind::FadeEnd => events.push(Event::FadeFinished),
+        }
+        Some(events)
+    }
+
+    /// Call every ~10 ms: fires every timer that is due.
+    pub fn tick(&mut self, now: f64) -> Vec<Event> {
+        let mut events = Vec::new();
+        let until = us(now);
+        while let Some(ev) = self.fire_next(until) {
+            events.extend(ev);
+        }
+        events
+    }
+
+    // ---- start ----------------------------------------------------------------------------------------------------------------------
 
     /// Both are loaded and paused (the voice from `Voice` construction, the picture from the bridge load). Mirrors the tail of `start()`.
     pub fn start(&mut self, now: f64, start_seconds: f64) {
         let start_seconds = singws_cdg::clamp_seek(&self.seek_gap, start_seconds);
         self.user_paused = false;
         if self.voice.is_some() {
-            self.phase = Phase::Starting;
-            self.deadline = now + 4.0;
-            self.hard_deadline = now + 20.0;
-            self.loaded_at = None;
+            self.begin_voice_start(now);
         } else {
             self.picture.play(); // no voice: mpv plays the sound itself
         }
+        self.finish_start(now, start_seconds);
+    }
+
+    fn begin_voice_start(&mut self, now: f64) {
+        self.phase = Phase::Starting;
+        self.deadline = now + 4.0;
+        self.hard_deadline = now + 20.0;
+        self.loaded_at = None;
+        self.timer_start(TimerKind::Voice, now, 10_000, true);
+    }
+
+    fn finish_start(&mut self, now: f64, start_seconds: f64) {
         if start_seconds > 0.0 {
             self.picture.seek_ms((start_seconds * 1000.0) as i64);
         }
+        self.picture.set_volume(self.volume);
         self.stopped = false;
         self.started_emitted = false;
         self.ended_emitted = false;
         self.playing_polls_without_visual = 0;
+        self.visual_stall_emitted = false;
+        if !self.follow_in_poll {
+            self.timer_start(TimerKind::Follow, now, 30_000, true);
+        }
+        let iv = self.poll_interval_us;
+        self.timer_start(TimerKind::Poll, now, iv, true);
+    }
+
+    /// `MpvKaraokeTransport.start`: loads the voice (paused) and the picture itself. Err = the Python `RuntimeError`.
+    pub fn start_full(&mut self, now: f64, a: &StartArgs) -> Result<(), String> {
+        self.audio_path = a.audio_path.clone();
+        self.video_path = a.video_path.clone();
+        let mode = a.mode.to_lowercase();
+        self.cdg = mode == "cdg";
+        let source = if mode == "cdg" || mode == "mp4" { a.video_path.as_str() } else { a.audio_path.as_str() };
+        if source.is_empty() {
+            return Err("mpv source path is empty".into());
+        }
+        let audio = if self.cdg { Some(a.audio_path.as_str()) } else { None };
+        self.seek_gap = if self.cdg { a.zones.clone() } else { Vec::new() };
+        let start_seconds = singws_cdg::clamp_seek(&self.seek_gap, a.start_seconds);
+        let mut voice_on = false;
+        if self.voice.is_some() {
+            voice_on = self.voice_load(start_seconds);
+        }
+        self.user_paused = false;
+        let ok = self.picture.load(source, audio, !voice_on, self.pitch.round_ties_even() as i32, (self.tempo_ratio * 100.0).round_ties_even() as i32);
+        if !ok {
+            if voice_on {
+                self.drop_voice("the picture failed to load");
+            }
+            return Err("mpv media load failed".into());
+        }
+        if voice_on {
+            self.begin_voice_start(now);
+        }
+        self.finish_start(now, start_seconds);
+        Ok(())
+    }
+
+    fn voice_load(&mut self, start_seconds: f64) -> bool {
+        let path = if self.audio_path.is_empty() { self.video_path.clone() } else { self.audio_path.clone() };
+        let (norm, vol, key, tempo) = (self.voice_norm, self.volume, self.pitch, self.tempo_ratio * 100.0);
+        let r = {
+            let v = self.voice.as_mut().unwrap();
+            match v.load(&path, norm, vol) {
+                Ok(()) => {
+                    v.set_key_semitones(key);
+                    v.set_tempo_percent(tempo);
+                    if start_seconds > 0.0 {
+                        v.seek(start_seconds);
+                    }
+                    Ok(())
+                }
+                Err(e) => Err(e),
+            }
+        };
+        match r {
+            Ok(()) => true,
+            Err(e) => {
+                self.drop_voice(&format!("could not open '{path}': {e}"));
+                false
+            }
+        }
     }
 
     /// Give the song back to mpv's own audio: never leave a show without sound.
     fn drop_voice(&mut self, reason: &str) {
-        self.log.push(format!("[KARAOKE-RUST] falling back to mpv audio for this song: {reason}"));
-        if let Some(v) = self.voice.as_mut() {
+        let voice = self.voice.take();
+        self.phase = Phase::Idle;
+        self.timer_stop(TimerKind::Voice);
+        self.say(format!("[KARAOKE-RUST] falling back to mpv audio for this song: {reason}"));
+        if let Some(mut v) = voice {
             v.stop();
         }
-        self.voice = None;
-        self.phase = Phase::Idle;
         self.dropped = Some(reason.to_string());
         self.picture.set_shadow_audio(false);
     }
 
     pub fn stop(&mut self) {
         self.stopped = true;
+        self.timer_stop(TimerKind::Poll);
+        self.timer_stop(TimerKind::Follow);
+        self.timer_stop(TimerKind::Voice);
         self.phase = Phase::Idle;
         if let Some(v) = self.voice.as_mut() {
             v.stop();
@@ -198,7 +458,8 @@ impl<P: Picture, V: Voice> Protocol<P, V> {
             self.phase = Phase::Seeking;
             self.deadline = now + 3.0;
             self.hard_deadline = now + 10.0;
-            self.loaded_at = None;
+            // `loaded_at` is deliberately NOT reset: the Python transport keeps the value from the start of the song.
+            self.timer_start(TimerKind::Voice, now, 10_000, true);
             return;
         }
         self.picture.seek_ms((target * 1000.0) as i64);
@@ -225,13 +486,134 @@ impl<P: Picture, V: Voice> Protocol<P, V> {
         self.picture.play();
     }
 
+    /// A coordinated seek pauses the audible engine while the video followers catch up; the start sequence is not a user-visible pause either.
+    pub fn is_paused(&self) -> bool {
+        if self.picture.is_seek_holding() {
+            return false;
+        }
+        if self.voice.is_some() && matches!(self.phase, Phase::Starting | Phase::VoiceWait | Phase::Seeking) && !self.user_paused {
+            return false;
+        }
+        !self.picture.is_playing()
+    }
+
     pub fn position_seconds(&self) -> f64 {
         (self.picture.position_ms() as f64 / 1000.0).max(0.0)
     }
 
+    // ---- modifiers, level, offset -----------------------------------------------------------------------------------------------------
+
+    /// `set_modifiers`: tempo goes to mpv (its clock paces the picture) and, with a voice, key and tempo go to the voice; without one mpv also takes the key.
+    pub fn set_modifiers(&mut self, tempo_ratio: f64, semitones: f64) {
+        let ratio = if tempo_ratio == 0.0 { 1.0 } else { tempo_ratio };
+        self.tempo_ratio = ratio.clamp(0.5, 2.0);
+        self.pitch = semitones;
+        self.picture.set_tempo_ratio(self.tempo_ratio);
+        let (k, t) = (self.pitch, self.tempo_ratio * 100.0);
+        if let Some(v) = self.voice.as_mut() {
+            v.set_key_semitones(k);
+            v.set_tempo_percent(t);
+        } else {
+            self.picture.set_pitch_semitones(k);
+        }
+    }
+
+    pub fn set_volume(&mut self, value: f64) {
+        self.volume = value.clamp(0.0, 2.0);
+        self.picture.set_volume(self.volume);
+        let vol = self.volume;
+        if let Some(v) = self.voice.as_mut() {
+            v.set_volume(vol);
+        }
+    }
+
+    /// The host's audio chain for the voice (normalization, karaoke EQ, master chain); only with a voice.
+    pub fn apply_audio_spec(&mut self, spec: &AudioSpec) {
+        let Some(v) = self.voice.as_mut() else { return };
+        self.voice_norm = 10f64.powf(spec.normalize_gain_db / 20.0);
+        v.set_norm_gain(self.voice_norm);
+        v.set_eq_gains(spec.eq_enabled, &spec.eq_gains_db);
+        v.set_master_params(spec.master_enabled, spec.has_master_params);
+    }
+
+    pub fn set_loop(&mut self, start_seconds: f64, end_seconds: f64) {
+        let start = start_seconds.max(0.0);
+        let end = end_seconds.max(start);
+        self.looping = if end > start { Some((start, end)) } else { None };
+    }
+
+    pub fn set_visual_timer_interval_ms(&mut self, now: f64, value: i64) {
+        let v = if value == 0 { 50 } else { value };
+        self.poll_interval_us = v.clamp(16, 250) * 1000;
+        if self.timer_active(TimerKind::Poll) {
+            let iv = self.poll_interval_us;
+            self.timer_start(TimerKind::Poll, now, iv, true); // Qt restarts a running timer when its interval changes
+        }
+    }
+
+    /// The CDG visual-timing calibration: forwarded when the backend can apply it, otherwise said once.
+    pub fn set_video_offset_ms(&mut self, value: i32) {
+        if self.picture.set_video_offset_ms(value) {
+            return;
+        }
+        if value != 0 && !self.video_offset_warned {
+            self.video_offset_warned = true;
+            self.say(format!(
+                "print: [MPV] WARNING this backend cannot apply the {value:+}ms CDG visual offset; lyrics will run early/late and the Display tab fine tuning has no effect"
+            ));
+        }
+    }
+
+    /// `fade_out`: with a voice one slide inside the engine, otherwise 40 ms volume steps from here. `on_finished` shows up as `Event::FadeFinished`.
+    pub fn fade_out(&mut self, now: f64, duration_ms: i64, on_finished: bool) -> bool {
+        let ms = duration_ms.max(0);
+        if ms > 0 {
+            if let Some(v) = self.voice.as_mut() {
+                v.slide_volume(0.0, ms);
+                self.volume = 0.0;
+                if on_finished {
+                    self.timer_start(TimerKind::FadeEnd, now, ms * 1000, false);
+                }
+                return true;
+            }
+        }
+        if ms <= 0 {
+            self.set_volume(0.0);
+            if on_finished {
+                self.timer_start(TimerKind::FadeEnd, now, 0, false);
+            }
+            return true;
+        }
+        let steps = (ms / 40).max(1);
+        self.fade = Some(Fade { start_volume: self.volume, step: 0, steps, on_finished });
+        self.timer_start(TimerKind::FadeStep, now, (ms / steps).max(10) * 1000, true);
+        true
+    }
+
+    fn fade_step(&mut self, events: &mut Vec<Event>) {
+        let Some(f) = self.fade.as_mut() else { return };
+        f.step += 1;
+        let remaining = (1.0 - f.step as f64 / f.steps as f64).max(0.0);
+        let (level, done, cb) = (f.start_volume * remaining, f.step >= f.steps, f.on_finished);
+        self.set_volume(level);
+        if done {
+            self.timer_stop(TimerKind::FadeStep);
+            self.fade = None;
+            if cb {
+                events.push(Event::FadeFinished);
+            }
+        }
+    }
+
+    // ---- start sequence, follow, poll -------------------------------------------------------------------------------------------------
+
     /// `_voice_step`: start the picture and the sound together (beginning of a song and after a seek).
     fn voice_step(&mut self, now: f64) {
-        if self.stopped || self.user_paused || !matches!(self.phase, Phase::Starting | Phase::Seeking | Phase::VoiceWait) {
+        if self.voice.is_none() || self.stopped || matches!(self.phase, Phase::Idle | Phase::Running) {
+            self.timer_stop(TimerKind::Voice);
+            return;
+        }
+        if self.user_paused {
             return;
         }
         match self.phase {
@@ -260,6 +642,7 @@ impl<P: Picture, V: Voice> Protocol<P, V> {
                 if moved || now > self.deadline {
                     self.picture.play();
                     self.phase = Phase::Running;
+                    self.timer_stop(TimerKind::Voice);
                 }
             }
             _ => {}
@@ -274,7 +657,7 @@ impl<P: Picture, V: Voice> Protocol<P, V> {
         let playing = self.picture.is_playing();
         let pos = self.position_seconds();
         let commanded = if playing { self.tempo_ratio } else { 0.0 };
-        let rate = self.meter.measure(now, pos, commanded);
+        let rate = if self.measure_rate { self.meter.measure(now, pos, commanded) } else { commanded };
         self.voice.as_mut().unwrap().slave_to(pos, rate);
         self.log_resyncs();
     }
@@ -288,29 +671,27 @@ impl<P: Picture, V: Voice> Protocol<P, V> {
         };
         let song = v.duration();
         if resyncs != seen.0 && kind == 0 {
-            self.log.push(format!("[KARAOKE-RUST] voice re-synced to the picture clock: song {here:.2}s -> {target:.2}s (picture clock {master:.2}s, song length {song:.1}s)"));
+            self.say(format!("[KARAOKE-RUST] voice re-synced to the picture clock: song {here:.2}s -> {target:.2}s (picture clock {master:.2}s, song length {song:.1}s)"));
         } else if guarded != seen.1 && (kind == 1 || kind == 2) {
             let why = if kind == 1 { "close to the end of the song" } else { "the picture clock jumped and did not stay" };
-            self.log.push(format!("[KARAOKE-RUST] voice kept its place ({why}): song {here:.2}s, picture clock {master:.2}s, song length {song:.1}s"));
+            self.say(format!("[KARAOKE-RUST] voice kept its place ({why}): song {here:.2}s, picture clock {master:.2}s, song length {song:.1}s"));
         }
         self.resync_seen = Some((resyncs, guarded));
     }
 
-    /// Call every ~10 ms. Runs the start sequence each call, the follow at ~30 ms and the poll (started / ended) at ~50 ms.
-    pub fn tick(&mut self, now: f64) -> Vec<Event> {
-        let mut events = Vec::new();
+    /// `_poll`: follow, loop, started / visual_stalled / ended.
+    fn poll(&mut self, now: f64, events: &mut Vec<Event>) {
         if self.stopped {
-            return events;
+            return;
         }
-        self.voice_step(now);
-        if now - self.last_follow >= self.follow_every - 1e-6 {
-            self.last_follow = now;
+        if self.follow_in_poll {
             self.follow(now);
         }
-        if now - self.last_poll < self.poll_every - 1e-6 {
-            return events;
+        if let Some((start, end)) = self.looping {
+            if self.position_seconds() >= end {
+                self.seek(now, start);
+            }
         }
-        self.last_poll = now;
         let ready = self.picture.visuals_ready();
         let playing = self.picture.is_playing() && self.picture.position_ms() >= 40;
         if !self.started_emitted {
@@ -320,21 +701,27 @@ impl<P: Picture, V: Voice> Protocol<P, V> {
                 self.playing_polls_without_visual = 0;
             }
             // a late native drawable must not leave Play locked in "starting": commit after one second of sound without a picture
-            if playing && (ready || self.playing_polls_without_visual >= 20) {
+            let interval_ms = (self.poll_interval_us / 1000).max(1) as f64;
+            let limit = ((1000.0 / interval_ms).round_ties_even() as u32).max(4);
+            if playing && (ready || self.playing_polls_without_visual >= limit) {
                 self.started_emitted = true;
                 events.push(Event::Started);
             }
         }
+        // healthy audio but a dead CDG picture: report only, never reload the shared core (that would interrupt the singer's audio)
+        if self.cdg && playing && !ready && !self.visual_stall_emitted && self.picture.position_ms() >= 5000 {
+            self.visual_stall_emitted = true;
+            events.push(Event::VisualStalled(self.video_path.clone(), self.picture.position_ms()));
+        }
         if !self.ended_emitted && self.picture.at_end() {
             self.ended_emitted = true;
-            self.stopped = true;
+            self.timer_stop(TimerKind::Poll);
+            self.timer_stop(TimerKind::Voice);
             if let Some(v) = self.voice.as_mut() {
                 v.stop();
             }
-            self.phase = Phase::Idle;
             events.push(Event::Ended);
         }
-        events
     }
 }
 
