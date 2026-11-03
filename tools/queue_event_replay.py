@@ -400,6 +400,7 @@ class World:
             "unmatched_remote_ids": sorted(int(x) for x in getattr(app, "_unmatched_remote_request_ids", set()) or set()),
             "waitlist": waitlist, "removed_tonight": removed_tonight, "handled_waitlist_ids": sorted(app._waiting_for_add_handled_ids),
             "tombstones": tomb, "removed_ids": sorted(int(x) for x in app._remote_removed_request_ids),
+            "terminal_titles": {str(k): str(v) for k, v in sorted(object.__getattribute__(app, "__dict__").get("_remote_terminal_titles", {}).items())},
             "deferred_remote_adds": len(app._deferred_remote_adds), "lifecycle": lifecycle,
         }
 
@@ -672,6 +673,43 @@ def adversarial_cases() -> dict[str, list[dict]]:
         "duet_separators_and_odd_names": [cfg, {"op": "add_song", "singer": "Snow/Joe", "title": "1"}, {"op": "add_song", "singer": "Ada, Bob", "title": "2"}, {"op": "add_song", "singer": "Flo &", "title": "3"},
                                           {"op": "add_song", "singer": "Sandy and Mandy", "title": "4"}, {"op": "add_song", "singer": "Ada /W Bob", "title": "5"}, {"op": "add_song", "singer": "Andrea", "title": "6"},
                                           {"op": "add_song", "singer": "Ada & Bob & Cy", "title": "7"}],
+        # --- slice A: rows the server itself reports as terminal (completed / removed / sung / removed_at / completed_at)
+        "server_terminal_removes_the_queued_copy": [cfg, {"op": "remote_arrive", "requests": [a1, a2, b1]}, {"op": "remote_arrive", "requests": [dict(a1, state="completed"), a2, b1]},
+                                                    {"op": "remote_arrive", "requests": [dict(b1, state="removed")]}, {"op": "remote_arrive", "requests": [dict(a2, state="sung")]}],
+        "server_terminal_by_timestamp_only": [cfg, {"op": "remote_arrive", "requests": [a1, a2, b1, _req(1004, "Cy", "Delta"), _req(1005, "Dee", "Echo")]},
+                                              {"op": "remote_arrive", "requests": [dict(a1, removed_at=0), dict(a2, removed_at=5), dict(b1, completed_at="7.9"), dict(_req(1004, "Cy", "Delta"), removed_at="abc"),
+                                                                                   dict(_req(1005, "Dee", "Echo"), completed_at=-3)]},
+                                              {"op": "remote_arrive", "requests": [dict(a1, removed_at=-2), dict(_req(1004, "Cy", "Delta"), removed_at=0.5)]}],
+        "skipped_state_is_not_server_terminal": [cfg, {"op": "remote_arrive", "requests": [a1, b1]}, {"op": "remote_arrive", "requests": [dict(a1, state="skipped"), dict(b1, state="skipped")]}],
+        "stale_pending_row_after_server_terminal_is_ignored": [cfg, {"op": "remote_arrive", "requests": [a1, b1]}, {"op": "remote_arrive", "requests": [dict(a1, state="completed")]},
+                                                               {"op": "remote_arrive", "requests": [a1, b1]}, {"op": "remote_arrive", "requests": [dict(a1, title="Alpha (Live)")]}],
+        "server_terminal_id_reused_for_a_new_song": [cfg, {"op": "remote_arrive", "requests": [a1, b1]}, {"op": "remote_arrive", "requests": [dict(a1, state="removed")]},
+                                                     {"op": "remote_arrive", "requests": [_req(1001, "Zed", "Different", "Other")]}, {"op": "remote_arrive", "requests": [dict(_req(1001, "Zed", "Different", "Other"), state="completed")]},
+                                                     {"op": "remote_arrive", "requests": [a1]}],
+        "server_terminal_without_a_title_remembers_nothing": [cfg, {"op": "remote_arrive", "requests": [a1]}, {"op": "remote_arrive", "requests": [{"request_id": 1001, "state": "removed"}]},
+                                                              {"op": "remote_arrive", "requests": [_req(1001, "Zed", "Different", "Other")]}],
+        "server_terminal_does_not_touch_the_tombstone": [cfg, {"op": "remote_arrive", "requests": [a1, b1]}, {"op": "remove_song", "entry": "R1001"},
+                                                         {"op": "remote_arrive", "requests": [dict(a1, state="completed")]}, {"op": "remote_arrive", "requests": [a1]},
+                                                         {"op": "remote_arrive", "requests": [_req(1001, "Zed", "Different", "Other")]}],
+        "server_terminal_memory_is_lost_on_restart": [cfg, {"op": "remote_arrive", "requests": [a1, b1]}, {"op": "remote_arrive", "requests": [dict(a1, state="completed")]},
+                                                      {"op": "restart"}, {"op": "remote_arrive", "requests": [a1, b1]}],
+        "server_terminal_empties_slots_in_rotation_mode": [cfg, {"op": "remote_arrive", "requests": [a1, b1, _req(1004, "Cy", "Delta")]}, {"op": "remove_song", "entry": "R1003"}, {"op": "tick", "seconds": 150},
+                                                           {"op": "remote_arrive", "requests": [dict(_req(9999, "Nobody", "Nothing"), state="completed")]}, {"op": "tick", "seconds": 100},
+                                                           {"op": "remote_arrive", "requests": [dict(a1, state="completed")]}, {"op": "tick", "seconds": 100}, {"op": "remote_arrive", "requests": [b1]}],
+        "server_terminal_in_classic_mode_keeps_the_row": [dict(cfg, queue_mode="classic"), {"op": "remote_arrive", "requests": [a1, b1, a2]}, {"op": "remote_arrive", "requests": [dict(b1, state="removed"), dict(a1, state="sung")]},
+                                                          {"op": "tick", "seconds": 400}, {"op": "remote_arrive", "requests": [dict(a2, completed_at=3)]}],
+        "server_terminal_copies_of_one_id_all_go": [cfg, {"op": "remote_arrive", "requests": [a1, b1]}, {"op": "remote_arrive", "requests": [dict(a1, state="completed"), dict(a1, state="removed"), dict(a1)]}],
+        "server_terminal_for_unknown_or_invalid_ids": [cfg, {"op": "remote_arrive", "requests": [dict(a1, state="completed"), dict(b1, request_id=0, state="completed"), dict(b1, request_id=-4, state="removed"), b1]},
+                                                       {"op": "remote_arrive", "requests": [a1]}],
+        "server_terminal_on_the_waitlist": [dict(cfg, waitlist=True), {"op": "remote_arrive", "requests": [_waiting(1002, "Ada", "Bravo"), _waiting(1003, "Bob", "Charlie")]},
+                                            {"op": "remote_arrive", "requests": [dict(_waiting(1002, "Ada", "Bravo"), state="removed"), _waiting(1003, "Bob", "Charlie")]},
+                                            {"op": "waitlist_add", "request_id": 1003}, {"op": "remote_arrive", "requests": [dict(b1, state="completed")]}, {"op": "remote_arrive", "requests": [_waiting(1002, "Ada", "Bravo")]}],
+        "server_terminal_then_accepting_off": [cfg, {"op": "remote_arrive", "requests": [a1, b1]}, {"op": "config", "requests_accepting": False}, {"op": "remote_arrive", "requests": [dict(a1, state="completed"), a2]},
+                                               {"op": "config", "requests_accepting": True}, {"op": "remote_arrive", "requests": [a2]}],
+        "attention_entry_of_a_handled_id_is_not_relisted": [dict(cfg, limit_pending_max=2, waitlist=True), {"op": "remote_arrive", "requests": [a1, a2]},
+                                                            {"op": "remote_arrive", "requests": [_req(1010, "Bob & Ada", "Late")]}, {"op": "waitlist_remove", "request_id": 1010},
+                                                            {"op": "remote_arrive", "requests": [_req(1010, "Bob & Ada", "Late")]}, {"op": "remote_arrive", "requests": [a1]},
+                                                            {"op": "waitlist_restore", "request_id": 1010}, {"op": "remote_arrive", "requests": [a1]}],
         "accepting_off_blocks_new_arrivals": [cfg, {"op": "config", "requests_accepting": False}, {"op": "remote_arrive", "requests": [a1]},
                                               {"op": "config", "requests_accepting": True}, {"op": "remote_arrive", "requests": [a1]}],
     }
@@ -722,6 +760,7 @@ def generate_stream(seed: int, length: int = 40, profile: str = "full") -> list[
             choices += ["wl_restore"]
         choices += ["restart", "stale_ref"]
         if profile != "core":  # waitlist pressure: re-lists in other shapes, toggling the setting, stale ids, id reuse
+            choices += ["term", "term", "term_stale", "term_reuse"]
             choices += ["lock", "lock", "lock", "wl_relist", "wl_relist", "wl_as_pending", "wl_flip", "wl_stale", "wl_reuse", "wl_flags", "wl_add_hot", "wl_both", "wl_both"]
             if snap["waitlist"]:
                 choices += ["wl_add_hot"] * 2
@@ -791,6 +830,18 @@ def generate_stream(seed: int, length: int = 40, profile: str = "full") -> list[
             emit({"op": "remote_arrive", "requests": [dict(r, state="waiting", pending_reason="rotation_full", **rng.choice([{"sent": True}, {"delivered": 1}, {"added_at": 7}, {}]))]})  # lifecycle state outranks transport flags
         elif pick == "wl_add_hot" and snap["waitlist"]:
             emit({"op": "waitlist_add", "request_id": int(rng.choice(sorted(snap["waitlist"])))})
+        elif pick == "term" and arrived:
+            r = rng.choice(arrived)
+            how = rng.choice([{"state": "completed"}, {"state": "removed"}, {"state": "sung"}, {"removed_at": 9}, {"completed_at": 9}, {"removed_at": 0}, {"state": "skipped"}])
+            batch = [dict(r, **how)] + ([dict(rng.choice(arrived))] if rng.random() < 0.4 else [])
+            emit({"op": "remote_arrive", "requests": batch})
+        elif pick == "term_stale" and arrived:
+            r = rng.choice(arrived)
+            emit({"op": "remote_arrive", "requests": [r]})
+        elif pick == "term_reuse" and arrived:
+            r = rng.choice(arrived)
+            emit({"op": "remote_arrive", "requests": [dict(r, state=rng.choice(["completed", "removed"]))]})
+            emit({"op": "remote_arrive", "requests": [dict(r, title=rng.choice(TITLES) + "Z", artist="Other")]})
         elif pick == "restart":
             emit({"op": "restart"})
         elif pick == "stale_ref":
