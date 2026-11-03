@@ -434,7 +434,8 @@ def run(scenario):
             end_ms = T0_MS + int(scenario["run_ms"])
             n = 1
             while T0_MS + 500 * n <= end_ms:
-                world.schedule(500 * n, "tick", {"ev": "tick", "a": {}})
+                if not any(a * 1000 <= 500 * n < b * 1000 for a, b in scenario.get("tick_skips", [])):
+                    world.schedule(500 * n, "tick", {"ev": "tick", "a": {}})      # a late/skipped tick = a GUI stall
                 n += 1
 
             while world.heap:
@@ -619,6 +620,15 @@ def scripted():
     out.append(scen("cdg_visual_low_confidence", [start(0, "cdg", 200.0, dict(arm_novis, cached={LIB: {"duration": 200.0, "audio_end": 193.0}, "/t/x.cdg": {"visual_end": 190.0, "visual_confidence": 0.5}}),
                                           library_path=LIB, duration_hint=200.0)], 215))
     # --- unverified audio end (fallback pre-start): quiet tail, file duration, settings
+    sc_ = scen("late_ticks_over_overlap_window", [start(0, "cdg", 200.0, arm_ok, library_path=LIB, duration_hint=200.0)], 215)
+    sc_["tick_skips"] = [[188, 196]]
+    out.append(sc_)
+    sc_ = scen("late_ticks_miss_fallback_prestart", [start(0, "cdg", 200.0, {"scan_probe": "raise", "scan_trailing": "raise"}, duration_hint=200.0)], 215)
+    sc_["tick_skips"] = [[194, 199.9]]
+    out.append(sc_)
+    sc_ = scen("late_ticks_around_end", [start(0, "cdg", 200.0, arm_ok, library_path=LIB, duration_hint=200.0)], 215)
+    sc_["tick_skips"] = [[196, 205]]
+    out.append(sc_)
     out.append(scen("fallback_cdg", [start(0, "cdg", 200.0, {"scan_probe": "raise", "scan_trailing": "raise"}, duration_hint=200.0)], 215))
     for lead in (0.5, 2.0, 5.0, 8.0, 12.0):
         out.append(scen(f"fallback_prestart_{lead}", [start(0, "mp4", 120.0, {"scan_probe": "raise", "scan_trailing": "raise"}, duration_hint=120.0, audio_path="/t/y.mp4")], 130,
@@ -684,6 +694,11 @@ def scripted():
     out.append(scen("stop_during_overlap", [start(0, "cdg", 200.0, {"scan_probe": "raise", "scan_trailing": "raise"}, duration_hint=200.0), at(196, "eos"), at(196.5, "manual_stop")], 215))
     out.append(scen("eos_while_stop_in_progress", [start(0, "cdg", 60.0, {}, duration_hint=60.0), at(59, "eos_during_stop")], 70))
     out.append(scen("duplicate_eos", [start(0, "cdg", 60.0, {}, duration_hint=60.0), at(58, "eos"), at(58.1, "eos")], 70))
+    out.append(scen("cleanup_skipped_stop_in_progress_guard_fires", [start(0, "cdg", 60.0, {}, duration_hint=60.0), at(30, "eos"), at(30.5, "set", attrs={"_stop_in_progress": True}),
+                                                                    at(40, "set", attrs={"_stop_in_progress": False}), at(41, "eos")], 90))
+    out.append(scen("auto_advance_stale_generation", [start(0, "cdg", 60.0, {}, duration_hint=60.0), at(58, "eos"), at(58.2, "set", attrs={"_confirmed_singer_start_generation": 1})], 70, karaoke_auto_advance=True))
+    out.append(scen("auto_advance_yields_to_active_command", [start(0, "cdg", 60.0, {}, duration_hint=60.0), at(58, "eos"), at(58.2, "set", attrs={"_next_in_progress": True})], 70, karaoke_auto_advance=True))
+    out.append(scen("auto_advance_yields_to_pending_start", [start(0, "cdg", 60.0, {}, duration_hint=60.0), at(58, "eos"), at(58.2, "set", attrs={"_pending_play_start_token": 5})], 70, karaoke_auto_advance=True))
     out.append(scen("eos_error_trigger", [start(0, "cdg", 60.0, {}, duration_hint=60.0), at(58, "eos", trigger="error")], 70))
     out.append(scen("eos_with_bg_already_playing", [start(0, "cdg", 60.0, {}, duration_hint=60.0), at(5, "set", bg_playing=True), at(58, "eos")], 70))
     out.append(scen("eos_bg_playing_not_audible", [start(0, "cdg", 60.0, {}, duration_hint=60.0), at(5, "set", bg_playing=True, bg_audible=False), at(58, "eos")], 80))
@@ -794,6 +809,9 @@ def random_scenario(seed):
     script.sort(key=lambda e: e["at"])
     # stable sort keeps song_start first for ties at 0; any event that sorts before it only matters on an idle app and is fine
     s = scen(f"random_{seed}", script, run, **settings)
+    if r.random() < 0.3:
+        a0 = r.uniform(5, media)
+        s["tick_skips"] = [[round(a0, 1), round(a0 + r.uniform(1, 12), 1)]]
     s["bgm_session_started"] = r.random() < 0.9
     return s
 

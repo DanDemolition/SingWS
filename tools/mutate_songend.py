@@ -14,9 +14,13 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
-SRC = ROOT / "rust/crates/singws-songend/src/lib.rs"
+REAL = ROOT / "rust/crates/singws-songend"
+# mutants are built in a detached COPY of the crate: the repository source is never touched
+WORK = Path(os.environ.get("MUTATE_WORKDIR") or os.path.expanduser("~/.cache/singws-songend-mut-work"))
+SRC = WORK / "src/lib.rs"
 TARGET = os.environ.get("CARGO_TARGET_DIR") or os.path.expanduser("~/.cache/singws-rust-target-songend-mut")
 ENV = dict(os.environ, CARGO_TARGET_DIR=TARGET)
+WORKERS = int(os.environ.get("MUTATE_WORKERS", "6"))
 ONLY = {int(x) for x in os.environ.get("MUTATE_ONLY", "").split(",") if x}
 SEEDS = int(os.environ.get("MUTATE_SEEDS", "400"))
 PROFILE = os.environ.get("MUTATE_PROFILE", "dev")
@@ -89,26 +93,52 @@ def generate(text):
     return out
 
 
+def setup_workdir():
+    import shutil
+    (WORK / "src").mkdir(parents=True, exist_ok=True)
+    toml = (REAL / "Cargo.toml").read_text() + "\n[workspace]\n"
+    (WORK / "Cargo.toml").write_text(toml)
+    shutil.copy(REAL / "src/main.rs", WORK / "src/main.rs")
+    SRC.write_text((REAL / "src/lib.rs").read_text())
+
+
 def build():
-    cmd = ["cargo", "build", "-p", "singws-songend"] + (["--release"] if PROFILE == "release" else [])
-    return subprocess.run(cmd, capture_output=True, text=True, env=ENV, cwd=ROOT / "rust")
+    cmd = ["cargo", "build"] + (["--release"] if PROFILE == "release" else [])
+    return subprocess.run(cmd, capture_output=True, text=True, env=ENV, cwd=WORK)
 
 
 def main():
     import songend_parity as par
     import songend_scenarios as sc
     corpus = sc.scripted() + [sc.random_scenario(s) for s in range(SEEDS)]
-    work = [(s["name"], par.run_python(s)) for s in corpus]
+    work = []
+    for s in corpus:
+        out = par.run_python(s)
+        out["_bytes"] = json.dumps(out["replay"]).encode()
+        work.append((s["name"], out))
     print(f"oracle ready: {len(work)} scenarios", flush=True)
+    setup_workdir()
     original = SRC.read_text()
     muts = generate(original)
     print(f"mutants: {len(muts)}", flush=True)
     binary = Path(TARGET) / ("release" if PROFILE == "release" else "debug") / "singws-songend"
+
+    def check(item):
+        name, out = item
+        try:
+            proc = subprocess.run([str(binary)], input=out["_bytes"], capture_output=True, timeout=300)
+            if proc.returncode != 0:
+                return name
+            return name if par.compare(name, out, json.loads(proc.stdout)["results"]) else None
+        except Exception:
+            return name
+    from concurrent.futures import ThreadPoolExecutor
+    pool = ThreadPoolExecutor(WORKERS)
     survivors, noncompiling, killed_n = [], [], 0
     try:
         base = build()
         assert base.returncode == 0, base.stderr[-500:]
-        bad = [n for n, o in work if par.compare(n, o, par.rust(binary, o["replay"]))]
+        bad = [r for r in pool.map(check, work) if r]
         assert not bad, f"baseline already differs: {bad[:3]}"
         lines = original.split("\n")
         for i, (ln, s, e, new, snippet) in enumerate(muts):
@@ -123,13 +153,14 @@ def main():
                 print(f"#{i} L{ln}: does not compile", flush=True)
                 continue
             killed = None
-            for name, out in work:
-                try:
-                    diff = par.compare(name, out, par.rust(binary, out["replay"]))
-                except Exception as exc:
-                    diff = [str(exc)[:100]]
-                if diff:
-                    killed = name
+            # killers first: the scenario that killed the previous mutant is tried first; the rest in parallel batches
+            for off in range(0, len(work), WORKERS * 4):
+                batch = work[off:off + WORKERS * 4]
+                hit = [r for r in pool.map(check, batch) if r]
+                if hit:
+                    killed = hit[0]
+                    k = next(j for j, w in enumerate(work) if w[0] == killed)
+                    work.insert(0, work.pop(k))
                     break
             if killed:
                 killed_n += 1
@@ -141,7 +172,6 @@ def main():
                 survivors.append((i, key, note, snippet))
     finally:
         SRC.write_text(original)
-        build()
     undocumented = [x for x in survivors if not x[2]]
     gaps = [x for x in survivors if x[2].startswith("GAP")]
     print(f"mutants={len(muts)} killed={killed_n} survivors={len(survivors)} documented-equivalent={len(survivors) - len(undocumented) - len(gaps)} "
