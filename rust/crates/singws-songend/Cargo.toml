@@ -1,0 +1,17 @@
+[package]
+name = "singws-songend"
+version = "0.1.0"
+edition = "2021"
+description = "Offline port of the HOST-side decisions that start the background music at the end of a karaoke song (0.2.18.1.py: update_time_left, _maybe_trim_end_silence, _arm_audio_end_floor, the media-end hand-off, the KaraFun complete hand-off). Pure (no I/O, no clock, no engine); replays the events of tools/songend_scenarios.py. Proof only: Rust drives nothing."
+publish = false
+
+[lib]
+name = "singws_songend"
+path = "src/lib.rs"
+
+[[bin]]
+name = "singws-songend"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = { version = "1.0.151", features = ["float_roundtrip"] }
