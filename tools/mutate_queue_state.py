@@ -23,7 +23,7 @@ ONLY = {int(x) for x in os.environ.get("MUTATE_ONLY", "").split(",") if x}
 
 # (old, new, None | "why it is equivalent")
 M = [
-    ("        self.clock += 1.0;\n        let (ok, code) = match op {", "        let (ok, code) = match op {", None),
+    ("            _ => self.clock += 1.0,\n", "            _ => {}\n", None),
     ("self.clock += ev.get(\"seconds\").and_then(Value::as_f64).unwrap_or(1.0);", "self.clock += 0.0;", None),
     ("        self.cur = self.init.clone();\n        self.removed", "        self.removed", None),
     ("        self.removed = self.tombs.keys().copied().collect();", "        self.removed = BTreeSet::new();", None),
