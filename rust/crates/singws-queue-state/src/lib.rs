@@ -4,7 +4,7 @@
 //! snapshot (docs/design/stage-b-queue-replay.md). Pure: no I/O, no real clock (a logical clock advances 1 s per event, as in the Python harness).
 //!
 //! DECLARED SCOPE (everything else is "not modelled"; the Python app stays authoritative):
-//!   modelled   classic and rotation queues (no lock), host add / remove song / remove singer / move / skip / rotation_advance / complete,
+//!   modelled   classic and rotation queues, host add / remove song / remove singer / move / skip / rotation_advance / complete,
 //!              remote arrivals (admission via `singws-queue::titles_conflict`, tombstones, removed-id memory, singer match by name,
 //!              song limit, accepting, duplicate request ids, wire-order song ordering), empty rotation slots with expiry, restart.
 //!              the waitlist: `waitlist_add` / `waitlist_remove` / `waitlist_restore`, `waiting` / failed rows (rebuilt from every arrival exactly like
