@@ -71,6 +71,8 @@ struct Entry {
     key: i64,
     tempo: Option<i64>,
     skipped: bool,
+    /// `request_order` (the server's sort position as the app stores it; None for host-local entries).
+    order: Option<f64>,
 }
 
 impl Entry {
@@ -102,6 +104,11 @@ struct Singer {
     until: f64,
     lock_new: bool,
     lock_order: i64,
+    /// Order metadata (`host_order_updated_at`, `singer_order_updated_at`, `order_revision`, `last_order_source`).
+    host_ts: i64,
+    singer_ts: i64,
+    order_rev: i64,
+    order_src: String,
     songs: Vec<Entry>,
 }
 
@@ -120,6 +127,21 @@ struct Tomb {
     title: String,
 }
 
+#[derive(Clone, Debug)]
+struct Pending {
+    ids: Vec<u64>,
+    host: i64,
+    rev: i64,
+}
+
+#[derive(Clone, Debug, Default)]
+struct OrderMeta {
+    host: i64,
+    singer: i64,
+    rev: i64,
+    source: String,
+}
+
 #[derive(Clone)]
 pub struct State {
     init: Settings,
@@ -135,6 +157,10 @@ pub struct State {
     failed: BTreeSet<u64>,
     /// `_remote_terminal_titles`: the title a server-terminal row carried (memory only; a restart forgets it).
     terminal_titles: BTreeMap<u64, String>,
+    /// `_queue_revision`: a counter the order-conflict rules read, so it is modelled (bumped by tombstones, local removal by the server, waitlist restore, order records).
+    queue_rev: i64,
+    /// `_pending_remote_order_syncs`: singer key -> (request ids, host timestamp, revision).
+    pending: BTreeMap<String, Pending>,
     lock_count: i64,
     next_uid: u64,
     singer_alias: HashMap<u64, usize>,
@@ -264,6 +290,74 @@ fn req_participants(row: &Value) -> Vec<String> {
     participants(&primary, display.as_deref())
 }
 
+
+/// `float(x)`; None when Python would raise (None, empty or non-numeric string, containers).
+fn py_float(v: &Value) -> Option<f64> {
+    match v {
+        Value::Number(n) => n.as_f64(),
+        Value::String(s) => s.trim().parse::<f64>().ok(),
+        Value::Bool(b) => Some(if *b { 1.0 } else { 0.0 }),
+        _ => None,
+    }
+}
+
+/// `int(x)`; 0 when Python would raise (the callers wrap it in try/except returning 0).
+fn py_int0(v: Option<&Value>) -> i64 {
+    match v {
+        Some(Value::Number(n)) => n.as_i64().or_else(|| n.as_f64().filter(|f| f.is_finite()).map(|f| f.trunc() as i64)).unwrap_or(0),
+        Some(Value::String(s)) => s.trim().parse::<i64>().unwrap_or(0),
+        Some(Value::Bool(b)) => *b as i64,
+        _ => 0,
+    }
+}
+
+/// `_coerce_order_timestamp`: milliseconds; seconds (below 1e11) are scaled; anything unusable is 0.
+fn coerce_ts(v: Option<&Value>) -> i64 {
+    let raw = match v {
+        None | Some(Value::Null) => return 0,
+        Some(Value::String(s)) if s.is_empty() => return 0,
+        Some(x) => match py_float(x) {
+            Some(f) => f,
+            None => return 0,
+        },
+    };
+    if raw <= 0.0 {
+        return 0;
+    }
+    let raw = if raw < 100_000_000_000.0 { raw * 1000.0 } else { raw };
+    if raw.is_finite() { raw as i64 } else { 0 }
+}
+
+fn coerce_i(v: i64) -> i64 {
+    coerce_ts(Some(&Value::from(v)))
+}
+
+/// `_remote_order_meta_from_req`.
+fn order_meta_of(row: &Value) -> OrderMeta {
+    let src = first_truthy_str(row, &["last_order_source", "order_source"]);
+    let src = if src.is_empty() { "server".to_string() } else { src.trim().to_lowercase() };
+    let source = if matches!(src.as_str(), "host" | "singer" | "server") { src } else { "server".to_string() };
+    let rev_v = ["order_revision", "revision"].iter().filter_map(|k| row.get(*k)).find(|v| truthy(v));
+    OrderMeta { host: coerce_ts(row.get("host_order_updated_at")), singer: coerce_ts(row.get("singer_order_updated_at")), rev: py_int0(rev_v), source }
+}
+
+/// `_incoming_order_timestamp`.
+fn incoming_ts(m: &OrderMeta) -> i64 {
+    match m.source.as_str() {
+        "singer" => m.singer,
+        "host" => m.host,
+        _ => m.host.max(m.singer),
+    }
+}
+
+/// The `request_order` `_add_song_to_queue` stores for a remote add: float(sort_order or queue_position or request id).
+fn add_request_order(meta: &Value, rid: Option<u64>) -> f64 {
+    let fallback = rid.unwrap_or(0) as f64;
+    match ["sort_order", "queue_position"].iter().filter_map(|k| meta.get(*k)).find(|v| truthy(v)) {
+        Some(v) => py_float(v).unwrap_or(fallback),
+        None => fallback,
+    }
+}
 
 /// Python truthiness of a JSON value (`bool(x)`).
 fn truthy(v: &Value) -> bool {
@@ -415,6 +509,8 @@ impl State {
             attention: BTreeMap::new(),
             failed: BTreeSet::new(),
             terminal_titles: BTreeMap::new(),
+            queue_rev: 0,
+            pending: BTreeMap::new(),
             lock_count: 0,
             next_uid: 1,
             singer_alias: HashMap::new(),
@@ -567,11 +663,39 @@ impl State {
     /// `_remove_local_remote_request_by_id`: drop every queued copy of a request id. Afterwards EVERY empty singer row (not only the one that
     /// lost a song) is kept: in rotation mode it is (re)marked as a temporary empty slot with a fresh 180 s expiry; the row is never deleted.
     fn remove_local_by_id(&mut self, rid: u64) {
+        let mut removed = 0;
         for si in (0..self.queue.len()).rev() {
+            let before = self.queue[si].songs.len();
             self.queue[si].songs.retain(|e| e.rid != Some(rid));
+            removed += before - self.queue[si].songs.len();
             if self.queue[si].songs.is_empty() {
                 self.mark_slot_empty(si);
             }
+        }
+        if removed > 0 {
+            self.queue_rev += 1;
+        }
+    }
+
+    /// `_record_host_singer_order_change` (via `_sync_remote_singer_order`): stamp the singer as host-ordered now, bump the revision and
+    /// remember the singer's request-id order until the server echoes it.
+    fn record_order(&mut self, si: usize) {
+        if si >= self.queue.len() {
+            return;
+        }
+        self.queue_rev += 1;
+        let rev = self.queue_rev;
+        let now = (self.clock * 1000.0) as i64;
+        let s = &mut self.queue[si];
+        let prev = coerce_i(s.host_ts).max(coerce_i(s.singer_ts));
+        let stamp = if now <= prev { prev + 1 } else { now };
+        s.host_ts = stamp;
+        s.order_rev = rev;
+        s.order_src = "host".into();
+        let key = s.name.trim().to_lowercase();
+        let ids: Vec<u64> = s.songs.iter().filter_map(|e| e.rid).collect();
+        if !key.is_empty() && !ids.is_empty() {
+            self.pending.insert(key, Pending { ids, host: stamp, rev });
         }
     }
 
@@ -593,6 +717,7 @@ impl State {
             self.removed.insert(rid);
             return;
         }
+        self.queue_rev += 1;
         let (artist, title) = (entry.artist.trim().to_string(), entry.title.trim().to_string());
         self.tombs.insert(rid, Tomb { status: status.into(), reason: reason.into(), singer: singer.trim().into(), artist, title });
         self.removed.insert(rid);
@@ -682,6 +807,7 @@ impl State {
             if self.is_locked() {
                 self.reweave_locked_tail(); // an existing singer stays in their slot; keep the locked newcomers interleaved
             }
+            self.record_order(i);
             if remote {
                 self.cleanup_duplicate_songs();
             }
@@ -689,7 +815,8 @@ impl State {
         }
         let uid = self.next_uid;
         self.next_uid += 1;
-        let new = Singer { uid, name: primary, skipped: false, has_sung: false, round_sung: false, marker: false, temp_empty: false, until: 0.0, lock_new: false, lock_order: 0, songs: vec![entry] };
+        let new_uid = uid;
+        let new = Singer { uid, name: primary, skipped: false, has_sung: false, round_sung: false, marker: false, temp_empty: false, until: 0.0, lock_new: false, lock_order: 0, host_ts: 0, singer_ts: 0, order_rev: 0, order_src: String::new(), songs: vec![entry] };
         if self.cur.rotation() {
             self.recompute_round_state();
             if self.is_locked() {
@@ -708,6 +835,9 @@ impl State {
             self.recompute_round_state();
         } else {
             self.queue.push(new);
+        }
+        if let Some(i) = self.queue.iter().position(|s| s.uid == new_uid) {
+            self.record_order(i);
         }
         true
     }
@@ -820,7 +950,8 @@ impl State {
     }
 
     /// `process_external_request` for one request row (cap, then the remote add). Err carries nothing; the caller records what it needs.
-    fn process_external(&mut self, req: &Value, singer: &str, entry: Entry) -> bool {
+    fn process_external(&mut self, req: &Value, singer: &str, mut entry: Entry) -> bool {
+        entry.order = Some(add_request_order(req, entry.rid));
         let parts = req_participants(req);
         if !self.limit_ok(&parts) {
             return false; // _record_remote_limit_blocked_request: nothing is recorded locally
@@ -864,7 +995,7 @@ impl State {
         let title = ev.get("title").and_then(Value::as_str).unwrap_or("");
         let key = ev.get("key").and_then(Value::as_i64).unwrap_or(0);
         self.next_local += 1;
-        let entry = Entry { rid: None, local: Some(self.next_local), artist: String::new(), title: title.into(), song_info: format!("/lib/{artist}-{title}.zip"), duet: None, key, tempo: None, skipped: false };
+        let entry = Entry { rid: None, local: Some(self.next_local), artist: String::new(), title: title.into(), song_info: format!("/lib/{artist}-{title}.zip"), duet: None, key, tempo: None, skipped: false, order: None };
         // artist is stored from the track dict, which carries the event artist; the harness' local entries use it for the song path only
         let mut entry = entry;
         entry.artist = artist.into();
@@ -889,6 +1020,8 @@ impl State {
             title: String,
             key: i64,
             tempo: i64,
+            sort: Option<Value>,
+            meta: OrderMeta,
         }
         let mut normalized: Vec<Req> = Vec::new();
         for row in &rows {
@@ -946,7 +1079,7 @@ impl State {
                 let p = parse_duet(&singer).0;
                 if p.is_empty() { singer.clone() } else { p }
             };
-            normalized.push(Req { rid, singer, queue_singer, artist: o.get("artist").and_then(Value::as_str).unwrap_or("").trim().to_string(), title, key, tempo });
+            normalized.push(Req { rid, singer, queue_singer, artist: o.get("artist").and_then(Value::as_str).unwrap_or("").trim().to_string(), title, key, tempo, sort: o.get("sort_order").cloned(), meta: order_meta_of(row) });
         }
         
         let mut existing: BTreeSet<u64> = self.queue.iter().flat_map(|s| s.songs.iter().filter_map(|e| e.rid)).filter(|r| *r > 0).collect();
@@ -980,7 +1113,7 @@ impl State {
                 continue;
             }
             let item = json!({"request_id": r.rid, "singer": r.singer, "queue_singer": r.queue_singer, "artist": r.artist, "title": r.title, "key": r.key,
-                              "tempo": r.tempo, "pending_reason": "", "pending_status": "", "last_error": ""});
+                              "tempo": r.tempo, "sort_order": r.sort.clone().unwrap_or(Value::Null), "pending_reason": "", "pending_status": "", "last_error": ""});
             // the intake cap check sees the queue singer only (a duet partner is checked later, by the add itself)
             let parts = req_participants(&item);
             let limit = self.cur.active_limit();
@@ -1000,6 +1133,7 @@ impl State {
                 key: r.key,
                 tempo: Some(100 + r.tempo),
                 skipped: false,
+                order: None,
             };
             if self.process_external(&item, &r.singer, entry) {
                 for p in parts {
@@ -1013,12 +1147,14 @@ impl State {
                 self.record_attention(&item, "auto_accept_failed");
             }
         }
-        // server key/tempo win for every queued request in the payload (last row wins); then wire order inside each singer
+        // server key/tempo win for every queued request in the payload (last row wins); the stored request_order follows sort_order (else the id)
         let mut key_by: HashMap<u64, i64> = HashMap::new();
         let mut tempo_by: HashMap<u64, i64> = HashMap::new();
+        let mut sort_by: HashMap<u64, f64> = HashMap::new();
         for r in &normalized {
             key_by.insert(r.rid, r.key);
             tempo_by.insert(r.rid, r.tempo);
+            sort_by.insert(r.rid, r.sort.as_ref().and_then(py_float).unwrap_or(r.rid as f64));
         }
         for s in &mut self.queue {
             for e in &mut s.songs {
@@ -1028,26 +1164,124 @@ impl State {
                 }
                 let t = tempo_by.get(&rid).copied().unwrap_or_else(|| e.tempo.unwrap_or(100) - 100).clamp(-30, 30);
                 e.tempo = Some(100 + t);
+                e.order = Some(sort_by.get(&rid).copied().unwrap_or_else(|| e.order.unwrap_or(rid as f64)));
             }
         }
-        let mut desired_by: HashMap<String, Vec<u64>> = HashMap::new();
+        let desired_ids: BTreeSet<u64> = normalized.iter().map(|r| r.rid).collect();
+        let mut desired_by: BTreeMap<String, Vec<u64>> = BTreeMap::new();
+        let mut meta_by: BTreeMap<String, OrderMeta> = BTreeMap::new();
         for r in &normalized {
-            desired_by.entry(r.queue_singer.to_lowercase()).or_default().push(r.rid);
+            let k = r.queue_singer.to_lowercase();
+            desired_by.entry(k.clone()).or_default().push(r.rid);
+            // _merge_remote_order_meta: maxima of the stamps and revision, the latest row's source
+            let m = meta_by.entry(k).or_default();
+            m.host = m.host.max(r.meta.host);
+            m.singer = m.singer.max(r.meta.singer);
+            m.rev = m.rev.max(r.meta.rev);
+            m.source = r.meta.source.clone();
         }
-        for s in &mut self.queue {
-            let Some(order) = desired_by.get(&s.name.trim().to_lowercase()) else { continue };
-            if s.songs.len() < 2 {
+        // sort_order, when the server sent one for any row of the singer, re-sorts that singer's ids (others sort last, in wire order)
+        for (k, ids) in desired_by.iter_mut() {
+            let mut lookup: HashMap<u64, f64> = HashMap::new();
+            for r in normalized.iter().filter(|r| r.queue_singer.to_lowercase() == *k) {
+                let Some(raw) = &r.sort else { continue };
+                if matches!(raw, Value::Null) || matches!(raw, Value::String(t) if t.is_empty()) {
+                    continue;
+                }
+                if let Some(f) = py_float(raw) {
+                    lookup.insert(r.rid, f);
+                }
+            }
+            if lookup.is_empty() {
+                continue;
+            }
+            let mut payload_rank: HashMap<u64, usize> = HashMap::new();
+            for (i, id) in ids.iter().enumerate() {
+                payload_rank.insert(*id, i);
+            }
+            let keyf = |id: &u64| -> (f64, u64) {
+                match lookup.get(id) {
+                    Some(f) => (*f, *id),
+                    None => (f64::INFINITY, payload_rank.get(id).copied().unwrap_or(0) as u64),
+                }
+            };
+            ids.sort_by(|a, b| {
+                let (ka, kb) = (keyf(a), keyf(b));
+                ka.0.partial_cmp(&kb.0).unwrap_or(std::cmp::Ordering::Equal).then(ka.1.cmp(&kb.1))
+            });
+        }
+        // a pending host order (pushed, not yet echoed by the server) is kept against a stale echo and cleared by the real one
+        let pkeys: Vec<String> = self.pending.keys().cloned().collect();
+        for k in pkeys {
+            let item = self.pending[&k].clone();
+            let pending_ids: Vec<u64> = item.ids.iter().copied().filter(|i| desired_ids.contains(i)).collect();
+            let server_ids = desired_by.get(&k).cloned().unwrap_or_default();
+            let (ps, ss): (BTreeSet<u64>, BTreeSet<u64>) = (pending_ids.iter().copied().collect(), server_ids.iter().copied().collect());
+            if !pending_ids.is_empty() && ps == ss {
+                let meta = meta_by.get(&k).cloned().unwrap_or_default();
+                if server_ids == pending_ids {
+                    if meta.host != 0 && item.host != 0 && meta.host < item.host {
+                        desired_by.insert(k.clone(), pending_ids);
+                        continue;
+                    }
+                    self.pending.remove(&k);
+                } else if !(meta.source == "singer" && incoming_ts(&meta) > item.host) {
+                    desired_by.insert(k.clone(), pending_ids);
+                }
+            }
+        }
+        for si in 0..self.queue.len() {
+            let k = self.queue[si].name.trim().to_lowercase();
+            let Some(order) = desired_by.get(&k).cloned() else { continue };
+            if order.is_empty() {
+                continue;
+            }
+            let meta = meta_by.get(&k).cloned().unwrap_or_default();
+            if self.queue[si].songs.len() < 2 {
+                continue;
+            }
+            let (local_host, local_singer) = (coerce_i(self.queue[si].host_ts), coerce_i(self.queue[si].singer_ts));
+            let local_rev = self.queue[si].order_rev;
+            let in_ts = incoming_ts(&meta);
+            let pending_ids: Vec<u64> = self.pending.get(&k).map(|p| p.ids.iter().copied().filter(|i| desired_ids.contains(i)).collect()).unwrap_or_default();
+            let force_pending = !pending_ids.is_empty() && pending_ids.iter().collect::<BTreeSet<_>>() == order.iter().collect::<BTreeSet<_>>() && order == pending_ids;
+            let allow = if force_pending {
+                true
+            } else if local_host > 0 {
+                (meta.source == "singer" && in_ts > local_host)
+                    || (meta.source == "host" && in_ts >= local_host)
+                    || (meta.rev > local_rev && in_ts >= local_host.max(local_singer))
+            } else if local_singer > 0 && in_ts != 0 && in_ts < local_singer {
+                false
+            } else {
+                true
+            };
+            if !allow {
                 continue;
             }
             let mut rank: HashMap<u64, usize> = HashMap::new();
             for (i, r) in order.iter().enumerate() {
                 rank.insert(*r, i);
             }
+            let s = &mut self.queue[si];
             let positions: Vec<usize> = (0..s.songs.len()).filter(|&p| s.songs[p].rid.map(|r| rank.contains_key(&r)).unwrap_or(false)).collect();
             let mut ranked: Vec<Entry> = positions.iter().map(|&p| s.songs[p].clone()).collect();
             ranked.sort_by_key(|e| rank[&e.rid.unwrap()]);
             for (p, e) in positions.into_iter().zip(ranked) {
                 s.songs[p] = e;
+            }
+            // _apply_order_meta_to_singer
+            if meta.host != 0 {
+                s.host_ts = coerce_i(s.host_ts).max(meta.host);
+            }
+            if meta.singer != 0 {
+                s.singer_ts = coerce_i(s.singer_ts).max(meta.singer);
+            }
+            if meta.rev != 0 {
+                s.order_rev = s.order_rev.max(meta.rev);
+            }
+            if meta.host != 0 || meta.singer != 0 || meta.rev != 0 {
+                s.order_src = meta.source.clone();
             }
         }
         self.cleanup_duplicate_songs();
@@ -1121,7 +1355,7 @@ impl State {
         let key = int("key");
         let tempo = int("tempo").clamp(-30, 30);
         self.prune_expired_slots();
-        let entry = Entry { rid: Some(rid), local: None, artist: artist.clone(), title: title.clone(), song_info: format!("/lib/{artist}-{title}.zip"), duet: None, key, tempo: Some(100 + tempo), skipped: false };
+        let entry = Entry { rid: Some(rid), local: None, artist: artist.clone(), title: title.clone(), song_info: format!("/lib/{artist}-{title}.zip"), duet: None, key, tempo: Some(100 + tempo), skipped: false, order: None };
         if !self.process_external(&req, &singer, entry) {
             return (false, "not_added".into());
         }
@@ -1145,7 +1379,7 @@ impl State {
         }
         self.removed_tonight.insert(rid, item);
         self.handled.insert(rid);
-        let entry = Entry { rid: Some(rid), local: None, artist: row_str(&req, "artist"), title: row_str(&req, "title"), song_info: String::new(), duet: None, key: 0, tempo: None, skipped: false };
+        let entry = Entry { rid: Some(rid), local: None, artist: row_str(&req, "artist"), title: row_str(&req, "title"), song_info: String::new(), duet: None, key: 0, tempo: None, skipped: false, order: None };
         self.tombstone(rid, &entry, &row_str(&req, "singer"), "waiting_for_add_cleared", "removed");
         self.waitlist.remove(&rid);
         (true, "removed".into())
@@ -1167,6 +1401,7 @@ impl State {
             let reason = first_truthy_str(&Value::Object(o.clone()), &["pending_reason"]);
             o.insert("pending_reason".into(), json!(if reason.is_empty() { "host_restored".to_string() } else { reason }));
         }
+        self.queue_rev += 1;
         self.waitlist.insert(rid, restored);
         self.removed_tonight.remove(&rid);
         self.handled.remove(&rid);
@@ -1188,6 +1423,7 @@ impl State {
         if self.queue[si].songs.is_empty() {
             self.mark_slot_empty(si);
         }
+        self.record_order(si);
         (true, "removed".into())
     }
 
@@ -1253,6 +1489,7 @@ impl State {
             "down" => songs.swap(sj, sj + 1),
             _ => return (false, "exception:unsupported_direction".into()),
         }
+        self.record_order(si);
         (true, "moved".into())
     }
 
@@ -1315,6 +1552,8 @@ impl State {
         self.attention.clear();
         self.failed.clear();
         self.terminal_titles = ev.get("terminal_titles").and_then(Value::as_object).map(|o| o.iter().filter_map(|(k, v)| Some((k.parse::<u64>().ok()?, v.as_str()?.to_string()))).collect()).unwrap_or_default();
+        self.queue_rev = ev.get("queue_revision").and_then(Value::as_i64).unwrap_or(0);
+        self.pending.clear();
         self.lock_count = 0;
         self.singer_alias.clear();
         self.next_uid = 1;
@@ -1331,7 +1570,7 @@ impl State {
                     None
                 };
                 let text = |k: &str| e.get(k).and_then(Value::as_str).unwrap_or("").to_string();
-                songs.push(Entry { rid, local, artist: text("artist"), title: text("title"), song_info: text("song_info"), duet: e.get("duet_display").and_then(Value::as_str).map(String::from), key: e.get("key").and_then(Value::as_i64).unwrap_or(0), tempo: e.get("tempo").and_then(Value::as_i64), skipped: f(&e, "skipped") });
+                songs.push(Entry { rid, local, artist: text("artist"), title: text("title"), song_info: text("song_info"), duet: e.get("duet_display").and_then(Value::as_str).map(String::from), key: e.get("key").and_then(Value::as_i64).unwrap_or(0), tempo: e.get("tempo").and_then(Value::as_i64), skipped: f(&e, "skipped"), order: e.get("request_order").and_then(Value::as_f64) });
             }
             let uid = self.next_uid;
             self.next_uid += 1;
@@ -1346,6 +1585,10 @@ impl State {
                 until: sv.get("until").and_then(Value::as_f64).unwrap_or(0.0),
                 lock_new: f(&sv, "rotation_lock_new"),
                 lock_order: sv.get("rotation_lock_order").and_then(Value::as_i64).unwrap_or(0),
+                host_ts: sv.get("host_order_updated_at").and_then(Value::as_i64).unwrap_or(0),
+                singer_ts: sv.get("singer_order_updated_at").and_then(Value::as_i64).unwrap_or(0),
+                order_rev: sv.get("order_revision").and_then(Value::as_i64).unwrap_or(0),
+                order_src: sv.get("last_order_source").and_then(Value::as_str).unwrap_or("").to_string(),
                 songs,
             });
         }
@@ -1377,6 +1620,8 @@ impl State {
         self.attention.clear();
         self.failed.clear();
         self.terminal_titles.clear();
+        self.queue_rev = 0;
+        self.pending.clear();
         self.lock_count = 0;
         self.removed = self.tombs.keys().copied().collect();
         (true, "restarted".into())
@@ -1397,12 +1642,13 @@ impl State {
                             in_queue.entry(r).or_default().push(e.alias());
                         }
                         json!({"id": e.alias(), "remote_request_id": e.rid, "artist": e.artist, "title": e.title, "song_info": e.song_info,
-                               "key": e.key, "tempo_percent": e.tempo, "skipped": e.skipped, "duet_display": e.duet})
+                               "key": e.key, "tempo_percent": e.tempo, "skipped": e.skipped, "duet_display": e.duet, "request_order": e.order})
                     })
                     .collect();
                 json!({"id": format!("S{}", self.singer_alias.get(&s.uid).copied().unwrap_or(0)), "name": s.name, "skipped": s.skipped, "has_sung": s.has_sung,
                        "round_sung": s.round_sung, "rotation_marker": s.marker, "temporary_empty_slot": s.temp_empty, "rotation_lock_new": s.lock_new,
-                       "rotation_lock_order": s.lock_order, "songs": songs})
+                       "rotation_lock_order": s.lock_order, "host_order_updated_at": s.host_ts, "singer_order_updated_at": s.singer_ts,
+                       "order_revision": s.order_rev, "last_order_source": s.order_src, "songs": songs})
             })
             .collect();
         let view = |m: &BTreeMap<u64, Value>| -> Value {
@@ -1437,6 +1683,8 @@ impl State {
             "unmatched_remote_ids": self.failed.iter().collect::<Vec<_>>(),
             "waitlist": view(&self.waitlist), "removed_tonight": view(&self.removed_tonight), "handled_waitlist_ids": self.handled.iter().collect::<Vec<_>>(),
             "tombstones": tombs, "removed_ids": self.removed.iter().collect::<Vec<_>>(),
+            "queue_revision": self.queue_rev,
+            "pending_order_syncs": self.pending.iter().map(|(k, p)| (k.clone(), json!({"request_ids": p.ids, "host_order_updated_at": p.host, "order_revision": p.rev, "last_order_source": "host"}))).collect::<Map<String, Value>>(),
             "terminal_titles": self.terminal_titles.iter().map(|(k, v)| (k.to_string(), json!(v))).collect::<Map<String, Value>>(),
             "deferred_remote_adds": 0, "lifecycle": life,
         })

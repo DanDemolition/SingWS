@@ -143,7 +143,7 @@ class World:
                      "_update_deferred_remote_add_status", "_refresh_header_status", "_apply_idle_background", "_select_queue_singer_for_host",
                      "_save_deferred_remote_adds", "_schedule_waiting_for_add_view_refresh", "_show_queue_limit_rejected",
                      "_report_remote_attention_request_async", "_set_processing_text", "_report_remote_limit_blocked_async",
-                     "_sync_remote_singer_order", "_refresh_queue_song_row_identities", "_update_queue_eta_label", "schedule_ticker_update",
+                     "_refresh_queue_song_row_identities", "_update_queue_eta_label", "schedule_ticker_update",
                      "_update_undo_action", "_show_processing_notification", "_mark_waiting_for_add_delivered_async",
                      "_restore_waitlist_request_on_server_async", "_sync_remote_removal_tombstones_async", "_save_waitlist_removed_tonight",
                      "_notify_singer_waitlist_add_failed", "_cancel_pending_singer_start_for_queue_change", "_queue_item_kind"):
@@ -364,6 +364,7 @@ class World:
                     "id": eid_alias[eid], "remote_request_id": rid, "artist": str(entry.get("artist", "")), "title": str(entry.get("title", "")),
                     "song_info": _jsonable(entry.get("song_info")), "key": entry.get("key", 0), "tempo_percent": entry.get("tempo_percent", 100),
                     "skipped": bool(entry.get("skipped", False)), "duet_display": entry.get("duet_display"),
+                    "request_order": entry.get("request_order"),
                 }
                 songs.append(rec)
                 if rid is not None:
@@ -374,6 +375,8 @@ class World:
                 "rotation_marker": bool(singer.get("rotation_marker", False)), "songs": songs,
                 "temporary_empty_slot": bool(singer.get("temporary_empty_slot", False)),
                 "rotation_lock_new": bool(singer.get("rotation_lock_new", False)), "rotation_lock_order": int(singer.get("rotation_lock_order", 0) or 0),
+                "host_order_updated_at": int(singer.get("host_order_updated_at", 0) or 0), "singer_order_updated_at": int(singer.get("singer_order_updated_at", 0) or 0),
+                "order_revision": int(singer.get("order_revision", 0) or 0), "last_order_source": str(singer.get("last_order_source", "") or ""),
             })
         tomb = {}
         data = app._ensure_remote_request_tombstones()
@@ -400,6 +403,8 @@ class World:
             "unmatched_remote_ids": sorted(int(x) for x in getattr(app, "_unmatched_remote_request_ids", set()) or set()),
             "waitlist": waitlist, "removed_tonight": removed_tonight, "handled_waitlist_ids": sorted(app._waiting_for_add_handled_ids),
             "tombstones": tomb, "removed_ids": sorted(int(x) for x in app._remote_removed_request_ids),
+            "queue_revision": int(getattr(app, "_queue_revision", 0) or 0),
+            "pending_order_syncs": {str(k): {f: v.get(f) for f in ("request_ids", "host_order_updated_at", "order_revision", "last_order_source")} for k, v in sorted((getattr(app, "_pending_remote_order_syncs", {}) or {}).items())},
             "terminal_titles": {str(k): str(v) for k, v in sorted(object.__getattribute__(app, "__dict__").get("_remote_terminal_titles", {}).items())},
             "deferred_remote_adds": len(app._deferred_remote_adds), "lifecycle": lifecycle,
         }
@@ -710,6 +715,62 @@ def adversarial_cases() -> dict[str, list[dict]]:
                                                             {"op": "remote_arrive", "requests": [_req(1010, "Bob & Ada", "Late")]}, {"op": "waitlist_remove", "request_id": 1010},
                                                             {"op": "remote_arrive", "requests": [_req(1010, "Bob & Ada", "Late")]}, {"op": "remote_arrive", "requests": [a1]},
                                                             {"op": "waitlist_restore", "request_id": 1010}, {"op": "remote_arrive", "requests": [a1]}],
+        # --- slice B: sort_order, order timestamps, revisions, pending host orders
+        "sort_order_resorts_a_singers_songs": [cfg, {"op": "remote_arrive", "requests": [dict(a1, sort_order=3), dict(a2, sort_order=1), dict(_req(1004, "Ada", "Delta"), sort_order=2)]},
+                                               {"op": "remote_arrive", "requests": [dict(a1, sort_order=0), dict(a2, sort_order="2"), dict(_req(1004, "Ada", "Delta"), sort_order=1)]},
+                                               {"op": "remote_arrive", "requests": [dict(a1, sort_order=""), dict(a2, sort_order=None), dict(_req(1004, "Ada", "Delta"), sort_order="x")]},
+                                               {"op": "remote_arrive", "requests": [dict(a1, sort_order=5), a2, dict(_req(1004, "Ada", "Delta"), sort_order=2.5)]}],
+        "sort_order_reaches_request_order_on_add_and_on_poll": [cfg, {"op": "remote_arrive", "requests": [dict(a1, sort_order=0, queue_position=7), dict(a2, sort_order="bad"), dict(b1, sort_order=True)]},
+                                                                {"op": "remote_arrive", "requests": [dict(a1, sort_order=0), dict(a2, sort_order=4.5)]}, {"op": "add_song", "singer": "Ada", "title": "Local"},
+                                                                {"op": "remote_arrive", "requests": [a1]}],
+        "host_reorder_survives_a_stale_poll_until_echoed": [cfg, {"op": "remote_arrive", "requests": [a1, a2, _req(1004, "Ada", "Delta")]}, {"op": "move_song", "entry": "R1004", "where": "top"},
+                                                            {"op": "remote_arrive", "requests": [a1, a2, _req(1004, "Ada", "Delta")]},
+                                                            {"op": "remote_arrive", "requests": [_req(1004, "Ada", "Delta"), a1, a2]},
+                                                            {"op": "remote_arrive", "requests": [a2, a1, _req(1004, "Ada", "Delta")]}],
+        "echo_with_old_host_stamp_is_overridden": [cfg, {"op": "remote_arrive", "requests": [a1, a2]}, {"op": "move_song", "entry": "R1002", "where": "top"},
+                                                   {"op": "remote_arrive", "requests": [dict(a2, host_order_updated_at=1, last_order_source="host"), dict(a1, host_order_updated_at=1)]},
+                                                   {"op": "remote_arrive", "requests": [dict(a2, host_order_updated_at=1700000999999, last_order_source="host"), a1]}],
+        "newer_singer_order_beats_the_host": [cfg, {"op": "remote_arrive", "requests": [a1, a2]}, {"op": "move_song", "entry": "R1002", "where": "top"}, {"op": "tick", "seconds": 5},
+                                              {"op": "remote_arrive", "requests": [dict(a1, singer_order_updated_at=1700000001, last_order_source="singer"), dict(a2, singer_order_updated_at=1700000001, last_order_source="singer")]},
+                                              {"op": "remote_arrive", "requests": [dict(a1, singer_order_updated_at=1700009999000, last_order_source="singer"), dict(a2, singer_order_updated_at=1700009999000, last_order_source="singer")]},
+                                              {"op": "remote_arrive", "requests": [a2, a1]}],
+        "newer_revision_beats_the_host": [cfg, {"op": "remote_arrive", "requests": [a1, a2]}, {"op": "remove_song", "entry": "R1001"}, {"op": "remote_arrive", "requests": [a1, a2]},
+                                          {"op": "move_song", "entry": "R1002", "where": "top"},
+                                          {"op": "remote_arrive", "requests": [dict(a1, order_revision=1, host_order_updated_at=1700009999000), dict(a2, order_revision=1, host_order_updated_at=1700009999000)]},
+                                          {"op": "remote_arrive", "requests": [dict(a1, order_revision=99, host_order_updated_at=1700009999000, last_order_source="server"), dict(a2, revision="99", host_order_updated_at=1700009999000)]}],
+        "older_singer_order_is_ignored": [cfg, {"op": "remote_arrive", "requests": [dict(a1, singer_order_updated_at=1700000500, last_order_source="singer"), dict(a2, singer_order_updated_at=1700000500, last_order_source="singer")]},
+                                          {"op": "remote_arrive", "requests": [dict(a2, singer_order_updated_at=1700000100, last_order_source="singer"), dict(a1, singer_order_updated_at=1700000100, last_order_source="singer")]},
+                                          {"op": "remote_arrive", "requests": [dict(a2, singer_order_updated_at=1700000900, last_order_source="singer"), dict(a1, singer_order_updated_at=1700000900, last_order_source="singer")]},
+                                          {"op": "remote_arrive", "requests": [dict(a1, last_order_source="other"), dict(a2, order_source="HOST", host_order_updated_at="abc")]}],
+        "order_stamps_survive_a_restart_but_pending_does_not": [cfg, {"op": "remote_arrive", "requests": [a1, a2]}, {"op": "move_song", "entry": "R1002", "where": "top"}, {"op": "restart"},
+                                                                {"op": "remote_arrive", "requests": [a1, a2]}, {"op": "move_song", "entry": "R1001", "where": "top"},
+                                                                {"op": "remote_arrive", "requests": [dict(a2, order_revision=40, host_order_updated_at=1700009999000), a1]}],
+        "host_adds_and_removes_record_the_order": [cfg, {"op": "add_song", "singer": "Cy", "title": "L1"}, {"op": "add_song", "singer": "Cy", "title": "L2"}, {"op": "remote_arrive", "requests": [_req(1004, "Cy", "Delta")]},
+                                                   {"op": "remove_song", "entry": "L1"}, {"op": "remove_song", "entry": "R1004"}, {"op": "remove_song", "entry": "L2"}, {"op": "add_song", "singer": "Cy", "title": "L3"},
+                                                   {"op": "complete_song", "entry": "L3"}],
+        "sort_order_needs_a_newer_stamp_to_beat_the_hosts_order": [cfg, {"op": "remote_arrive", "requests": [a1, a2, _req(1004, "Ada", "Delta")]},
+                                                                   {"op": "remote_arrive", "requests": [dict(a1, sort_order=3, host_order_updated_at=1700009000000, last_order_source="host"), dict(a2, sort_order=1, host_order_updated_at=1700009000000), dict(_req(1004, "Ada", "Delta"), sort_order=2, host_order_updated_at=1700009000000)]},
+                                                                   {"op": "remote_arrive", "requests": [dict(a1, sort_order=1, host_order_updated_at=1700009000000, last_order_source="host"), dict(a2, sort_order=1, host_order_updated_at=1700009000000), _req(1004, "Ada", "Delta")]},
+                                                                   {"op": "remote_arrive", "requests": [dict(a1, sort_order=9, host_order_updated_at=1700009000001, last_order_source="host"), a2, dict(_req(1004, "Ada", "Delta"), sort_order=0)]}],
+        "lock_reweave_after_a_moved_newcomer_when_an_existing_singer_adds": [cfg, {"op": "remote_arrive", "requests": [a1, b1, _req(1004, "Cy", "Delta"), _req(1005, "Dee", "Echo")]},
+                                                                             {"op": "move_singer", "singer": "S3", "where": "top"}, {"op": "rotation_lock"},
+                                                                             {"op": "remote_arrive", "requests": [_req(1006, "Eve", "Foxtrot"), _req(1007, "Flo", "Golf"), _req(1008, "Gus", "Hotel")]},
+                                                                             {"op": "move_singer", "singer": "S7", "where": "top"}, {"op": "move_singer", "singer": "S6", "where": "up"},
+                                                                             {"op": "remote_arrive", "requests": [_req(1009, "Bob", "India")]}, {"op": "add_song", "singer": "Dee", "title": "L"}],
+        "request_order_from_queue_position_on_a_waitlist_add": [dict(cfg, waitlist=True), {"op": "remote_arrive", "requests": [dict(_waiting(1002, "Ada", "Bravo"), sort_order=0, queue_position=7), dict(_waiting(1003, "Bob", "Charlie"), sort_order="bad")]},
+                                                                {"op": "waitlist_add", "request_id": 1002}, {"op": "waitlist_add", "request_id": 1003}],
+        "revision_key_alone_and_mid_range_stamps": [cfg, {"op": "remote_arrive", "requests": [a1, a2]}, {"op": "remove_song", "entry": "R1001"}, {"op": "remote_arrive", "requests": [a1, a2]}, {"op": "restart"},
+                                                    {"op": "remote_arrive", "requests": [dict(a2, revision=50, host_order_updated_at=500000000000), dict(a1, revision=50, host_order_updated_at=500000000000)]},
+                                                    {"op": "remote_arrive", "requests": [a1, dict(a2, revision="70", host_order_updated_at=1700009999000)]}],
+        "equal_sort_order_ties_break_by_request_id": [cfg, {"op": "remote_arrive", "requests": [a1, a2, _req(1004, "Ada", "Delta")]}, {"op": "restart"},
+                                                      {"op": "remote_arrive", "requests": [dict(a2, sort_order=1, host_order_updated_at=1700009000000), dict(_req(1004, "Ada", "Delta"), sort_order=1, host_order_updated_at=1700009000000), dict(a1, sort_order=1, host_order_updated_at=1700009000000, last_order_source="host")]}],
+        "host_echo_with_an_equal_stamp_applies_but_a_stale_revision_does_not": [cfg, {"op": "remote_arrive", "requests": [a1, a2]}, {"op": "restart"},
+                                                                                 {"op": "remote_arrive", "requests": [dict(a2, host_order_updated_at=1700000002001), dict(a1, host_order_updated_at=1700000002001, last_order_source="host")]},
+                                                                                 {"op": "remote_arrive", "requests": [dict(a1, singer_order_updated_at=1700009999000, last_order_source="singer"), dict(a2, singer_order_updated_at=1700009999000, last_order_source="singer")]},
+                                                                                 {"op": "remote_arrive", "requests": [dict(a2, order_revision=99, host_order_updated_at=1700005000000), dict(a1, order_revision=99, host_order_updated_at=1700005000000)]}],
+        "revision_key_alone_beats_the_local_revision": [cfg, {"op": "remote_arrive", "requests": [a1, a2]}, {"op": "restart"}, {"op": "remote_arrive", "requests": [dict(a2, revision=50, host_order_updated_at=1700009999000), dict(a1, revision=50, host_order_updated_at=1700009999000)]}],
+        "echo_with_the_pending_stamp_clears_the_pending_order": [cfg, {"op": "remote_arrive", "requests": [a1, a2]}, {"op": "move_song", "entry": "R1002", "where": "top"},
+                                                                 {"op": "remote_arrive", "requests": [dict(a2, host_order_updated_at=1700000003000, last_order_source="host"), dict(a1, host_order_updated_at=1700000003000)]}],
         "accepting_off_blocks_new_arrivals": [cfg, {"op": "config", "requests_accepting": False}, {"op": "remote_arrive", "requests": [a1]},
                                               {"op": "config", "requests_accepting": True}, {"op": "remote_arrive", "requests": [a1]}],
     }
@@ -760,7 +821,7 @@ def generate_stream(seed: int, length: int = 40, profile: str = "full") -> list[
             choices += ["wl_restore"]
         choices += ["restart", "stale_ref"]
         if profile != "core":  # waitlist pressure: re-lists in other shapes, toggling the setting, stale ids, id reuse
-            choices += ["term", "term", "term_stale", "term_reuse"]
+            choices += ["term", "term", "term_stale", "term_reuse", "ordr", "ordr", "ordr", "ordr"]
             choices += ["lock", "lock", "lock", "wl_relist", "wl_relist", "wl_as_pending", "wl_flip", "wl_stale", "wl_reuse", "wl_flags", "wl_add_hot", "wl_both", "wl_both"]
             if snap["waitlist"]:
                 choices += ["wl_add_hot"] * 2
@@ -830,6 +891,22 @@ def generate_stream(seed: int, length: int = 40, profile: str = "full") -> list[
             emit({"op": "remote_arrive", "requests": [dict(r, state="waiting", pending_reason="rotation_full", **rng.choice([{"sent": True}, {"delivered": 1}, {"added_at": 7}, {}]))]})  # lifecycle state outranks transport flags
         elif pick == "wl_add_hot" and snap["waitlist"]:
             emit({"op": "waitlist_add", "request_id": int(rng.choice(sorted(snap["waitlist"])))})
+        elif pick == "ordr" and arrived:
+            base = 1_700_000_000 + rng.randint(0, 80)
+            def stamp():
+                return rng.choice([0, None, "", 500_000_000_000, base, base * 1000, base * 1000 + 500, str(base * 1000), "abc", -5, 1_700_000_000_000 + rng.randint(0, 80_000)])
+            rows = []
+            for r in rng.sample(arrived, min(len(arrived), rng.randint(1, 4))):
+                row = dict(r)
+                if rng.random() < 0.6:
+                    row["sort_order"] = rng.choice([None, 0, 1, 2, 5, "3", "", "x", 2.5, True, -1])
+                if rng.random() < 0.7:
+                    row["host_order_updated_at"] = stamp()
+                    row["singer_order_updated_at"] = stamp()
+                    row["order_revision"] = rng.choice([0, 1, 2, 7, "5", "x", 3.7, None])
+                    row[rng.choice(["last_order_source", "order_source"])] = rng.choice(["host", "singer", "server", "HOST", "other", "", " Singer "])
+                rows.append(row)
+            emit({"op": "remote_arrive", "requests": rows})
         elif pick == "term" and arrived:
             r = rng.choice(arrived)
             how = rng.choice([{"state": "completed"}, {"state": "removed"}, {"state": "sung"}, {"removed_at": 9}, {"completed_at": 9}, {"removed_at": 0}, {"state": "skipped"}])

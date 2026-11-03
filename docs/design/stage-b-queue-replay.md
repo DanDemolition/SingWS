@@ -329,3 +329,54 @@ no new event (a terminal row is an ordinary `remote_arrive` row); 14 adversarial
 Slice A result: parity IDENTICAL on 37 adversarial cases plus seeded streams (`parity --seeds 100`: 143/143 before the last case was added; `--seeds 20`: 64/64 after).
 Mutation (`MUTATE_SEEDS=120`): 159 killed, 35 documented equivalent, 2 survivors (#102, #187); a targeted case was added for each and both are now killed
 (re-checked alone with `MUTATE_ONLY=102,187`; the full run was not repeated after those two cases).
+
+## M6: `sort_order`, order timestamps, revisions and pending host orders (Stage B step 4, slice B)
+
+Oracle: the real `_reconcile_remote_requests` ordering tail, `_remote_order_meta_from_req`, `_merge_remote_order_meta`, `_incoming_order_timestamp`,
+`_coerce_order_timestamp`, `_apply_order_meta_to_singer`, `_record_host_singer_order_change`, `_remote_order_now_ms`, and the real `_sync_remote_singer_order` (the harness no
+longer stubs it; its network half returns at once because no `base_url`/key is set). Harness changes: snapshot fields per singer `host_order_updated_at`,
+`singer_order_updated_at`, `order_revision`, `last_order_source`; per song `request_order`; top level `queue_revision` and `pending_order_syncs`
+(singer key -> request_ids, host stamp, revision, source). Rows may carry `sort_order`, `queue_position`, `host_order_updated_at`, `singer_order_updated_at`,
+`order_revision`/`revision`, `last_order_source`/`order_source`. New cases: `sort_order_*`, `host_reorder_survives_a_stale_poll_until_echoed`, `echo_with_old_host_stamp_is_overridden`,
+`newer_singer_order_beats_the_host`, `newer_revision_beats_the_host`, `older_singer_order_is_ignored`, `order_stamps_survive_a_restart_but_pending_does_not`,
+`host_adds_and_removes_record_the_order`; generator pick `ordr` (random stamps in seconds and milliseconds, odd values, odd sources/revisions).
+
+### Rules
+
+1. **`_queue_revision` is behaviour, not bookkeeping.** The order rules compare revisions, so the model keeps the counter. It is +1 on: a NEW tombstone (an existing one returns
+   first), a server-terminal removal that removed at least one entry, `waitlist_restore`, and every host order record. It resets to 0 on restart (stamps stored on singers survive; the counter does not).
+2. **Host order record** (`_sync_remote_singer_order` -> `_record_host_singer_order_change`), run on the singer: revision +1; `host_order_updated_at = max(now_ms, prev+1)` where
+   `prev` is the larger of the singer's two stamps (coerced) and `now_ms = int(time.time()*1000)`; `order_revision = queue_revision`; `last_order_source = "host"`;
+   `singer_order_updated_at` defaults to 0. If the singer's name key and its remote request-id list are both non-empty, `pending[name_key]` = (ids in song order, stamp, revision).
+   It is triggered by: **every successful add that is not suppressed as a duplicate** (a new singer row or a new song on an existing one: host add, remote arrival, waitlist add, via
+   `_mark_inserted_singer_order_authoritative`), `move_song` that moves something, and `remove_song` when the singer still exists. NOT by singer moves, skips, remove-singer, complete, terminal rows.
+   Consequence: after any add the singer carries a host stamp, so a plain server poll (source "server", no stamps) can no longer reorder their songs.
+3. **`request_order`.** At add time `float(sort_order or queue_position or request_id)` (falsy values fall through; an unparsable one falls back to `float(request_id)`); host adds have none.
+   After every reconcile each queued entry with a request id gets `float(sort_order)` of the LAST payload row for the id, else `float(request_id)` for a row without a usable
+   sort_order, else its stored value (entries the payload no longer lists keep theirs). Note `sort_order` 0 counts here but not at add time.
+4. **Per-singer wire order.** The ids of a singer's rows (queue singer lowercased, payload order, duplicates kept). If ANY of the singer's rows has a sort_order that is not None/""
+   and parses with `float`, the ids are stably sorted by `(sort_order, id)`; ids without one sort last in payload-rank order (last index wins for duplicates). No usable sort_order = wire order.
+5. **Pending host order vs the poll** (per pending singer): with the pending ids (those still in the payload) non-empty and set-equal to the server's ids: if the server order EQUALS the pending order,
+   a nonzero incoming host stamp OLDER than the pending one keeps the pending order (stale echo); otherwise the pending entry is dropped (echoed). If the orders differ, the pending order wins
+   unless the incoming source is `singer` with a stamp newer than the pending host stamp. Incoming stamp = singer stamp for source singer, host stamp for host, the larger of both otherwise.
+   A pending entry for a set that differs (a song added or dropped) stays untouched and is never cleared by a poll.
+6. **Apply decision** (only singers with >= 2 songs and a non-empty order): forced if the final order equals the pending ids; else if the singer has a host stamp: allowed when (singer-source and
+   newer than the local host stamp), (host-source and not older), or (incoming revision > local revision and incoming stamp >= both local stamps); otherwise ignored. With no local host stamp:
+   ignored only if the singer has a singer stamp and the incoming stamp is nonzero and older. When applied, only the server-known entries are permuted among their own positions
+   (host-local songs keep their slots), then the metadata is merged into the singer (maxima of the stamps and revision; the source is overwritten only if any of the three is nonzero).
+   Incoming metadata for a singer is the merge over all their rows (maxima, last row's source). Singers with one song never get the metadata applied.
+7. `_coerce_order_timestamp`: None/""/non-numeric/<=0 -> 0; below 1e11 means seconds and is multiplied by 1000; nan/inf -> 0. Revision: `int(order_revision or revision or 0)`, 0 if it does not parse
+   (`"3.5"` is 0, `3.7` is 3). Source: `last_order_source or order_source or "server"`, lowercased, anything but host/singer/server becomes server.
+
+### Surprises (reported, NOT changed)
+
+- **The host stamp that every add leaves behind makes `sort_order` inert** for polls without newer stamps: the sort happens, then the apply decision refuses it (`ignored_stale_remote_order`).
+  A server that only conveys order by `sort_order` (no stamps) never reorders a singer who has had a song added on the desktop. Observed in `sort_order_resorts_a_singers_songs`.
+- A `host`-source echo with an UNCHANGED stamp counts as an echo (`>=`), so a replayed old echo re-applies.
+- `request_order` for the same id differs between the add (`0` falls through to the id) and the poll (`0` is kept): a request with sort_order 0 flips between its id and 0.
+- A pending entry is only compared when the id sets match exactly; if the server drops one song, the pending entry lingers (and keeps forcing nothing) until a later poll matches again or the app restarts.
+- `float("nan")` as a sort_order is accepted by Python (compare is then arbitrary) and cannot be represented in the JSON the model speaks: the generator never sends it. Not modelled.
+
+Slice B result: full `parity --seeds 150` IDENTICAL on 211/211 streams (all adversarial cases plus seeded `core` and `full` streams); `tools/mutate_queue_state.py` with `MUTATE_SEEDS=100`:
+212 killed, 47 documented equivalent, 0 survived, 0 invalid. (The earlier mutants whose patterns the slice-A and slice-B edits moved were rewritten, and the generator's choice list grew, so
+seed-dependent kills were backed by deterministic cases.)
