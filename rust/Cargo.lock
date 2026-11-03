@@ -2143,6 +2143,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "singws-bgm-policy"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "singws-plan",
+]
+
+[[package]]
 name = "singws-cdg"
 version = "0.1.0"
 dependencies = [

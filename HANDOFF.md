@@ -2110,3 +2110,6 @@ Earlier sections of this file described the same work while it was still
 uncommitted, plus a "current state" describing `0.4.5.3` as the tip. All of it
 is now covered by the branch above and has been removed: `CLAUDE.md` imports
 this file, so anything stale here is read into every session as pending work.
+
+## STATE 2026-11-02: BGM player policy in Rust (offline proof, uncommitted)
+New crate `rust/crates/singws-bgm-policy` + `docs/design/stage-e-bgm-policy.md`; harness `tools/bgm_policy_scenarios.py`, parity `tools/bgm_policy_parity.py` (identical on 1,555 scenarios), mutation `tools/mutate_bgm_policy.py` (211 mutants; 25 survivors, ~16 are corpus GAPs listed in `SURVIVOR_NOTES`). Nothing in the app uses it; 12 Python oddities are in the doc (e.g. a tick can undo a fade-out).

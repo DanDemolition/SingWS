@@ -1,0 +1,18 @@
+[package]
+name = "singws-bgm-policy"
+version = "0.1.0"
+edition = "2021"
+description = "Offline port of the DECISIONS of BackgroundMusicPlayer (0.2.18.1.py): playlist advance, the 500 ms scheduler, preload, adaptive crossfade, hold/fade sequencing. Pure (no I/O, no clock, no engine); replays the events of tools/bgm_policy_scenarios.py. Proof only: Rust drives nothing."
+publish = false
+
+[lib]
+name = "singws_bgm_policy"
+path = "src/lib.rs"
+
+[[bin]]
+name = "singws-bgm-policy"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = { version = "1.0.151", features = ["float_roundtrip"] }
+singws-plan = { path = "../singws-plan" }
