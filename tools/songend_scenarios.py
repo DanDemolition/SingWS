@@ -699,6 +699,26 @@ def scripted():
     out.append(scen("auto_advance_stale_generation", [start(0, "cdg", 60.0, {}, duration_hint=60.0), at(58, "eos"), at(58.2, "set", attrs={"_confirmed_singer_start_generation": 1})], 70, karaoke_auto_advance=True))
     out.append(scen("auto_advance_yields_to_active_command", [start(0, "cdg", 60.0, {}, duration_hint=60.0), at(58, "eos"), at(58.2, "set", attrs={"_next_in_progress": True})], 70, karaoke_auto_advance=True))
     out.append(scen("auto_advance_yields_to_pending_start", [start(0, "cdg", 60.0, {}, duration_hint=60.0), at(58, "eos"), at(58.2, "set", attrs={"_pending_play_start_token": 5})], 70, karaoke_auto_advance=True))
+    out.append(scen("verified_end_crossfade_off_early_end", [start(0, "cdg", 200.0, arm_ok, library_path=LIB, duration_hint=200.0)], 215, karaoke_bgm_crossfade_enabled=False))
+    sc_ = scen("verified_prefire_window_tie", [start(0, "cdg", 200.0, arm_ok, library_path=LIB, duration_hint=200.0)], 215, bgm_overlap_before_audio_end_sec=1.0)
+    sc_["tick_skips"] = [[192, 193]]
+    out.append(sc_)
+    out.append(scen("verified_meter_exactly_at_threshold", [start(0, "cdg", 200.0, arm_ok, library_path=LIB, duration_hint=200.0, level_db=-38.0)], 215))
+    out.append(scen("legacy_meter_exactly_at_threshold", [start(0, "cdg", 200.0, {"cached": {LIB: {"duration": 200.0, "audio_end": 190.0}, "/t/x.cdg": {"visual_end": 192.0, "visual_confidence": 0.9}}},
+                                                          library_path=LIB, duration_hint=200.0, sectors=50, level_db=-38.0)], 215,
+                    karaoke_trim_verified_tail=False, karaoke_allow_early_silence_trim=True, end_silence_trim_enabled=True))
+    out.append(scen("stop_in_progress_and_handoff_active", [start(0, "cdg", 60.0, {}, duration_hint=60.0), at(30, "eos"), at(30.5, "set", attrs={"_stop_in_progress": True}), at(31, "eos"),
+                                                            at(31.5, "set", attrs={"_stop_in_progress": False})], 60))
+    out.append(scen("cleanup_bg_playing_empty_playlist", [start(0, "cdg", 60.0, {}, duration_hint=60.0), at(5, "set", bg_playing=True, bg_playlist=False), at(58, "eos")], 80, karaoke_bgm_crossfade_enabled=False))
+    for nm, attrs in (("stale_generation", {"_confirmed_singer_start_generation": 1}), ("next_in_progress", {"_next_in_progress": True}),
+                      ("pending_token", {"_pending_play_start_token": 5}), ("both_busy", {"_next_in_progress": True, "_pending_play_start_token": 5}), ("runs", {})):
+        out.append(scen("verified_tail_auto_advance_" + nm, [start(0, "cdg", 200.0, arm_ok, library_path=LIB, duration_hint=200.0), at(195.7, "set", attrs=attrs)], 215, karaoke_auto_advance=True))
+    out.append(scen("legacy_mp4_not_near_end", [start(0, "mp4", 400.0, {"cached": {LIB: {"duration": 300.0, "audio_end": 295.0}, "/t/x.mp4": {"visual_end": 296.0, "visual_confidence": 0.9}}},
+                                               library_path=LIB, audio_path="/t/x.mp4", visual_path="/t/x.mp4")], 410,
+                    karaoke_trim_verified_tail=False, karaoke_allow_early_silence_trim=True, end_silence_trim_enabled=True))
+    sc_ = scen("overlap_start_blocked_by_session_gate", [start(0, "cdg", 60.0, {}, duration_hint=60.0), at(30, "eos")], 60)
+    sc_["bgm_session_started"] = False
+    out.append(sc_)
     out.append(scen("eos_error_trigger", [start(0, "cdg", 60.0, {}, duration_hint=60.0), at(58, "eos", trigger="error")], 70))
     out.append(scen("eos_with_bg_already_playing", [start(0, "cdg", 60.0, {}, duration_hint=60.0), at(5, "set", bg_playing=True), at(58, "eos")], 70))
     out.append(scen("eos_bg_playing_not_audible", [start(0, "cdg", 60.0, {}, duration_hint=60.0), at(5, "set", bg_playing=True, bg_audible=False), at(58, "eos")], 80))

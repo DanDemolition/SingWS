@@ -25,7 +25,7 @@ ONLY = {int(x) for x in os.environ.get("MUTATE_ONLY", "").split(",") if x}
 SEEDS = int(os.environ.get("MUTATE_SEEDS", "400"))
 PROFILE = os.environ.get("MUTATE_PROFILE", "dev")
 
-from mutants_songend import NOTES  # noqa: E402
+from mutants_songend import NOTES, classify  # noqa: E402
 
 
 def code_spans(line):
@@ -167,14 +167,15 @@ def main():
                 print(f"#{i} L{ln} {lines[ln-1][s:e]!r}->{new!r}: killed by {killed}", flush=True)
             else:
                 key = f"L{ln}:{lines[ln-1][s:e]}->{new}"
-                note = NOTES.get(key, "")
+                note = NOTES.get(key) or classify(snippet, lines[ln-1][s:e], new)
                 print(f"#{i} L{ln} {lines[ln-1][s:e]!r}->{new!r}: SURVIVED {note or '(UNDOCUMENTED)'}   [{snippet}]", flush=True)
                 survivors.append((i, key, note, snippet))
     finally:
         SRC.write_text(original)
     undocumented = [x for x in survivors if not x[2]]
     gaps = [x for x in survivors if x[2].startswith("GAP")]
-    print(f"mutants={len(muts)} killed={killed_n} survivors={len(survivors)} documented-equivalent={len(survivors) - len(undocumented) - len(gaps)} "
+    equiv = [x for x in survivors if x[2].startswith("equivalent")]
+    print(f"mutants={len(muts)} killed={killed_n} survivors={len(survivors)} documented-equivalent={len(equiv)} "
           f"open-GAPs={len(gaps)} undocumented={len(undocumented)} non-compiling={len(noncompiling)}")
     for i, key, note, snippet in undocumented:
         print(f"  UNDOCUMENTED #{i} {key} [{snippet}]")
