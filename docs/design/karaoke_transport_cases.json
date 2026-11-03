@@ -1,0 +1,2635 @@
+[
+ {
+  "name": "steady_play",
+  "mode": "cdg",
+  "audio": "/tmp/song.mp3",
+  "video": "/tmp/song.cdg",
+  "voice": true,
+  "run_ms": 3000,
+  "steps": [
+   {
+    "t": 0,
+    "op": "start"
+   },
+   {
+    "t": 200,
+    "op": "world",
+    "set": {
+     "voice_ready": true
+    }
+   }
+  ]
+ },
+ {
+  "name": "steady_play_key_tempo_before_start",
+  "mode": "cdg",
+  "audio": "/tmp/song.mp3",
+  "video": "/tmp/song.cdg",
+  "voice": true,
+  "run_ms": 3000,
+  "steps": [
+   {
+    "t": 0,
+    "op": "modifiers",
+    "tempo": 0.9,
+    "semitones": 2.0
+   },
+   {
+    "t": 0,
+    "op": "start"
+   },
+   {
+    "t": 100,
+    "op": "world",
+    "set": {
+     "voice_ready": true
+    }
+   }
+  ]
+ },
+ {
+  "name": "voice_slow_but_in_time",
+  "mode": "cdg",
+  "audio": "/tmp/song.mp3",
+  "video": "/tmp/song.cdg",
+  "voice": true,
+  "run_ms": 5000,
+  "steps": [
+   {
+    "t": 0,
+    "op": "start"
+   },
+   {
+    "t": 3500,
+    "op": "world",
+    "set": {
+     "voice_ready": true
+    }
+   }
+  ]
+ },
+ {
+  "name": "voice_not_ready_in_4s",
+  "mode": "cdg",
+  "audio": "/tmp/song.mp3",
+  "video": "/tmp/song.cdg",
+  "voice": true,
+  "run_ms": 6000,
+  "steps": [
+   {
+    "t": 0,
+    "op": "start"
+   }
+  ]
+ },
+ {
+  "name": "voice_ready_exactly_at_the_limit",
+  "mode": "cdg",
+  "audio": "/tmp/song.mp3",
+  "video": "/tmp/song.cdg",
+  "voice": true,
+  "run_ms": 6000,
+  "steps": [
+   {
+    "t": 0,
+    "op": "start"
+   },
+   {
+    "t": 4000,
+    "op": "world",
+    "set": {
+     "voice_ready": true
+    }
+   }
+  ]
+ },
+ {
+  "name": "voice_clock_never_moves",
+  "mode": "cdg",
+  "audio": "/tmp/song.mp3",
+  "video": "/tmp/song.cdg",
+  "voice": true,
+  "run_ms": 3000,
+  "steps": [
+   {
+    "t": 0,
+    "op": "start"
+   },
+   {
+    "t": 100,
+    "op": "world",
+    "set": {
+     "voice_ready": true,
+     "voice_moves": false
+    }
+   }
+  ]
+ },
+ {
+  "name": "picture_slow_to_load_then_voice_ok",
+  "mode": "cdg",
+  "audio": "/tmp/song.mp3",
+  "video": "/tmp/song.cdg",
+  "voice": true,
+  "run_ms": 9000,
+  "steps": [
+   {
+    "t": 0,
+    "op": "start"
+   },
+   {
+    "t": 6000,
+    "op": "world",
+    "set": {
+     "picture_duration_ms": 200000
+    }
+   },
+   {
+    "t": 6500,
+    "op": "world",
+    "set": {
+     "voice_ready": true
+    }
+   }
+  ],
+  "duration_ms": 0
+ },
+ {
+  "name": "picture_loads_late_voice_never_ready",
+  "mode": "cdg",
+  "audio": "/tmp/song.mp3",
+  "video": "/tmp/song.cdg",
+  "voice": true,
+  "run_ms": 12000,
+  "steps": [
+   {
+    "t": 0,
+    "op": "start"
+   },
+   {
+    "t": 6000,
+    "op": "world",
+    "set": {
+     "picture_duration_ms": 200000
+    }
+   }
+  ],
+  "duration_ms": 0
+ },
+ {
+  "name": "picture_never_loads_hard_deadline",
+  "mode": "cdg",
+  "audio": "/tmp/song.mp3",
+  "video": "/tmp/song.cdg",
+  "voice": true,
+  "run_ms": 21500,
+  "steps": [
+   {
+    "t": 0,
+    "op": "start"
+   }
+  ],
+  "duration_ms": 0
+ },
+ {
+  "name": "seek_in_front_of_a_dead_zone",
+  "mode": "cdg",
+  "audio": "/tmp/song.mp3",
+  "video": "/tmp/song.cdg",
+  "voice": true,
+  "run_ms": 3000,
+  "steps": [
+   {
+    "t": 0,
+    "op": "start"
+   },
+   {
+    "t": 100,
+    "op": "world",
+    "set": {
+     "voice_ready": true
+    }
+   },
+   {
+    "t": 1000,
+    "op": "seek",
+    "seconds": 50.0
+   },
+   {
+    "t": 1500,
+    "op": "world",
+    "set": {
+     "voice_ready": true
+    }
+   }
+  ],
+  "zones": [
+   [
+    100.0,
+    130.0
+   ],
+   [
+    150.0,
+    160.0
+   ]
+  ]
+ },
+ {
+  "name": "seek_into_dead_zones_is_clamped",
+  "mode": "cdg",
+  "audio": "/tmp/song.mp3",
+  "video": "/tmp/song.cdg",
+  "voice": true,
+  "run_ms": 6500,
+  "steps": [
+   {
+    "t": 0,
+    "op": "start"
+   },
+   {
+    "t": 100,
+    "op": "world",
+    "set": {
+     "voice_ready": true
+    }
+   },
+   {
+    "t": 1000,
+    "op": "seek",
+    "seconds": 115.0
+   },
+   {
+    "t": 1200,
+    "op": "world",
+    "set": {
+     "voice_ready": true
+    }
+   },
+   {
+    "t": 2000,
+    "op": "seek",
+    "seconds": 155.0
+   },
+   {
+    "t": 2200,
+    "op": "world",
+    "set": {
+     "voice_ready": true
+    }
+   },
+   {
+    "t": 3000,
+    "op": "seek",
+    "seconds": 130.0
+   },
+   {
+    "t": 3200,
+    "op": "world",
+    "set": {
+     "voice_ready": true
+    }
+   },
+   {
+    "t": 4000,
+    "op": "seek",
+    "seconds": 100.0
+   },
+   {
+    "t": 4200,
+    "op": "world",
+    "set": {
+     "voice_ready": true
+    }
+   },
+   {
+    "t": 5000,
+    "op": "seek",
+    "seconds": 160.0
+   },
+   {
+    "t": 5200,
+    "op": "world",
+    "set": {
+     "voice_ready": true
+    }
+   }
+  ],
+  "zones": [
+   [
+    100.0,
+    130.0
+   ],
+   [
+    150.0,
+    160.0
+   ]
+  ]
+ },
+ {
+  "name": "seek_zones_ignored_for_mp4",
+  "mode": "mp4",
+  "audio": "/tmp/song.mp3",
+  "video": "/tmp/song.cdg",
+  "voice": true,
+  "run_ms": 2500,
+  "steps": [
+   {
+    "t": 0,
+    "op": "start"
+   },
+   {
+    "t": 100,
+    "op": "world",
+    "set": {
+     "voice_ready": true
+    }
+   },
+   {
+    "t": 1000,
+    "op": "seek",
+    "seconds": 115.0
+   },
+   {
+    "t": 1200,
+    "op": "world",
+    "set": {
+     "voice_ready": true
+    }
+   }
+  ],
+  "zones": [
+   [
+    100.0,
+    130.0
+   ]
+  ]
+ },
+ {
+  "name": "start_inside_a_dead_zone_is_clamped",
+  "mode": "cdg",
+  "audio": "/tmp/song.mp3",
+  "video": "/tmp/song.cdg",
+  "voice": true,
+  "run_ms": 2000,
+  "steps": [
+   {
+    "t": 0,
+    "op": "start",
+    "start": 115.0
+   },
+   {
+    "t": 100,
+    "op": "world",
+    "set": {
+     "voice_ready": true
+    }
+   }
+  ],
+  "zones": [
+   [
+    100.0,
+    130.0
+   ]
+  ]
+ },
+ {
+  "name": "seek_near_the_end_and_below_zero",
+  "mode": "cdg",
+  "audio": "/tmp/song.mp3",
+  "video": "/tmp/song.cdg",
+  "voice": true,
+  "run_ms": 3200,
+  "steps": [
+   {
+    "t": 0,
+    "op": "start"
+   },
+   {
+    "t": 100,
+    "op": "world",
+    "set": {
+     "voice_ready": true
+    }
+   },
+   {
+    "t": 1000,
+    "op": "seek",
+    "seconds": 199.5
+   },
+   {
+    "t": 1100,
+    "op": "world",
+    "set": {
+     "voice_ready": true
+    }
+   },
+   {
+    "t": 2000,
+    "op": "seek",
+    "seconds": -5.0
+   },
+   {
+    "t": 2100,
+    "op": "world",
+    "set": {
+     "voice_ready": true
+    }
+   }
+  ]
+ },
+ {
+  "name": "seek_while_starting_is_a_plain_seek",
+  "mode": "cdg",
+  "audio": "/tmp/song.mp3",
+  "video": "/tmp/song.cdg",
+  "voice": true,
+  "run_ms": 1500,
+  "steps": [
+   {
+    "t": 0,
+    "op": "start"
+   },
+   {
+    "t": 200,
+    "op": "seek",
+    "seconds": 30.0
+   },
+   {
+    "t": 300,
+    "op": "world",
+    "set": {
+     "voice_ready": true
+    }
+   }
+  ]
+ },
+ {
+  "name": "seek_voice_never_refills_drops_3s_later",
+  "mode": "cdg",
+  "audio": "/tmp/song.mp3",
+  "video": "/tmp/song.cdg",
+  "voice": true,
+  "run_ms": 6000,
+  "steps": [
+   {
+    "t": 0,
+    "op": "start"
+   },
+   {
+    "t": 100,
+    "op": "world",
+    "set": {
+     "voice_ready": true
+    }
+   },
+   {
+    "t": 1000,
+    "op": "seek",
+    "seconds": 60.0
+   }
+  ]
+ },
+ {
+  "name": "seek_twice_during_the_wait",
+  "mode": "cdg",
+  "audio": "/tmp/song.mp3",
+  "video": "/tmp/song.cdg",
+  "voice": true,
+  "run_ms": 3500,
+  "steps": [
+   {
+    "t": 0,
+    "op": "start"
+   },
+   {
+    "t": 100,
+    "op": "world",
+    "set": {
+     "voice_ready": true
+    }
+   },
+   {
+    "t": 1000,
+    "op": "seek",
+    "seconds": 60.0
+   },
+   {
+    "t": 1500,
+    "op": "seek",
+    "seconds": 70.0
+   },
+   {
+    "t": 1800,
+    "op": "world",
+    "set": {
+     "voice_ready": true
+    }
+   }
+  ]
+ },
+ {
+  "name": "seek_during_voice_wait",
+  "mode": "cdg",
+  "audio": "/tmp/song.mp3",
+  "video": "/tmp/song.cdg",
+  "voice": true,
+  "run_ms": 2500,
+  "steps": [
+   {
+    "t": 0,
+    "op": "start"
+   },
+   {
+    "t": 100,
+    "op": "world",
+    "set": {
+     "voice_ready": true,
+     "voice_moves": false
+    }
+   },
+   {
+    "t": 200,
+    "op": "seek",
+    "seconds": 20.0
+   },
+   {
+    "t": 500,
+    "op": "world",
+    "set": {
+     "voice_ready": true,
+     "voice_moves": true
+    }
+   }
+  ]
+ },
+ {
+  "name": "pause_and_resume_while_running",
+  "mode": "cdg",
+  "audio": "/tmp/song.mp3",
+  "video": "/tmp/song.cdg",
+  "voice": true,
+  "run_ms": 3000,
+  "steps": [
+   {
+    "t": 0,
+    "op": "start"
+   },
+   {
+    "t": 100,
+    "op": "world",
+    "set": {
+     "voice_ready": true
+    }
+   },
+   {
+    "t": 1000,
+    "op": "pause"
+   },
+   {
+    "t": 1200,
+    "op": "query_paused"
+   },
+   {
+    "t": 1500,
+    "op": "resume"
+   },
+   {
+    "t": 1600,
+    "op": "query_paused"
+   }
+  ]
+ },
+ {
+  "name": "pause_during_the_start_sequence",
+  "mode": "cdg",
+  "audio": "/tmp/song.mp3",
+  "video": "/tmp/song.cdg",
+  "voice": true,
+  "run_ms": 2500,
+  "steps": [
+   {
+    "t": 0,
+    "op": "start"
+   },
+   {
+    "t": 100,
+    "op": "pause"
+   },
+   {
+    "t": 200,
+    "op": "query_paused"
+   },
+   {
+    "t": 300,
+    "op": "world",
+    "set": {
+     "voice_ready": true
+    }
+   },
+   {
+    "t": 1000,
+    "op": "resume"
+   },
+   {
+    "t": 1010,
+    "op": "query_paused"
+   }
+  ]
+ },
+ {
+  "name": "pause_before_the_voice_is_ready_then_ready",
+  "mode": "cdg",
+  "audio": "/tmp/song.mp3",
+  "video": "/tmp/song.cdg",
+  "voice": true,
+  "run_ms": 2500,
+  "steps": [
+   {
+    "t": 0,
+    "op": "start"
+   },
+   {
+    "t": 50,
+    "op": "pause"
+   },
+   {
+    "t": 100,
+    "op": "world",
+    "set": {
+     "voice_ready": true
+    }
+   },
+   {
+    "t": 800,
+    "op": "resume"
+   }
+  ]
+ },
+ {
+  "name": "pause_during_a_seek_wait",
+  "mode": "cdg",
+  "audio": "/tmp/song.mp3",
+  "video": "/tmp/song.cdg",
+  "voice": true,
+  "run_ms": 3500,
+  "steps": [
+   {
+    "t": 0,
+    "op": "start"
+   },
+   {
+    "t": 100,
+    "op": "world",
+    "set": {
+     "voice_ready": true
+    }
+   },
+   {
+    "t": 1000,
+    "op": "seek",
+    "seconds": 60.0
+   },
+   {
+    "t": 1100,
+    "op": "pause"
+   },
+   {
+    "t": 1200,
+    "op": "world",
+    "set": {
+     "voice_ready": true
+    }
+   },
+   {
+    "t": 1600,
+    "op": "resume"
+   }
+  ]
+ },
+ {
+  "name": "seek_holding_is_not_paused",
+  "mode": "cdg",
+  "audio": "/tmp/song.mp3",
+  "video": "/tmp/song.cdg",
+  "voice": true,
+  "run_ms": 1500,
+  "steps": [
+   {
+    "t": 0,
+    "op": "start"
+   },
+   {
+    "t": 100,
+    "op": "world",
+    "set": {
+     "voice_ready": true
+    }
+   },
+   {
+    "t": 1000,
+    "op": "pause"
+   },
+   {
+    "t": 1000,
+    "op": "world",
+    "set": {
+     "seek_holding": true
+    }
+   },
+   {
+    "t": 1100,
+    "op": "query_paused"
+   }
+  ]
+ },
+ {
+  "name": "tempo_and_key_change_while_running",
+  "mode": "cdg",
+  "audio": "/tmp/song.mp3",
+  "video": "/tmp/song.cdg",
+  "voice": true,
+  "run_ms": 5000,
+  "steps": [
+   {
+    "t": 0,
+    "op": "start"
+   },
+   {
+    "t": 100,
+    "op": "world",
+    "set": {
+     "voice_ready": true
+    }
+   },
+   {
+    "t": 1000,
+    "op": "modifiers",
+    "tempo": 1.25,
+    "semitones": -3.0
+   },
+   {
+    "t": 2000,
+    "op": "modifiers",
+    "tempo": 0.0,
+    "semitones": 0.0
+   },
+   {
+    "t": 3000,
+    "op": "modifiers",
+    "tempo": 3.0,
+    "semitones": 1.5
+   },
+   {
+    "t": 4000,
+    "op": "modifiers",
+    "tempo": 0.2,
+    "semitones": 0.0
+   }
+  ]
+ },
+ {
+  "name": "tempo_rounding_in_the_load",
+  "mode": "cdg",
+  "audio": "/tmp/song.mp3",
+  "video": "/tmp/song.cdg",
+  "voice": true,
+  "run_ms": 1500,
+  "steps": [
+   {
+    "t": 0,
+    "op": "modifiers",
+    "tempo": 1.234,
+    "semitones": 1.5
+   },
+   {
+    "t": 0,
+    "op": "start"
+   },
+   {
+    "t": 100,
+    "op": "world",
+    "set": {
+     "voice_ready": true
+    }
+   }
+  ]
+ },
+ {
+  "name": "no_voice_everything_goes_to_mpv",
+  "mode": "cdg",
+  "audio": "/tmp/song.mp3",
+  "video": "/tmp/song.cdg",
+  "voice": false,
+  "run_ms": 2500,
+  "steps": [
+   {
+    "t": 0,
+    "op": "modifiers",
+    "tempo": 1.1,
+    "semitones": 2.0
+   },
+   {
+    "t": 0,
+    "op": "start"
+   },
+   {
+    "t": 500,
+    "op": "seek",
+    "seconds": 20.0
+   },
+   {
+    "t": 800,
+    "op": "pause"
+   },
+   {
+    "t": 900,
+    "op": "query_paused"
+   },
+   {
+    "t": 1000,
+    "op": "resume"
+   },
+   {
+    "t": 1100,
+    "op": "modifiers",
+    "tempo": 0.8,
+    "semitones": -1.0
+   },
+   {
+    "t": 1500,
+    "op": "volume",
+    "value": 0.5
+   }
+  ]
+ },
+ {
+  "name": "no_voice_cdg_seek_clamped_and_ends",
+  "mode": "cdg",
+  "audio": "/tmp/song.mp3",
+  "video": "/tmp/song.cdg",
+  "voice": false,
+  "run_ms": 1500,
+  "steps": [
+   {
+    "t": 0,
+    "op": "start",
+    "start": 115.0
+   },
+   {
+    "t": 300,
+    "op": "seek",
+    "seconds": 140.0
+   },
+   {
+    "t": 500,
+    "op": "world",
+    "set": {
+     "at_end": true
+    }
+   }
+  ],
+  "zones": [
+   [
+    100.0,
+    130.0
+   ]
+  ]
+ },
+ {
+  "name": "voice_load_error_falls_back_to_mpv_audio",
+  "mode": "cdg",
+  "audio": "/tmp/song.mp3",
+  "video": "/tmp/song.cdg",
+  "voice": true,
+  "run_ms": 1500,
+  "steps": [
+   {
+    "t": 0,
+    "op": "start"
+   },
+   {
+    "t": 500,
+    "op": "modifiers",
+    "tempo": 1.1,
+    "semitones": 2.0
+   },
+   {
+    "t": 600,
+    "op": "volume",
+    "value": 0.7
+   }
+  ],
+  "voice_load_error": "no such file"
+ },
+ {
+  "name": "picture_load_fails_with_a_voice",
+  "mode": "cdg",
+  "audio": "/tmp/song.mp3",
+  "video": "/tmp/song.cdg",
+  "voice": true,
+  "run_ms": 800,
+  "steps": [
+   {
+    "t": 0,
+    "op": "start"
+   }
+  ],
+  "picture_load_ok": false
+ },
+ {
+  "name": "picture_load_fails_without_a_voice",
+  "mode": "cdg",
+  "audio": "/tmp/song.mp3",
+  "video": "/tmp/song.cdg",
+  "voice": false,
+  "run_ms": 800,
+  "steps": [
+   {
+    "t": 0,
+    "op": "start"
+   }
+  ],
+  "picture_load_ok": false
+ },
+ {
+  "name": "empty_source_path",
+  "mode": "cdg",
+  "audio": "/tmp/song.mp3",
+  "video": "",
+  "voice": true,
+  "run_ms": 300,
+  "steps": [
+   {
+    "t": 0,
+    "op": "start"
+   }
+  ]
+ },
+ {
+  "name": "mp4_mode_has_no_audio_file",
+  "mode": "mp4",
+  "audio": "/tmp/song.mp3",
+  "video": "/tmp/song.cdg",
+  "voice": true,
+  "run_ms": 1500,
+  "steps": [
+   {
+    "t": 0,
+    "op": "start"
+   },
+   {
+    "t": 100,
+    "op": "world",
+    "set": {
+     "voice_ready": true
+    }
+   }
+  ]
+ },
+ {
+  "name": "audio_mode_uses_the_audio_path",
+  "mode": "audio",
+  "audio": "/tmp/song.mp3",
+  "video": "/tmp/song.cdg",
+  "voice": true,
+  "run_ms": 1500,
+  "steps": [
+   {
+    "t": 0,
+    "op": "start"
+   },
+   {
+    "t": 100,
+    "op": "world",
+    "set": {
+     "voice_ready": true
+    }
+   }
+  ]
+ },
+ {
+  "name": "audio_mode_empty_audio_path",
+  "mode": "audio",
+  "audio": "",
+  "video": "/tmp/song.cdg",
+  "voice": true,
+  "run_ms": 300,
+  "steps": [
+   {
+    "t": 0,
+    "op": "start"
+   }
+  ]
+ },
+ {
+  "name": "voice_path_falls_back_to_the_video_path",
+  "mode": "cdg",
+  "audio": "",
+  "video": "/tmp/song.cdg",
+  "voice": true,
+  "run_ms": 1500,
+  "steps": [
+   {
+    "t": 0,
+    "op": "start"
+   },
+   {
+    "t": 100,
+    "op": "world",
+    "set": {
+     "voice_ready": true
+    }
+   }
+  ]
+ },
+ {
+  "name": "started_waits_for_the_picture_one_second",
+  "mode": "cdg",
+  "audio": "/tmp/song.mp3",
+  "video": "/tmp/song.cdg",
+  "voice": true,
+  "run_ms": 3000,
+  "steps": [
+   {
+    "t": 0,
+    "op": "start"
+   },
+   {
+    "t": 0,
+    "op": "world",
+    "set": {
+     "visuals": false
+    }
+   },
+   {
+    "t": 100,
+    "op": "world",
+    "set": {
+     "voice_ready": true
+    }
+   },
+   {
+    "t": 2500,
+    "op": "world",
+    "set": {
+     "visuals": true
+    }
+   }
+  ]
+ },
+ {
+  "name": "started_fallback_with_a_100ms_poll",
+  "mode": "cdg",
+  "audio": "/tmp/song.mp3",
+  "video": "/tmp/song.cdg",
+  "voice": true,
+  "run_ms": 3000,
+  "steps": [
+   {
+    "t": 0,
+    "op": "poll_ms",
+    "ms": 100
+   },
+   {
+    "t": 0,
+    "op": "start"
+   },
+   {
+    "t": 0,
+    "op": "world",
+    "set": {
+     "visuals": false
+    }
+   },
+   {
+    "t": 100,
+    "op": "world",
+    "set": {
+     "voice_ready": true
+    }
+   }
+  ]
+ },
+ {
+  "name": "started_fallback_with_a_250ms_poll",
+  "mode": "cdg",
+  "audio": "/tmp/song.mp3",
+  "video": "/tmp/song.cdg",
+  "voice": true,
+  "run_ms": 4000,
+  "steps": [
+   {
+    "t": 0,
+    "op": "poll_ms",
+    "ms": 250
+   },
+   {
+    "t": 0,
+    "op": "start"
+   },
+   {
+    "t": 0,
+    "op": "world",
+    "set": {
+     "visuals": false
+    }
+   },
+   {
+    "t": 100,
+    "op": "world",
+    "set": {
+     "voice_ready": true
+    }
+   }
+  ]
+ },
+ {
+  "name": "poll_interval_16ms_and_clamps",
+  "mode": "cdg",
+  "audio": "/tmp/song.mp3",
+  "video": "/tmp/song.cdg",
+  "voice": true,
+  "run_ms": 4000,
+  "steps": [
+   {
+    "t": 0,
+    "op": "poll_ms",
+    "ms": 5
+   },
+   {
+    "t": 0,
+    "op": "start"
+   },
+   {
+    "t": 0,
+    "op": "world",
+    "set": {
+     "visuals": false
+    }
+   },
+   {
+    "t": 100,
+    "op": "world",
+    "set": {
+     "voice_ready": true
+    }
+   },
+   {
+    "t": 1000,
+    "op": "poll_ms",
+    "ms": 1000
+   },
+   {
+    "t": 2000,
+    "op": "poll_ms",
+    "ms": 0
+   }
+  ]
+ },
+ {
+  "name": "visual_stalled_is_reported_once",
+  "mode": "cdg",
+  "audio": "/tmp/song.mp3",
+  "video": "/tmp/song.cdg",
+  "voice": true,
+  "run_ms": 8000,
+  "steps": [
+   {
+    "t": 0,
+    "op": "start"
+   },
+   {
+    "t": 0,
+    "op": "world",
+    "set": {
+     "visuals": false
+    }
+   },
+   {
+    "t": 100,
+    "op": "world",
+    "set": {
+     "voice_ready": true
+    }
+   },
+   {
+    "t": 5500,
+    "op": "poll_ms",
+    "ms": 100
+   }
+  ]
+ },
+ {
+  "name": "visual_stalled_never_for_mp4",
+  "mode": "mp4",
+  "audio": "/tmp/song.mp3",
+  "video": "/tmp/song.cdg",
+  "voice": true,
+  "run_ms": 8000,
+  "steps": [
+   {
+    "t": 0,
+    "op": "start"
+   },
+   {
+    "t": 0,
+    "op": "world",
+    "set": {
+     "visuals": false
+    }
+   },
+   {
+    "t": 100,
+    "op": "world",
+    "set": {
+     "voice_ready": true
+    }
+   }
+  ]
+ },
+ {
+  "name": "visual_stalled_not_before_5s",
+  "mode": "cdg",
+  "audio": "/tmp/song.mp3",
+  "video": "/tmp/song.cdg",
+  "voice": true,
+  "run_ms": 8000,
+  "steps": [
+   {
+    "t": 0,
+    "op": "start"
+   },
+   {
+    "t": 0,
+    "op": "world",
+    "set": {
+     "visuals": false
+    }
+   },
+   {
+    "t": 100,
+    "op": "world",
+    "set": {
+     "voice_ready": true
+    }
+   },
+   {
+    "t": 3000,
+    "op": "world",
+    "set": {
+     "visuals": true
+    }
+   }
+  ]
+ },
+ {
+  "name": "natural_end_stops_the_voice_once",
+  "mode": "cdg",
+  "audio": "/tmp/song.mp3",
+  "video": "/tmp/song.cdg",
+  "voice": true,
+  "run_ms": 3000,
+  "steps": [
+   {
+    "t": 0,
+    "op": "start"
+   },
+   {
+    "t": 100,
+    "op": "world",
+    "set": {
+     "voice_ready": true
+    }
+   },
+   {
+    "t": 1500,
+    "op": "world",
+    "set": {
+     "at_end": true
+    }
+   },
+   {
+    "t": 2000,
+    "op": "seek",
+    "seconds": 5.0
+   },
+   {
+    "t": 2200,
+    "op": "pause"
+   }
+  ]
+ },
+ {
+  "name": "end_of_song_clock_falls_back_and_the_guard_speaks",
+  "mode": "cdg",
+  "audio": "/tmp/song.mp3",
+  "video": "/tmp/song.cdg",
+  "voice": true,
+  "run_ms": 5000,
+  "steps": [
+   {
+    "t": 0,
+    "op": "start",
+    "start": 270.0
+   },
+   {
+    "t": 100,
+    "op": "world",
+    "set": {
+     "voice_ready": true
+    }
+   },
+   {
+    "t": 1000,
+    "op": "world",
+    "set": {
+     "resync": [
+      0,
+      0,
+      0.0,
+      0.0,
+      0.0,
+      0
+     ]
+    }
+   },
+   {
+    "t": 2000,
+    "op": "world",
+    "set": {
+     "resync": [
+      0,
+      1,
+      277.9,
+      278.0,
+      278.03,
+      1
+     ]
+    }
+   },
+   {
+    "t": 2500,
+    "op": "world",
+    "set": {
+     "picture_pos_ms": 278033,
+     "picture_playing": false
+    }
+   },
+   {
+    "t": 3000,
+    "op": "world",
+    "set": {
+     "resync": [
+      1,
+      1,
+      100.0,
+      278.0,
+      278.0,
+      2
+     ]
+    }
+   },
+   {
+    "t": 3200,
+    "op": "world",
+    "set": {
+     "resync": [
+      2,
+      1,
+      5.0,
+      5.4,
+      5.4,
+      0
+     ]
+    }
+   },
+   {
+    "t": 3600,
+    "op": "world",
+    "set": {
+     "at_end": true
+    }
+   }
+  ],
+  "duration_ms": 300000,
+  "voice_duration": 300.0,
+  "zones": [
+   [
+    278.03,
+    300.5
+   ]
+  ]
+ },
+ {
+  "name": "resync_logging_first_look_is_silent",
+  "mode": "cdg",
+  "audio": "/tmp/song.mp3",
+  "video": "/tmp/song.cdg",
+  "voice": true,
+  "run_ms": 3500,
+  "steps": [
+   {
+    "t": 0,
+    "op": "start"
+   },
+   {
+    "t": 100,
+    "op": "world",
+    "set": {
+     "voice_ready": true
+    }
+   },
+   {
+    "t": 200,
+    "op": "world",
+    "set": {
+     "resync": [
+      3,
+      2,
+      1.0,
+      2.0,
+      3.0,
+      0
+     ]
+    }
+   },
+   {
+    "t": 1000,
+    "op": "world",
+    "set": {
+     "resync": [
+      4,
+      2,
+      5.0,
+      5.4,
+      5.4,
+      0
+     ]
+    }
+   },
+   {
+    "t": 1500,
+    "op": "world",
+    "set": {
+     "resync": [
+      4,
+      3,
+      199.0,
+      199.9,
+      199.9,
+      1
+     ]
+    }
+   },
+   {
+    "t": 2000,
+    "op": "world",
+    "set": {
+     "resync": [
+      4,
+      4,
+      99.0,
+      1.0,
+      2.0,
+      2
+     ]
+    }
+   },
+   {
+    "t": 2500,
+    "op": "world",
+    "set": {
+     "resync": [
+      5,
+      4,
+      1.0,
+      2.0,
+      3.0,
+      1
+     ]
+    }
+   }
+  ]
+ },
+ {
+  "name": "loop_jumps_back",
+  "mode": "cdg",
+  "audio": "/tmp/song.mp3",
+  "video": "/tmp/song.cdg",
+  "voice": true,
+  "run_ms": 6000,
+  "steps": [
+   {
+    "t": 0,
+    "op": "start"
+   },
+   {
+    "t": 100,
+    "op": "world",
+    "set": {
+     "voice_ready": true
+    }
+   },
+   {
+    "t": 200,
+    "op": "loop",
+    "start": 0.5,
+    "end": 1.5
+   },
+   {
+    "t": 300,
+    "op": "world",
+    "set": {
+     "voice_ready": true,
+     "voice_moves": true
+    }
+   }
+  ]
+ },
+ {
+  "name": "volume_clamp_and_voice",
+  "mode": "cdg",
+  "audio": "/tmp/song.mp3",
+  "video": "/tmp/song.cdg",
+  "voice": true,
+  "run_ms": 1200,
+  "steps": [
+   {
+    "t": 0,
+    "op": "start"
+   },
+   {
+    "t": 100,
+    "op": "world",
+    "set": {
+     "voice_ready": true
+    }
+   },
+   {
+    "t": 500,
+    "op": "volume",
+    "value": 2.5
+   },
+   {
+    "t": 600,
+    "op": "volume",
+    "value": -1.0
+   },
+   {
+    "t": 700,
+    "op": "volume",
+    "value": 0.75
+   }
+  ]
+ },
+ {
+  "name": "fade_out_voice_slide",
+  "mode": "cdg",
+  "audio": "/tmp/song.mp3",
+  "video": "/tmp/song.cdg",
+  "voice": true,
+  "run_ms": 2500,
+  "steps": [
+   {
+    "t": 0,
+    "op": "start"
+   },
+   {
+    "t": 100,
+    "op": "world",
+    "set": {
+     "voice_ready": true
+    }
+   },
+   {
+    "t": 500,
+    "op": "fade",
+    "ms": 1000
+   }
+  ]
+ },
+ {
+  "name": "fade_out_voice_without_callback",
+  "mode": "cdg",
+  "audio": "/tmp/song.mp3",
+  "video": "/tmp/song.cdg",
+  "voice": true,
+  "run_ms": 2500,
+  "steps": [
+   {
+    "t": 0,
+    "op": "start"
+   },
+   {
+    "t": 100,
+    "op": "world",
+    "set": {
+     "voice_ready": true
+    }
+   },
+   {
+    "t": 500,
+    "op": "fade",
+    "ms": 1000,
+    "cb": false
+   }
+  ]
+ },
+ {
+  "name": "fade_out_zero_ms",
+  "mode": "cdg",
+  "audio": "/tmp/song.mp3",
+  "video": "/tmp/song.cdg",
+  "voice": true,
+  "run_ms": 1500,
+  "steps": [
+   {
+    "t": 0,
+    "op": "start"
+   },
+   {
+    "t": 100,
+    "op": "world",
+    "set": {
+     "voice_ready": true
+    }
+   },
+   {
+    "t": 500,
+    "op": "fade",
+    "ms": 0
+   },
+   {
+    "t": 700,
+    "op": "fade",
+    "ms": -20,
+    "cb": false
+   }
+  ]
+ },
+ {
+  "name": "fade_out_steps_without_a_voice_1000ms",
+  "mode": "cdg",
+  "audio": "/tmp/song.mp3",
+  "video": "/tmp/song.cdg",
+  "voice": false,
+  "run_ms": 2000,
+  "steps": [
+   {
+    "t": 0,
+    "op": "volume",
+    "value": 0.8
+   },
+   {
+    "t": 0,
+    "op": "start"
+   },
+   {
+    "t": 300,
+    "op": "fade",
+    "ms": 1000
+   }
+  ]
+ },
+ {
+  "name": "fade_out_steps_500ms_and_tiny",
+  "mode": "cdg",
+  "audio": "/tmp/song.mp3",
+  "video": "/tmp/song.cdg",
+  "voice": false,
+  "run_ms": 2000,
+  "steps": [
+   {
+    "t": 0,
+    "op": "start"
+   },
+   {
+    "t": 300,
+    "op": "fade",
+    "ms": 500
+   },
+   {
+    "t": 1200,
+    "op": "fade",
+    "ms": 5
+   },
+   {
+    "t": 1300,
+    "op": "fade",
+    "ms": 100
+   }
+  ]
+ },
+ {
+  "name": "fade_out_after_the_voice_was_dropped",
+  "mode": "cdg",
+  "audio": "/tmp/song.mp3",
+  "video": "/tmp/song.cdg",
+  "voice": true,
+  "run_ms": 6000,
+  "steps": [
+   {
+    "t": 0,
+    "op": "start"
+   },
+   {
+    "t": 4500,
+    "op": "fade",
+    "ms": 200
+   }
+  ]
+ },
+ {
+  "name": "video_offset_unsupported_warns_once",
+  "mode": "cdg",
+  "audio": "/tmp/song.mp3",
+  "video": "/tmp/song.cdg",
+  "voice": true,
+  "run_ms": 800,
+  "steps": [
+   {
+    "t": 0,
+    "op": "start"
+   },
+   {
+    "t": 100,
+    "op": "offset",
+    "ms": 0
+   },
+   {
+    "t": 200,
+    "op": "offset",
+    "ms": 750
+   },
+   {
+    "t": 300,
+    "op": "offset",
+    "ms": -750
+   },
+   {
+    "t": 400,
+    "op": "world",
+    "set": {
+     "voice_ready": true
+    }
+   }
+  ]
+ },
+ {
+  "name": "video_offset_supported_forwards",
+  "mode": "cdg",
+  "audio": "/tmp/song.mp3",
+  "video": "/tmp/song.cdg",
+  "voice": true,
+  "run_ms": 500,
+  "steps": [
+   {
+    "t": 0,
+    "op": "start"
+   },
+   {
+    "t": 100,
+    "op": "offset",
+    "ms": 750
+   },
+   {
+    "t": 200,
+    "op": "offset",
+    "ms": 0
+   }
+  ],
+  "offset_supported": true
+ },
+ {
+  "name": "audio_spec_to_the_voice",
+  "mode": "cdg",
+  "audio": "/tmp/song.mp3",
+  "video": "/tmp/song.cdg",
+  "voice": true,
+  "run_ms": 800,
+  "steps": [
+   {
+    "t": 0,
+    "op": "start"
+   },
+   {
+    "t": 100,
+    "op": "audio_spec",
+    "gain_db": -6.0,
+    "eq_enabled": true,
+    "eq_gains": [
+     1.0,
+     2.0,
+     3.0
+    ],
+    "master_enabled": true,
+    "master_params": true
+   },
+   {
+    "t": 200,
+    "op": "audio_spec",
+    "gain_db": 0.0,
+    "master_enabled": false
+   }
+  ]
+ },
+ {
+  "name": "audio_spec_ignored_without_a_voice",
+  "mode": "cdg",
+  "audio": "/tmp/song.mp3",
+  "video": "/tmp/song.cdg",
+  "voice": false,
+  "run_ms": 500,
+  "steps": [
+   {
+    "t": 0,
+    "op": "start"
+   },
+   {
+    "t": 100,
+    "op": "audio_spec",
+    "gain_db": -6.0,
+    "eq_enabled": true,
+    "eq_gains": [
+     1.0
+    ],
+    "master_enabled": true,
+    "master_params": true
+   }
+  ]
+ },
+ {
+  "name": "audio_spec_norm_reaches_the_next_voice_load",
+  "mode": "cdg",
+  "audio": "/tmp/song.mp3",
+  "video": "/tmp/song.cdg",
+  "voice": true,
+  "run_ms": 1000,
+  "steps": [
+   {
+    "t": 0,
+    "op": "start"
+   },
+   {
+    "t": 100,
+    "op": "audio_spec",
+    "gain_db": -6.0
+   },
+   {
+    "t": 200,
+    "op": "stop"
+   },
+   {
+    "t": 300,
+    "op": "start"
+   },
+   {
+    "t": 400,
+    "op": "world",
+    "set": {
+     "voice_ready": true
+    }
+   }
+  ]
+ },
+ {
+  "name": "stop_during_the_start_sequence",
+  "mode": "cdg",
+  "audio": "/tmp/song.mp3",
+  "video": "/tmp/song.cdg",
+  "voice": true,
+  "run_ms": 1500,
+  "steps": [
+   {
+    "t": 0,
+    "op": "start"
+   },
+   {
+    "t": 200,
+    "op": "stop"
+   },
+   {
+    "t": 300,
+    "op": "world",
+    "set": {
+     "voice_ready": true
+    }
+   }
+  ]
+ },
+ {
+  "name": "stop_while_running_then_restart",
+  "mode": "cdg",
+  "audio": "/tmp/song.mp3",
+  "video": "/tmp/song.cdg",
+  "voice": true,
+  "run_ms": 3500,
+  "steps": [
+   {
+    "t": 0,
+    "op": "start"
+   },
+   {
+    "t": 100,
+    "op": "world",
+    "set": {
+     "voice_ready": true
+    }
+   },
+   {
+    "t": 1000,
+    "op": "stop"
+   },
+   {
+    "t": 1500,
+    "op": "start"
+   },
+   {
+    "t": 1600,
+    "op": "world",
+    "set": {
+     "voice_ready": true
+    }
+   }
+  ]
+ },
+ {
+  "name": "two_starts_in_a_row",
+  "mode": "cdg",
+  "audio": "/tmp/song.mp3",
+  "video": "/tmp/song.cdg",
+  "voice": true,
+  "run_ms": 2500,
+  "steps": [
+   {
+    "t": 0,
+    "op": "start"
+   },
+   {
+    "t": 100,
+    "op": "world",
+    "set": {
+     "voice_ready": true
+    }
+   },
+   {
+    "t": 1000,
+    "op": "start"
+   },
+   {
+    "t": 1100,
+    "op": "world",
+    "set": {
+     "voice_ready": true
+    }
+   }
+  ]
+ },
+ {
+  "name": "seek_while_the_picture_is_unloaded_gives_up_at_the_hard_deadline",
+  "mode": "cdg",
+  "audio": "/tmp/song.mp3",
+  "video": "/tmp/song.cdg",
+  "voice": true,
+  "run_ms": 12500,
+  "steps": [
+   {
+    "t": 0,
+    "op": "start"
+   },
+   {
+    "t": 100,
+    "op": "world",
+    "set": {
+     "voice_ready": true
+    }
+   },
+   {
+    "t": 1000,
+    "op": "seek",
+    "seconds": 60.0
+   },
+   {
+    "t": 1050,
+    "op": "world",
+    "set": {
+     "picture_duration_ms": 0
+    }
+   }
+  ]
+ },
+ {
+  "name": "tempo_and_key_round_half_to_even_in_the_load",
+  "mode": "cdg",
+  "audio": "/tmp/song.mp3",
+  "video": "/tmp/song.cdg",
+  "voice": true,
+  "run_ms": 600,
+  "steps": [
+   {
+    "t": 0,
+    "op": "modifiers",
+    "tempo": 1.125,
+    "semitones": 2.5
+   },
+   {
+    "t": 0,
+    "op": "start"
+   },
+   {
+    "t": 100,
+    "op": "world",
+    "set": {
+     "voice_ready": true
+    }
+   }
+  ]
+ },
+ {
+  "name": "tempo_half_to_even_odd_neighbour",
+  "mode": "cdg",
+  "audio": "/tmp/song.mp3",
+  "video": "/tmp/song.cdg",
+  "voice": false,
+  "run_ms": 600,
+  "steps": [
+   {
+    "t": 0,
+    "op": "modifiers",
+    "tempo": 1.135,
+    "semitones": 3.5
+   },
+   {
+    "t": 0,
+    "op": "start"
+   },
+   {
+    "t": 100,
+    "op": "world",
+    "set": {
+     "voice_ready": true
+    }
+   }
+  ]
+ },
+ {
+  "name": "voice_wait_gives_way_to_the_picture_even_when_paused_picture_state_is_stale",
+  "mode": "cdg",
+  "audio": "/tmp/song.mp3",
+  "video": "/tmp/song.cdg",
+  "voice": true,
+  "run_ms": 4000,
+  "steps": [
+   {
+    "t": 0,
+    "op": "start"
+   },
+   {
+    "t": 100,
+    "op": "world",
+    "set": {
+     "voice_ready": true,
+     "voice_moves": false
+    }
+   },
+   {
+    "t": 300,
+    "op": "pause"
+   },
+   {
+    "t": 2000,
+    "op": "resume"
+   }
+  ]
+ },
+ {
+  "name": "follow_reports_zero_while_the_picture_is_not_playing",
+  "mode": "cdg",
+  "audio": "/tmp/song.mp3",
+  "video": "/tmp/song.cdg",
+  "voice": true,
+  "run_ms": 2500,
+  "steps": [
+   {
+    "t": 0,
+    "op": "start"
+   },
+   {
+    "t": 100,
+    "op": "world",
+    "set": {
+     "voice_ready": true
+    }
+   },
+   {
+    "t": 1000,
+    "op": "world",
+    "set": {
+     "picture_playing": false
+    }
+   },
+   {
+    "t": 1500,
+    "op": "world",
+    "set": {
+     "picture_playing": true
+    }
+   },
+   {
+    "t": 1600,
+    "op": "modifiers",
+    "tempo": 1.5,
+    "semitones": 0.0
+   }
+  ]
+ },
+ {
+  "name": "voice_ready_but_the_picture_is_not_loaded_yet",
+  "mode": "cdg",
+  "audio": "/tmp/song.mp3",
+  "video": "/tmp/song.cdg",
+  "voice": true,
+  "run_ms": 2500,
+  "steps": [
+   {
+    "t": 0,
+    "op": "start"
+   },
+   {
+    "t": 100,
+    "op": "world",
+    "set": {
+     "voice_ready": true
+    }
+   },
+   {
+    "t": 1000,
+    "op": "world",
+    "set": {
+     "picture_duration_ms": 200000
+    }
+   }
+  ],
+  "duration_ms": 0
+ },
+ {
+  "name": "voice_clock_moves_by_less_than_2ms",
+  "mode": "cdg",
+  "audio": "/tmp/song.mp3",
+  "video": "/tmp/song.cdg",
+  "voice": true,
+  "run_ms": 2000,
+  "steps": [
+   {
+    "t": 0,
+    "op": "start"
+   },
+   {
+    "t": 100,
+    "op": "world",
+    "set": {
+     "voice_ready": true,
+     "voice_moves": false
+    }
+   },
+   {
+    "t": 300,
+    "op": "world",
+    "set": {
+     "voice_pos": 0.001
+    }
+   },
+   {
+    "t": 500,
+    "op": "world",
+    "set": {
+     "voice_pos": 0.0025
+    }
+   }
+  ]
+ },
+ {
+  "name": "volume_before_start_reaches_the_voice_load",
+  "mode": "cdg",
+  "audio": "/tmp/song.mp3",
+  "video": "/tmp/song.cdg",
+  "voice": true,
+  "run_ms": 600,
+  "steps": [
+   {
+    "t": 0,
+    "op": "volume",
+    "value": 0.5
+   },
+   {
+    "t": 0,
+    "op": "start"
+   },
+   {
+    "t": 100,
+    "op": "world",
+    "set": {
+     "voice_ready": true
+    }
+   }
+  ]
+ },
+ {
+  "name": "a_second_song_can_end_again",
+  "mode": "cdg",
+  "audio": "/tmp/song.mp3",
+  "video": "/tmp/song.cdg",
+  "voice": true,
+  "run_ms": 2500,
+  "steps": [
+   {
+    "t": 0,
+    "op": "start"
+   },
+   {
+    "t": 100,
+    "op": "world",
+    "set": {
+     "voice_ready": true
+    }
+   },
+   {
+    "t": 500,
+    "op": "world",
+    "set": {
+     "at_end": true
+    }
+   },
+   {
+    "t": 800,
+    "op": "world",
+    "set": {
+     "at_end": false
+    }
+   },
+   {
+    "t": 1000,
+    "op": "start"
+   },
+   {
+    "t": 1100,
+    "op": "world",
+    "set": {
+     "voice_ready": true
+    }
+   },
+   {
+    "t": 1600,
+    "op": "world",
+    "set": {
+     "at_end": true
+    }
+   }
+  ]
+ },
+ {
+  "name": "pause_before_start_does_not_block_the_start",
+  "mode": "cdg",
+  "audio": "/tmp/song.mp3",
+  "video": "/tmp/song.cdg",
+  "voice": true,
+  "run_ms": 1500,
+  "steps": [
+   {
+    "t": 0,
+    "op": "pause"
+   },
+   {
+    "t": 0,
+    "op": "start"
+   },
+   {
+    "t": 100,
+    "op": "world",
+    "set": {
+     "voice_ready": true
+    }
+   }
+  ]
+ },
+ {
+  "name": "seek_and_resume_after_stop_are_plain",
+  "mode": "cdg",
+  "audio": "/tmp/song.mp3",
+  "video": "/tmp/song.cdg",
+  "voice": true,
+  "run_ms": 2000,
+  "steps": [
+   {
+    "t": 0,
+    "op": "start"
+   },
+   {
+    "t": 100,
+    "op": "world",
+    "set": {
+     "voice_ready": true
+    }
+   },
+   {
+    "t": 1000,
+    "op": "stop"
+   },
+   {
+    "t": 1100,
+    "op": "seek",
+    "seconds": 30.0
+   },
+   {
+    "t": 1200,
+    "op": "resume"
+   },
+   {
+    "t": 1300,
+    "op": "query_paused"
+   }
+  ]
+ },
+ {
+  "name": "loop_end_before_start_is_no_loop",
+  "mode": "cdg",
+  "audio": "/tmp/song.mp3",
+  "video": "/tmp/song.cdg",
+  "voice": true,
+  "run_ms": 3000,
+  "steps": [
+   {
+    "t": 0,
+    "op": "start"
+   },
+   {
+    "t": 100,
+    "op": "world",
+    "set": {
+     "voice_ready": true
+    }
+   },
+   {
+    "t": 200,
+    "op": "loop",
+    "start": 2.0,
+    "end": 1.0
+   }
+  ]
+ },
+ {
+  "name": "loop_of_zero_length_is_no_loop",
+  "mode": "cdg",
+  "audio": "/tmp/song.mp3",
+  "video": "/tmp/song.cdg",
+  "voice": true,
+  "run_ms": 3000,
+  "steps": [
+   {
+    "t": 0,
+    "op": "start"
+   },
+   {
+    "t": 100,
+    "op": "world",
+    "set": {
+     "voice_ready": true
+    }
+   },
+   {
+    "t": 200,
+    "op": "loop",
+    "start": 1.0,
+    "end": 1.0
+   }
+  ]
+ },
+ {
+  "name": "loop_negative_start",
+  "mode": "cdg",
+  "audio": "/tmp/song.mp3",
+  "video": "/tmp/song.cdg",
+  "voice": true,
+  "run_ms": 3000,
+  "steps": [
+   {
+    "t": 0,
+    "op": "start"
+   },
+   {
+    "t": 100,
+    "op": "world",
+    "set": {
+     "voice_ready": true
+    }
+   },
+   {
+    "t": 200,
+    "op": "loop",
+    "start": -4.0,
+    "end": 1.0
+   }
+  ]
+ },
+ {
+  "name": "loop_end_hit_exactly",
+  "mode": "cdg",
+  "audio": "/tmp/song.mp3",
+  "video": "/tmp/song.cdg",
+  "voice": true,
+  "run_ms": 3500,
+  "steps": [
+   {
+    "t": 0,
+    "op": "start"
+   },
+   {
+    "t": 100,
+    "op": "world",
+    "set": {
+     "voice_ready": true
+    }
+   },
+   {
+    "t": 200,
+    "op": "loop",
+    "start": 0.5,
+    "end": 1.49
+   }
+  ]
+ },
+ {
+  "name": "volume_after_a_voice_fade_is_zero_for_the_next_load",
+  "mode": "cdg",
+  "audio": "/tmp/song.mp3",
+  "video": "/tmp/song.cdg",
+  "voice": true,
+  "run_ms": 2000,
+  "steps": [
+   {
+    "t": 0,
+    "op": "start"
+   },
+   {
+    "t": 100,
+    "op": "world",
+    "set": {
+     "voice_ready": true
+    }
+   },
+   {
+    "t": 500,
+    "op": "fade",
+    "ms": 200
+   },
+   {
+    "t": 1000,
+    "op": "stop"
+   },
+   {
+    "t": 1200,
+    "op": "start"
+   },
+   {
+    "t": 1300,
+    "op": "world",
+    "set": {
+     "voice_ready": true
+    }
+   }
+  ]
+ },
+ {
+  "name": "guarded_counter_with_kind_zero_is_not_logged",
+  "mode": "cdg",
+  "audio": "/tmp/song.mp3",
+  "video": "/tmp/song.cdg",
+  "voice": true,
+  "run_ms": 1500,
+  "steps": [
+   {
+    "t": 0,
+    "op": "start"
+   },
+   {
+    "t": 100,
+    "op": "world",
+    "set": {
+     "voice_ready": true
+    }
+   },
+   {
+    "t": 200,
+    "op": "world",
+    "set": {
+     "resync": [
+      1,
+      1,
+      1.0,
+      2.0,
+      3.0,
+      0
+     ]
+    }
+   },
+   {
+    "t": 500,
+    "op": "world",
+    "set": {
+     "resync": [
+      1,
+      2,
+      1.0,
+      2.0,
+      3.0,
+      0
+     ]
+    }
+   },
+   {
+    "t": 900,
+    "op": "world",
+    "set": {
+     "resync": [
+      2,
+      2,
+      10.0,
+      11.5,
+      12.5,
+      0
+     ]
+    }
+   }
+  ]
+ },
+ {
+  "name": "started_fallback_count_resets_when_the_picture_stops_playing",
+  "mode": "cdg",
+  "audio": "/tmp/song.mp3",
+  "video": "/tmp/song.cdg",
+  "voice": true,
+  "run_ms": 3000,
+  "steps": [
+   {
+    "t": 0,
+    "op": "start"
+   },
+   {
+    "t": 0,
+    "op": "world",
+    "set": {
+     "visuals": false
+    }
+   },
+   {
+    "t": 100,
+    "op": "world",
+    "set": {
+     "voice_ready": true
+    }
+   },
+   {
+    "t": 600,
+    "op": "world",
+    "set": {
+     "picture_playing": false
+    }
+   },
+   {
+    "t": 900,
+    "op": "world",
+    "set": {
+     "picture_playing": true
+    }
+   },
+   {
+    "t": 1000,
+    "op": "world",
+    "set": {
+     "picture_pos_ms": 500
+    }
+   }
+  ]
+ },
+ {
+  "name": "end_during_the_start_sequence_cancels_the_drop",
+  "mode": "cdg",
+  "audio": "/tmp/song.mp3",
+  "video": "/tmp/song.cdg",
+  "voice": true,
+  "run_ms": 6000,
+  "steps": [
+   {
+    "t": 0,
+    "op": "start"
+   },
+   {
+    "t": 500,
+    "op": "world",
+    "set": {
+     "at_end": true
+    }
+   }
+  ]
+ }
+]
