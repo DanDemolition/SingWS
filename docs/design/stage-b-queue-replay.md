@@ -287,3 +287,45 @@ The lock being cleared by playback, the sanitize pass, the real `_delete_rotatio
 `_unmatched_request_sigs` (library-match failures), rename-merge and singer aliases, server singer ids / sessions, sort_order, deferred adds and
 server-terminal rows. `queue_state_shadow.py` is unchanged: it still skips a poll when the lock setting is on, a duet name is present or the waitlist,
 attention or unmatched sets change.
+
+## M5: server-terminal rows in the Rust model (Stage B step 4, slice A)
+
+Oracle: the real `_reconcile_remote_requests` terminal branch, `_remove_local_remote_request_by_id`, `_mark_rotation_slot_temporarily_empty` and the
+removed-id / `_remote_terminal_titles` checks of the intake loop. Harness changes: snapshot field `terminal_titles` (id -> title the terminal row carried);
+no new event (a terminal row is an ordinary `remote_arrive` row); 14 adversarial cases named `server_terminal_*` / `stale_pending_row_after_server_terminal_is_ignored`
+/ `skipped_state_is_not_server_terminal`, and the `term`, `term_stale`, `term_reuse` generator picks (profile `full`).
+
+### Rules
+
+1. **What is terminal.** `state` (stripped, lowercased) in {`removed`, `completed`, `sung`}, OR `int(float(removed_at or 0)) > 0`, OR the same for `completed_at`; an
+   unparsable stamp counts as 0, a negative one is not terminal, a fractional one is truncated (`"7.9"` is 7). `skipped` is NOT terminal here (it reaches the
+   waitlist as terminal, the intake loop as "non-actionable/historical"). Rows with `request_id <= 0` are skipped before any of this.
+2. **What a terminal row does** (the first thing for a row, before the tombstone check, before singer/title checks): (a) remove EVERY queued copy of the id;
+   (b) add the id to the removed-id memory; (c) remember `str(row.title)` in `_remote_terminal_titles[id]` (overwritten each time, empty string if the row has no
+   title). It writes **no tombstone** and retires none; a host tombstone for the same id stays and a later terminal row simply re-adds the id to the memory.
+3. **Emptied singers.** After the removal, EVERY singer with an empty song list is revisited, not only the one that lost a song, and not only for this id: in
+   rotation mode each is (re)marked `temporary_empty_slot` with `until = now + 180` (a refresh!). The row is never deleted (classic mode keeps it too, because
+   `_should_preserve_empty_singer_row` is true for any named singer). A terminal row for an id nobody holds still does this refresh. The marker is untouched.
+4. **Stale rows after a terminal row.** A non-terminal row for an id in the removed memory (and with no tombstone) is ignored unless the remembered terminal title
+   CONFLICTS with the row's title (`_tombstone_signature_conflicts`: alphanumerics only, empty or substring = no conflict): then the id leaves the memory and the row
+   is a brand new request (id reuse after a server reset). An empty remembered title never conflicts, so the row stays ignored. The remembered title is NOT updated
+   by the reuse itself (a later stale row is compared with the OLD terminal title; observed in `server_terminal_id_reused_for_a_new_song`).
+5. **Restart** keeps only tombstone ids in the removed memory and forgets `_remote_terminal_titles`, so a server-completed id is no longer protected after a restart.
+6. The waitlist already treated terminal rows as server-purge hints (M3); the only change there is that Rust now uses the same `> 0` test as Python (before, any
+   present `removed_at`/`completed_at` key counted, even 0).
+
+### Surprises (reported, NOT changed)
+
+- **Restart resurrects server-completed songs.** `server_terminal_memory_is_lost_on_restart`: queue Ada/Bob, server says Ada's request is completed (removed locally),
+  restart, a stale `pending` row for Ada's id arrives: it is queued again, because the removed memory is rebuilt from tombstones only and the terminal rows write none.
+  In production this needs a server that lists the old row as pending AFTER listing it terminal, so it is a hazard rather than a seen bug.
+- The terminal-title memory is never refreshed by an id reuse: after the reuse is accepted the id is no longer in the removed memory, so the stale title is
+  dormant, but a SECOND server-terminal row for the reused request overwrites it (correct) only if that row arrives.
+- A terminal row refreshes the expiry of unrelated empty slots (rule 3), so a steady stream of terminal rows keeps empty singer slots alive past 180 s.
+- `_server_terminal_conflicts_with_live_host_request` is NOT modelled: it only fires for a queued entry that carries a `host_request_key` (a host-manual add that
+  the server has since acknowledged with a numeric id), and the harness cannot create one without the network. In the model, terminal rows always remove.
+  This is the clean boundary of slice A: a terminal row for a host_manual entry (different `idempotency_key`/non-host source) is held by Python and removed by Rust.
+
+Slice A result: parity IDENTICAL on 37 adversarial cases plus seeded streams (`parity --seeds 100`: 143/143 before the last case was added; `--seeds 20`: 64/64 after).
+Mutation (`MUTATE_SEEDS=120`): 159 killed, 35 documented equivalent, 2 survivors (#102, #187); a targeted case was added for each and both are now killed
+(re-checked alone with `MUTATE_ONLY=102,187`; the full run was not repeated after those two cases).

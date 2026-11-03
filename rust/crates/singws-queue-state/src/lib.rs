@@ -133,6 +133,8 @@ pub struct State {
     removed_tonight: BTreeMap<u64, Value>,
     attention: BTreeMap<u64, Value>,
     failed: BTreeSet<u64>,
+    /// `_remote_terminal_titles`: the title a server-terminal row carried (memory only; a restart forgets it).
+    terminal_titles: BTreeMap<u64, String>,
     lock_count: i64,
     next_uid: u64,
     singer_alias: HashMap<u64, usize>,
@@ -412,6 +414,7 @@ impl State {
             removed_tonight: BTreeMap::new(),
             attention: BTreeMap::new(),
             failed: BTreeSet::new(),
+            terminal_titles: BTreeMap::new(),
             lock_count: 0,
             next_uid: 1,
             singer_alias: HashMap::new(),
@@ -557,6 +560,17 @@ impl State {
             }
             if now >= s.until {
                 Self::clear_temp_slot(s);
+            }
+        }
+    }
+
+    /// `_remove_local_remote_request_by_id`: drop every queued copy of a request id. Afterwards EVERY empty singer row (not only the one that
+    /// lost a song) is kept: in rotation mode it is (re)marked as a temporary empty slot with a fresh 180 s expiry; the row is never deleted.
+    fn remove_local_by_id(&mut self, rid: u64) {
+        for si in (0..self.queue.len()).rev() {
+            self.queue[si].songs.retain(|e| e.rid != Some(rid));
+            if self.queue[si].songs.is_empty() {
+                self.mark_slot_empty(si);
             }
         }
     }
@@ -884,10 +898,16 @@ impl State {
                 continue;
             }
             let rid = rid as u64;
-            let state = o.get("state").and_then(Value::as_str).unwrap_or("").trim().to_lowercase();
-            let terminal = matches!(state.as_str(), "removed" | "completed" | "sung") || o.get("removed_at").is_some() || o.get("completed_at").is_some();
-            if terminal {
-                continue; // server-terminal rows are not modelled
+            let state = state_of(row, &["state"]);
+            let stamp = |k: &str| to_f64(row.get(k)).map(|f| f.trunc() as i64).unwrap_or(0);
+            let (removed_at, completed_at) = (stamp("removed_at"), stamp("completed_at"));
+            if matches!(state.as_str(), "removed" | "completed" | "sung") || removed_at > 0 || completed_at > 0 {
+                // The server already knows this request is done: the queued copy goes, the id is remembered as terminal together with the
+                // title it carried. No tombstone is written or retired (that is host-action state), and this runs BEFORE the tombstone check.
+                self.remove_local_by_id(rid);
+                self.removed.insert(rid);
+                self.terminal_titles.insert(rid, row_str(row, "title"));
+                continue;
             }
             let title = o.get("title").and_then(Value::as_str).unwrap_or("").trim().to_string();
             // admission, in the app's order: tombstone first, then the removed-id memory
@@ -901,7 +921,14 @@ impl State {
                 }
             }
             if self.removed.contains(&rid) {
-                continue; // terminal title memory is empty in this model: stale row ignored
+                // Known-terminal id with no live tombstone: only a clear title conflict with the remembered terminal title (the id was
+                // reused by a new request) lets the row through; otherwise it is a stale flip-back and is ignored.
+                let tt = self.terminal_titles.get(&rid).cloned().unwrap_or_default();
+                if !tt.is_empty() && singws_queue::titles_conflict(&tt, &row_str(row, "title")) {
+                    self.removed.remove(&rid);
+                } else {
+                    continue;
+                }
             }
             if is_waiting_row(row) {
                 continue; // held for the host: the waitlist itself was rebuilt above
@@ -1287,6 +1314,7 @@ impl State {
         self.removed_tonight.clear();
         self.attention.clear();
         self.failed.clear();
+        self.terminal_titles = ev.get("terminal_titles").and_then(Value::as_object).map(|o| o.iter().filter_map(|(k, v)| Some((k.parse::<u64>().ok()?, v.as_str()?.to_string()))).collect()).unwrap_or_default();
         self.lock_count = 0;
         self.singer_alias.clear();
         self.next_uid = 1;
@@ -1348,6 +1376,7 @@ impl State {
         self.cur = self.init.clone();
         self.attention.clear();
         self.failed.clear();
+        self.terminal_titles.clear();
         self.lock_count = 0;
         self.removed = self.tombs.keys().copied().collect();
         (true, "restarted".into())
@@ -1408,6 +1437,7 @@ impl State {
             "unmatched_remote_ids": self.failed.iter().collect::<Vec<_>>(),
             "waitlist": view(&self.waitlist), "removed_tonight": view(&self.removed_tonight), "handled_waitlist_ids": self.handled.iter().collect::<Vec<_>>(),
             "tombstones": tombs, "removed_ids": self.removed.iter().collect::<Vec<_>>(),
+            "terminal_titles": self.terminal_titles.iter().map(|(k, v)| (k.to_string(), json!(v))).collect::<Map<String, Value>>(),
             "deferred_remote_adds": 0, "lifecycle": life,
         })
     }
