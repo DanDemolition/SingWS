@@ -9,9 +9,11 @@
 //!              song limit, accepting, duplicate request ids, wire-order song ordering), empty rotation slots with expiry, restart.
 //!              the waitlist: `waitlist_add` / `waitlist_remove` / `waitlist_restore`, `waiting` / failed rows (rebuilt from every arrival exactly like
 //!              `_set_waiting_for_add_requests`), `use_waiting_for_add`, handled ids, the removed-tonight list (+ `waitlist_evening_key`).
-//!   NOT        duets ("A & B"), rotation lock, rows with a server-terminal state, `sort_order` / order timestamps, singer ids / sessions, deferred
-//!              adds, rename-merge. Waitlist: stale-by-timestamp purge, replacement tracks, the attention list (`_remote_attention_requests`, i.e. a
-//!              library-match or insert failure), the song-info edit/replace dialogs.
+//!              rotation lock (`rotation_lock` op, `rotation_locked` setting), duet singers ("A & B", both names count against the cap) and the
+//!              attention list / failed-id set a late duet failure fills.
+//!   NOT        rows with a server-terminal state, `sort_order` / order timestamps, singer ids / sessions, deferred
+//!              adds, rename-merge. Waitlist: stale-by-timestamp purge, replacement tracks, library-match failures (`_unmatched_request_sigs`), the song-info
+//!              edit/replace dialogs. The lock being cleared by playback.
 //!              Such input answers `{"ok":false,"code":"unsupported"}` or is ignored exactly as documented per op, so a parity run on it
 //!              is expected to differ and the Python comparer reports where.
 use serde_json::{json, Map, Value};
@@ -37,6 +39,7 @@ struct Settings {
     limit: i64,
     accepting: bool,
     waitlist: bool,
+    locked: bool,
 }
 
 impl Settings {
@@ -46,6 +49,7 @@ impl Settings {
             limit: cfg.get("limit_pending_max").and_then(Value::as_i64).unwrap_or(20),
             accepting: cfg.get("requests_accepting").and_then(Value::as_bool).unwrap_or(true),
             waitlist: cfg.get("waitlist").or_else(|| cfg.get("use_waiting_for_add")).map(truthy).unwrap_or(false),
+            locked: cfg.get("rotation_locked").map(truthy).unwrap_or(false),
         }
     }
     fn rotation(&self) -> bool {
@@ -63,6 +67,7 @@ struct Entry {
     artist: String,
     title: String,
     song_info: String,
+    duet: Option<String>,
     key: i64,
     tempo: Option<i64>,
     skipped: bool,
@@ -95,6 +100,8 @@ struct Singer {
     marker: bool,
     temp_empty: bool,
     until: f64,
+    lock_new: bool,
+    lock_order: i64,
     songs: Vec<Entry>,
 }
 
@@ -124,6 +131,9 @@ pub struct State {
     handled: BTreeSet<u64>,
     waitlist: BTreeMap<u64, Value>,
     removed_tonight: BTreeMap<u64, Value>,
+    attention: BTreeMap<u64, Value>,
+    failed: BTreeSet<u64>,
+    lock_count: i64,
     next_uid: u64,
     singer_alias: HashMap<u64, usize>,
     next_local: usize,
@@ -153,10 +163,103 @@ fn name_key(name: &str) -> String {
     name.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
 }
 
-fn is_duet(name: &str) -> bool {
-    let lower = name.to_lowercase();
-    ["&", "+", "/w", "w/", "/", ","].iter().any(|s| lower.contains(s))
-        || lower.split(|c: char| !c.is_alphanumeric() && c != '_').any(|w| w == "and" || w == "with")
+fn is_word(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// Length of a duet separator at `j` (`&`, `+`, `/w`, `w/`, `/`, `,`, whole-word `and` / `with`, any case), in the regex's alternation order.
+fn sep_len_at(chars: &[char], j: usize) -> Option<usize> {
+    let lc = |k: usize| chars.get(k).map(|c| c.to_lowercase().next().unwrap_or(*c));
+    match chars.get(j)? {
+        '&' | '+' => return Some(1),
+        _ => {}
+    }
+    if chars[j] == '/' && lc(j + 1) == Some('w') {
+        return Some(2);
+    }
+    if lc(j) == Some('w') && chars.get(j + 1) == Some(&'/') {
+        return Some(2);
+    }
+    if chars[j] == '/' || chars[j] == ',' {
+        return Some(1);
+    }
+    let before_ok = j == 0 || !is_word(chars[j - 1]);
+    if before_ok {
+        if lc(j) == Some('a') && lc(j + 1) == Some('n') && lc(j + 2) == Some('d') && !chars.get(j + 3).map(|c| is_word(*c)).unwrap_or(false) {
+            return Some(3);
+        }
+        if lc(j) == Some('w') && lc(j + 1) == Some('i') && lc(j + 2) == Some('t') && lc(j + 3) == Some('h') && !chars.get(j + 4).map(|c| is_word(*c)).unwrap_or(false) {
+            return Some(4);
+        }
+    }
+    None
+}
+
+/// `re.split(r"\s*(?:&|\+|/w|w/|/|,|\band\b|\bwith\b)\s*", text, maxsplit=1, flags=I)`: the text before and after the first separator.
+fn split_first_sep(text: &str) -> Option<(String, String)> {
+    let chars: Vec<char> = text.chars().collect();
+    let n = chars.len();
+    for i in 0..n {
+        let mut j = i;
+        while j < n && chars[j].is_whitespace() {
+            j += 1;
+        }
+        if let Some(len) = sep_len_at(&chars, j) {
+            let mut e = j + len;
+            while e < n && chars[e].is_whitespace() {
+                e += 1;
+            }
+            return Some((chars[..i].iter().collect(), chars[e..].iter().collect()));
+        }
+    }
+    None
+}
+
+/// `_parse_duet_singer`: (primary, duet display) with whitespace collapsed; no duet when either side is empty.
+fn parse_duet(raw: &str) -> (String, Option<String>) {
+    let name = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    if name.is_empty() {
+        return (String::new(), None);
+    }
+    match split_first_sep(&name) {
+        Some((a, b)) if !a.trim().is_empty() && !b.trim().is_empty() => {
+            let (a, b) = (a.trim().to_string(), b.trim().to_string());
+            let display = format!("{a} & {b}");
+            (a, Some(display))
+        }
+        _ => (name, None),
+    }
+}
+
+/// `_duet_participants_from_display`: the names a song counts against, deduplicated by the limit key.
+fn participants(primary: &str, display: Option<&str>) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    if !primary.trim().is_empty() {
+        names.push(primary.trim().to_string());
+    }
+    let display = display.unwrap_or("").trim();
+    if !display.is_empty() {
+        let (pp, pd) = parse_duet(display);
+        if !pp.is_empty() {
+            names.push(pp);
+        }
+        let source = pd.unwrap_or_else(|| display.to_string());
+        if let Some((_, partner)) = split_first_sep(&source) {
+            if !partner.trim().is_empty() {
+                names.push(partner.trim().to_string());
+            }
+        }
+    }
+    let mut seen = BTreeSet::new();
+    names.into_iter().filter(|n| { let k = name_key(n); !k.is_empty() && seen.insert(k) }).collect()
+}
+
+/// `_remote_request_participants`: queue_singer, else singer, parsed like a typed name.
+fn req_participants(row: &Value) -> Vec<String> {
+    let name = first_truthy_str(row, &["queue_singer", "singer", "name"]);
+    let (primary, display) = parse_duet(name.trim());
+    let primary = if primary.is_empty() { name.trim().to_string() } else { primary };
+    participants(&primary, display.as_deref())
 }
 
 
@@ -307,6 +410,9 @@ impl State {
             handled: BTreeSet::new(),
             waitlist: BTreeMap::new(),
             removed_tonight: BTreeMap::new(),
+            attention: BTreeMap::new(),
+            failed: BTreeSet::new(),
+            lock_count: 0,
             next_uid: 1,
             singer_alias: HashMap::new(),
             next_local: 0,
@@ -333,7 +439,7 @@ impl State {
         let op = ev.get("op").and_then(Value::as_str).unwrap_or("");
         let known = [
             "config", "tick", "add_song", "remote_arrive", "remove_song", "remove_singer", "move_singer", "move_song", "skip_singer",
-            "rotation_advance", "complete_song", "waitlist_add", "waitlist_remove", "waitlist_restore", "restart", "load",
+            "rotation_advance", "complete_song", "waitlist_add", "waitlist_remove", "waitlist_restore", "rotation_lock", "restart", "load",
         ];
         if !known.contains(&op) {
             return (false, "unknown_op".into());
@@ -359,6 +465,7 @@ impl State {
             "rotation_advance" => self.op_rotation_advance(ev),
             "complete_song" => self.op_complete_song(ev),
             "restart" => self.op_restart(),
+            "rotation_lock" => self.op_rotation_lock(),
             "waitlist_add" => self.op_waitlist_add(ev),
             "waitlist_remove" => self.op_waitlist_remove(ev),
             "waitlist_restore" => self.op_waitlist_restore(ev),
@@ -487,13 +594,26 @@ impl State {
                 if e.skipped {
                     continue;
                 }
-                let k = name_key(&s.name);
-                if !k.is_empty() {
-                    *c.entry(k).or_insert(0) += 1;
+                for p in participants(&s.name, e.duet.as_deref()) {
+                    let k = name_key(&p);
+                    if !k.is_empty() {
+                        *c.entry(k).or_insert(0) += 1;
+                    }
                 }
             }
         }
         c
+    }
+
+    /// `_check_queue_song_limit` with fresh live counts: true when no participant is at the cap.
+    fn limit_ok(&mut self, parts: &[String]) -> bool {
+        self.cleanup_duplicate_songs();
+        let counts = self.live_counts();
+        let limit = self.cur.active_limit();
+        !parts.iter().any(|p| {
+            let k = name_key(p);
+            !k.is_empty() && counts.get(&k).copied().unwrap_or(0) >= limit
+        })
     }
 
     fn cleanup_duplicate_songs(&mut self) {
@@ -522,32 +642,32 @@ impl State {
     /// `_add_song_to_queue` (no duets). `remote` = the call carried remote_meta.
     fn add_song(&mut self, singer_name: &str, mut entry: Entry, remote: bool) -> bool {
         self.prune_expired_slots();
-        let primary = capitalize(singer_name);
-        let primary = primary.split_whitespace().collect::<Vec<_>>().join(" ");
+        let (primary, duet) = parse_duet(&capitalize(singer_name));
         if primary.is_empty() {
             return false;
         }
         entry.skipped = false;
+        entry.duet = duet.clone();
         if self.find_duplicate(&entry) {
             if let Some(r) = entry.rid {
-                self.handled.insert(r); // _mark_waiting_for_add_duplicate_accepted: handled, and off the waitlist
+                self.handled.insert(r); // _mark_waiting_for_add_duplicate_accepted: handled, and off the waitlist and the attention list
                 self.waitlist.remove(&r);
+                self.attention.remove(&r);
             }
             return true;
         }
-        self.cleanup_duplicate_songs();
-        let counts = self.live_counts();
-        let k = name_key(&primary);
-        if counts.get(&k).copied().unwrap_or(0) >= self.cur.active_limit() {
-            if remote {
-                return false;
-            }
-            // the operator's own add may exceed the cap
+        let parts = participants(&primary, duet.as_deref());
+        if !self.limit_ok(&parts) && remote {
+            return false; // the operator's own add may exceed the cap
         }
+        let k = name_key(&primary);
         if let Some(i) = self.queue.iter().position(|s| name_key(&s.name) == k && !k.is_empty()) {
             let s = &mut self.queue[i];
             s.songs.push(entry);
             Self::clear_temp_slot(s);
+            if self.is_locked() {
+                self.reweave_locked_tail(); // an existing singer stays in their slot; keep the locked newcomers interleaved
+            }
             if remote {
                 self.cleanup_duplicate_songs();
             }
@@ -555,23 +675,153 @@ impl State {
         }
         let uid = self.next_uid;
         self.next_uid += 1;
-        let new = Singer { uid, name: primary, skipped: false, has_sung: false, round_sung: false, marker: false, temp_empty: false, until: 0.0, songs: vec![entry] };
+        let new = Singer { uid, name: primary, skipped: false, has_sung: false, round_sung: false, marker: false, temp_empty: false, until: 0.0, lock_new: false, lock_order: 0, songs: vec![entry] };
         if self.cur.rotation() {
             self.recompute_round_state();
-            let mut ins = match self.marker_index() {
-                Some(m) => m,
-                None => self.boundary_index(),
-            };
-            if ins == 0 && !self.queue.is_empty() {
-                ins = self.queue.len();
+            if self.is_locked() {
+                self.insert_locked_new_singer(new); // woven into the NEXT rotation, never ahead of the active singers
+            } else {
+                let mut ins = match self.marker_index() {
+                    Some(m) => m,
+                    None => self.boundary_index(),
+                };
+                if ins == 0 && !self.queue.is_empty() {
+                    ins = self.queue.len();
+                }
+                self.queue.insert(ins, new);
             }
-            self.queue.insert(ins, new);
             self.repair_marker();
             self.recompute_round_state();
         } else {
             self.queue.push(new);
         }
         true
+    }
+
+    // ------------------------------------------------------------------------------------------------ rotation lock
+    /// `_rotation_lock_can_enable`: rotation mode, a non-empty queue, and the marked singer is not already next.
+    fn lock_can_enable(&self) -> bool {
+        self.cur.rotation() && !self.queue.is_empty() && self.marker_index() != Some(0)
+    }
+
+    /// `_is_rotation_locked`: the saved setting only counts while the lock can be enabled (the setting itself stays set).
+    fn is_locked(&self) -> bool {
+        self.cur.rotation() && self.cur.locked && self.lock_can_enable()
+    }
+
+    fn clear_lock(&mut self) {
+        self.cur.locked = false;
+        self.lock_count = 0;
+        for s in &mut self.queue {
+            s.lock_new = false;
+            s.lock_order = 0;
+        }
+    }
+
+    /// `_rotation_reweave_locked_tail`: from the marker (or the first locked newcomer) on, old singers and locked newcomers alternate,
+    /// old first, a marked singer with no active songs pinned in front.
+    fn reweave_locked_tail(&mut self) {
+        if !self.is_locked() || self.queue.is_empty() {
+            return;
+        }
+        let marker = self.marker_index();
+        let pinned = marker.filter(|&m| !self.queue[m].is_active()).map(|m| self.queue[m].uid);
+        let first_new = self.queue.iter().position(|s| s.lock_new);
+        let Some(tail_start) = [marker, first_new].into_iter().flatten().min() else { return };
+        let mut tail: Vec<Singer> = self.queue.split_off(tail_start);
+        let mut pinned_singer = None;
+        if let Some(uid) = pinned {
+            if let Some(pos) = tail.iter().position(|s| s.uid == uid) {
+                pinned_singer = Some(tail.remove(pos));
+            }
+        }
+        let (mut new_tail, old_tail): (Vec<Singer>, Vec<Singer>) = tail.into_iter().partition(|s| s.lock_new);
+        new_tail.sort_by_key(|s| s.lock_order);
+        let mut woven: Vec<Singer> = Vec::new();
+        woven.extend(pinned_singer);
+        let (mut old_it, mut new_it) = (old_tail.into_iter(), new_tail.into_iter());
+        loop {
+            let (a, b) = (old_it.next(), new_it.next());
+            if a.is_none() && b.is_none() {
+                break;
+            }
+            woven.extend(a);
+            woven.extend(b);
+        }
+        self.queue.extend(woven);
+    }
+
+    /// `_rotation_insert_locked_new_singer`.
+    fn insert_locked_new_singer(&mut self, mut new: Singer) {
+        new.lock_new = true;
+        new.lock_order = self.lock_count;
+        self.lock_count += 1;
+        let marker = self.marker_index();
+        if marker == Some(0) {
+            self.queue.push(new);
+            self.clear_lock();
+            return;
+        }
+        let ins = match marker {
+            Some(m) => m + 1,
+            None => self.boundary_index(),
+        };
+        self.queue.insert(ins.min(self.queue.len()), new);
+        self.reweave_locked_tail();
+    }
+
+    /// The Lock/Unlock button (`toggle_rotation_lock_button`).
+    fn op_rotation_lock(&mut self) -> (bool, String) {
+        if !self.cur.rotation() || self.is_locked() || !self.lock_can_enable() {
+            self.clear_lock();
+        } else {
+            self.cur.locked = true;
+            self.lock_count = 0;
+        }
+        (true, format!("lock={}", self.cur.locked as i32))
+    }
+
+    /// `_record_remote_attention_request` + the forced waitlist upsert: a request the app could not add stays visible to the host.
+    fn record_attention(&mut self, item: &Value, reason: &str) {
+        let rid = request_id_of(item);
+        if rid <= 0 {
+            return;
+        }
+        let rid = rid as u64;
+        let mut it = item.clone();
+        if let Some(o) = it.as_object_mut() {
+            o.insert("attention_reason".into(), json!(reason));
+        }
+        self.attention.insert(rid, it.clone());
+        if non_actionable(&it) || self.handled.contains(&rid) {
+            return;
+        }
+        if self.queue.iter().any(|s| s.songs.iter().any(|e| e.rid == Some(rid))) {
+            self.handled.insert(rid);
+            self.waitlist.remove(&rid);
+            self.attention.remove(&rid);
+            return;
+        }
+        self.waitlist.insert(rid, it);
+    }
+
+    /// `process_external_request` for one request row (cap, then the remote add). Err carries nothing; the caller records what it needs.
+    fn process_external(&mut self, req: &Value, singer: &str, entry: Entry) -> bool {
+        let parts = req_participants(req);
+        if !self.limit_ok(&parts) {
+            return false; // _record_remote_limit_blocked_request: nothing is recorded locally
+        }
+        let rid = entry.rid;
+        if self.add_song(singer, entry, true) {
+            if let Some(r) = rid {
+                self.attention.remove(&r); // _clear_remote_attention_request
+                self.waitlist.remove(&r);
+            }
+            true
+        } else {
+            self.record_attention(req, "queue_insert_failed");
+            false
+        }
     }
 
     // ------------------------------------------------------------------------------------------------ ops
@@ -588,19 +838,19 @@ impl State {
         if let Some(v) = ev.get("waitlist") {
             self.cur.waitlist = truthy(v);
         }
+        if let Some(v) = ev.get("rotation_locked") {
+            self.cur.locked = truthy(v);
+        }
         ROUTE_OK.into_pair()
     }
 
     fn op_add_song(&mut self, ev: &Value) -> (bool, String) {
         let singer = ev.get("singer").and_then(Value::as_str).unwrap_or("");
-        if is_duet(singer) {
-            return (false, "unsupported".into());
-        }
         let artist = ev.get("artist").and_then(Value::as_str).unwrap_or("");
         let title = ev.get("title").and_then(Value::as_str).unwrap_or("");
         let key = ev.get("key").and_then(Value::as_i64).unwrap_or(0);
         self.next_local += 1;
-        let entry = Entry { rid: None, local: Some(self.next_local), artist: String::new(), title: title.into(), song_info: format!("/lib/{artist}-{title}.zip"), key, tempo: None, skipped: false };
+        let entry = Entry { rid: None, local: Some(self.next_local), artist: String::new(), title: title.into(), song_info: format!("/lib/{artist}-{title}.zip"), duet: None, key, tempo: None, skipped: false };
         // artist is stored from the track dict, which carries the event artist; the harness' local entries use it for the song path only
         let mut entry = entry;
         entry.artist = artist.into();
@@ -620,6 +870,7 @@ impl State {
         struct Req {
             rid: u64,
             singer: String,
+            queue_singer: String,
             artist: String,
             title: String,
             key: i64,
@@ -664,7 +915,11 @@ impl State {
             }
             let key = o.get("key").and_then(Value::as_i64).unwrap_or(0);
             let tempo = o.get("tempo").and_then(Value::as_i64).unwrap_or(0).clamp(-30, 30);
-            normalized.push(Req { rid, singer, artist: o.get("artist").and_then(Value::as_str).unwrap_or("").trim().to_string(), title, key, tempo });
+            let queue_singer = {
+                let p = parse_duet(&singer).0;
+                if p.is_empty() { singer.clone() } else { p }
+            };
+            normalized.push(Req { rid, singer, queue_singer, artist: o.get("artist").and_then(Value::as_str).unwrap_or("").trim().to_string(), title, key, tempo });
         }
         
         let mut existing: BTreeSet<u64> = self.queue.iter().flat_map(|s| s.songs.iter().filter_map(|e| e.rid)).filter(|r| *r > 0).collect();
@@ -680,7 +935,7 @@ impl State {
                 if a.is_empty() || t.is_empty() {
                     continue;
                 }
-                if let Some(pos) = pool.iter().position(|&i| normalized[i].singer.to_lowercase() == sn && normalized[i].artist.to_lowercase() == a && normalized[i].title.to_lowercase() == t) {
+                if let Some(pos) = pool.iter().position(|&i| normalized[i].queue_singer.to_lowercase() == sn && normalized[i].artist.to_lowercase() == a && normalized[i].title.to_lowercase() == t) {
                     let r = &normalized[pool.remove(pos)];
                     e.rid = Some(r.rid);
                     e.key = r.key;
@@ -690,13 +945,19 @@ impl State {
             }
         }
         self.cleanup_duplicate_songs();
+        let desired: BTreeSet<u64> = normalized.iter().map(|r| r.rid).collect();
+        self.failed.retain(|id| desired.contains(id)); // forget ids the server no longer lists
         let mut counts = self.live_counts();
         for r in &normalized {
-            if existing.contains(&r.rid) || waiting_ids.contains(&r.rid) {
+            if existing.contains(&r.rid) || waiting_ids.contains(&r.rid) || self.failed.contains(&r.rid) {
                 continue;
             }
-            let k = name_key(&r.singer);
-            if counts.get(&k).copied().unwrap_or(0) >= self.cur.active_limit() {
+            let item = json!({"request_id": r.rid, "singer": r.singer, "queue_singer": r.queue_singer, "artist": r.artist, "title": r.title, "key": r.key,
+                              "tempo": r.tempo, "pending_reason": "", "pending_status": "", "last_error": ""});
+            // the intake cap check sees the queue singer only (a duet partner is checked later, by the add itself)
+            let parts = req_participants(&item);
+            let limit = self.cur.active_limit();
+            if parts.iter().any(|p| { let k = name_key(p); !k.is_empty() && counts.get(&k).copied().unwrap_or(0) >= limit }) {
                 continue;
             }
             if !self.cur.accepting {
@@ -708,15 +969,21 @@ impl State {
                 artist: r.artist.clone(),
                 title: r.title.clone(),
                 song_info: format!("/lib/{}-{}.zip", r.artist, r.title),
+                duet: None,
                 key: r.key,
                 tempo: Some(100 + r.tempo),
                 skipped: false,
             };
-            if is_duet(&r.singer) {
-                continue;
-            }
-            if self.add_song(&r.singer, entry, true) {
-                *counts.entry(k).or_insert(0) += 1;
+            if self.process_external(&item, &r.singer, entry) {
+                for p in parts {
+                    let k = name_key(&p);
+                    if !k.is_empty() {
+                        *counts.entry(k).or_insert(0) += 1;
+                    }
+                }
+            } else {
+                self.failed.insert(r.rid);
+                self.record_attention(&item, "auto_accept_failed");
             }
         }
         // server key/tempo win for every queued request in the payload (last row wins); then wire order inside each singer
@@ -738,7 +1005,7 @@ impl State {
         }
         let mut desired_by: HashMap<String, Vec<u64>> = HashMap::new();
         for r in &normalized {
-            desired_by.entry(r.singer.to_lowercase()).or_default().push(r.rid);
+            desired_by.entry(r.queue_singer.to_lowercase()).or_default().push(r.rid);
         }
         for s in &mut self.queue {
             let Some(order) = desired_by.get(&s.name.trim().to_lowercase()) else { continue };
@@ -798,6 +1065,13 @@ impl State {
             }
             candidates.insert(rid, row.clone());
         }
+        for (rid, req) in &self.attention {
+            // a failed add stays host-visible; a server row for the same id wins (setdefault)
+            if self.handled.contains(rid) || local_ids.contains(rid) {
+                continue;
+            }
+            candidates.entry(*rid).or_insert_with(|| req.clone());
+        }
         self.waitlist = candidates;
     }
 
@@ -813,20 +1087,15 @@ impl State {
         let singer = row_str(&req, "singer").trim().to_string();
         let artist = row_str(&req, "artist").trim().to_string();
         let title = row_str(&req, "title").trim().to_string();
-        if is_duet(&singer) || singer.is_empty() || title.is_empty() {
-            return (false, "unsupported".into()); // duets and the library-match failure path (attention list) are not modelled
+        if singer.is_empty() || title.is_empty() {
+            return (false, "unsupported".into()); // the library-match failure path (_unmatched_request_sigs) is not modelled
         }
         let int = |k: &str| to_f64(req.get(k)).map(|f| f as i64).unwrap_or(0);
         let key = int("key");
         let tempo = int("tempo").clamp(-30, 30);
         self.prune_expired_slots();
-        // process_external_request: the cap first (waitlisted rows do not count towards it), then the add itself
-        let counts = self.live_counts();
-        if counts.get(&name_key(&singer)).copied().unwrap_or(0) >= self.cur.active_limit() {
-            return (false, "not_added".into());
-        }
-        let entry = Entry { rid: Some(rid), local: None, artist: artist.clone(), title: title.clone(), song_info: format!("/lib/{artist}-{title}.zip"), key, tempo: Some(100 + tempo), skipped: false };
-        if !self.add_song(&singer, entry, true) {
+        let entry = Entry { rid: Some(rid), local: None, artist: artist.clone(), title: title.clone(), song_info: format!("/lib/{artist}-{title}.zip"), duet: None, key, tempo: Some(100 + tempo), skipped: false };
+        if !self.process_external(&req, &singer, entry) {
             return (false, "not_added".into());
         }
         self.handled.insert(rid);
@@ -849,7 +1118,7 @@ impl State {
         }
         self.removed_tonight.insert(rid, item);
         self.handled.insert(rid);
-        let entry = Entry { rid: Some(rid), local: None, artist: row_str(&req, "artist"), title: row_str(&req, "title"), song_info: String::new(), key: 0, tempo: None, skipped: false };
+        let entry = Entry { rid: Some(rid), local: None, artist: row_str(&req, "artist"), title: row_str(&req, "title"), song_info: String::new(), duet: None, key: 0, tempo: None, skipped: false };
         self.tombstone(rid, &entry, &row_str(&req, "singer"), "waiting_for_add_cleared", "removed");
         self.waitlist.remove(&rid);
         (true, "removed".into())
@@ -1016,6 +1285,9 @@ impl State {
         self.handled.clear();
         self.waitlist.clear();
         self.removed_tonight.clear();
+        self.attention.clear();
+        self.failed.clear();
+        self.lock_count = 0;
         self.singer_alias.clear();
         self.next_uid = 1;
         self.next_local = 0;
@@ -1031,7 +1303,7 @@ impl State {
                     None
                 };
                 let text = |k: &str| e.get(k).and_then(Value::as_str).unwrap_or("").to_string();
-                songs.push(Entry { rid, local, artist: text("artist"), title: text("title"), song_info: text("song_info"), key: e.get("key").and_then(Value::as_i64).unwrap_or(0), tempo: e.get("tempo").and_then(Value::as_i64), skipped: f(&e, "skipped") });
+                songs.push(Entry { rid, local, artist: text("artist"), title: text("title"), song_info: text("song_info"), duet: e.get("duet_display").and_then(Value::as_str).map(String::from), key: e.get("key").and_then(Value::as_i64).unwrap_or(0), tempo: e.get("tempo").and_then(Value::as_i64), skipped: f(&e, "skipped") });
             }
             let uid = self.next_uid;
             self.next_uid += 1;
@@ -1044,6 +1316,8 @@ impl State {
                 marker: f(&sv, "rotation_marker"),
                 temp_empty: f(&sv, "temp_empty"),
                 until: sv.get("until").and_then(Value::as_f64).unwrap_or(0.0),
+                lock_new: f(&sv, "rotation_lock_new"),
+                lock_order: sv.get("rotation_lock_order").and_then(Value::as_i64).unwrap_or(0),
                 songs,
             });
         }
@@ -1072,6 +1346,9 @@ impl State {
 
     fn op_restart(&mut self) -> (bool, String) {
         self.cur = self.init.clone();
+        self.attention.clear();
+        self.failed.clear();
+        self.lock_count = 0;
         self.removed = self.tombs.keys().copied().collect();
         (true, "restarted".into())
     }
@@ -1091,11 +1368,12 @@ impl State {
                             in_queue.entry(r).or_default().push(e.alias());
                         }
                         json!({"id": e.alias(), "remote_request_id": e.rid, "artist": e.artist, "title": e.title, "song_info": e.song_info,
-                               "key": e.key, "tempo_percent": e.tempo, "skipped": e.skipped})
+                               "key": e.key, "tempo_percent": e.tempo, "skipped": e.skipped, "duet_display": e.duet})
                     })
                     .collect();
                 json!({"id": format!("S{}", self.singer_alias.get(&s.uid).copied().unwrap_or(0)), "name": s.name, "skipped": s.skipped, "has_sung": s.has_sung,
-                       "round_sung": s.round_sung, "rotation_marker": s.marker, "temporary_empty_slot": s.temp_empty, "songs": songs})
+                       "round_sung": s.round_sung, "rotation_marker": s.marker, "temporary_empty_slot": s.temp_empty, "rotation_lock_new": s.lock_new,
+                       "rotation_lock_order": s.lock_order, "songs": songs})
             })
             .collect();
         let view = |m: &BTreeMap<u64, Value>| -> Value {
@@ -1125,7 +1403,9 @@ impl State {
         }
         json!({
             "queue": singers,
-            "rotation": {"mode": self.cur.mode, "locked": false},
+            "rotation": {"mode": self.cur.mode, "locked": self.is_locked(), "lock_setting": self.cur.locked, "lock_insert_count": self.lock_count},
+            "attention": self.attention.iter().map(|(k, v)| (k.to_string(), json!(row_str(v, "attention_reason")))).collect::<Map<String, Value>>(),
+            "unmatched_remote_ids": self.failed.iter().collect::<Vec<_>>(),
             "waitlist": view(&self.waitlist), "removed_tonight": view(&self.removed_tonight), "handled_waitlist_ids": self.handled.iter().collect::<Vec<_>>(),
             "tombstones": tombs, "removed_ids": self.removed.iter().collect::<Vec<_>>(),
             "deferred_remote_adds": 0, "lifecycle": life,
@@ -1186,5 +1466,53 @@ mod waitlist_tests {
         assert_eq!(st.apply(&json!({"op": "waitlist_restore", "request_id": 9})), (true, "restored".into()));
         assert_eq!(st.apply(&json!({"op": "waitlist_add", "request_id": 9})), (true, "added".into()));
         assert!(st.snapshot()["waitlist"].as_object().unwrap().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod duet_lock_tests {
+    use super::*;
+
+    fn d(s: &str) -> (String, Option<String>) {
+        parse_duet(s)
+    }
+
+    #[test]
+    fn duet_parsing_matches_the_apps_regex() {
+        assert_eq!(d("Amber and Delores"), ("Amber".into(), Some("Amber & Delores".into())));
+        assert_eq!(d("a  WITH  b"), ("a".into(), Some("a & b".into())));
+        assert_eq!(d("Snow/Joe"), ("Sno".into(), Some("Sno & Joe".into()))); // 'w/' matches inside a word
+        assert_eq!(d("Ada, Bob"), ("Ada".into(), Some("Ada & Bob".into())));
+        assert_eq!(d("Ada /w Bob"), ("Ada".into(), Some("Ada & Bob".into())));
+        assert_eq!(d("Ada & Bob & Cy"), ("Ada".into(), Some("Ada & Bob & Cy".into())));
+        assert_eq!(d("Andrea"), ("Andrea".into(), None));
+        assert_eq!(d("Sandy"), ("Sandy".into(), None));
+        assert_eq!(d("Flo &"), ("Flo &".into(), None));
+        assert_eq!(d("& Flo"), ("& Flo".into(), None));
+        assert_eq!(d("   "), (String::new(), None));
+    }
+
+    #[test]
+    fn participants_are_deduplicated_and_the_third_name_stays_whole() {
+        assert_eq!(participants("Ada", Some("Ada & Bob")), vec!["Ada".to_string(), "Bob".to_string()]);
+        assert_eq!(participants("Ada", Some("Ada & Bob & Cy")), vec!["Ada".to_string(), "Bob & Cy".to_string()]);
+        assert_eq!(participants("ADA", Some("ada & ada")), vec!["ADA".to_string()]);
+    }
+
+    #[test]
+    fn lock_weaves_new_singers_after_the_marker() {
+        let mut st = State::new(&json!({"queue_mode": "rotation"}));
+        for (i, n) in ["Ada", "Bob", "Cy"].iter().enumerate() {
+            st.apply(&json!({"op": "add_song", "singer": n, "title": format!("t{i}")}));
+        }
+        st.apply(&json!({"op": "move_singer", "singer": "Cy", "where": "top"}));
+        assert_eq!(st.apply(&json!({"op": "rotation_lock"})), (true, "lock=1".into()));
+        st.apply(&json!({"op": "add_song", "singer": "Dee", "title": "x"}));
+        st.apply(&json!({"op": "add_song", "singer": "Eve", "title": "y"}));
+        let names: Vec<String> = st.snapshot()["queue"].as_array().unwrap().iter().map(|s| s["name"].as_str().unwrap().to_string()).collect();
+        assert_eq!(names.len(), 5);
+        assert_eq!(st.snapshot()["rotation"]["lock_insert_count"], 2);
+        assert_eq!(st.apply(&json!({"op": "rotation_lock"})), (true, "lock=0".into()));
+        assert_eq!(st.snapshot()["rotation"]["lock_insert_count"], 0);
     }
 }

@@ -220,3 +220,70 @@ Duets, rotation lock, server-terminal rows (the server-side purge and `_remote_t
 rename-merge (`_alias_mapped_request`), stale-by-timestamp waitlist purge, `replacement_track` adds, the attention list (library-match and
 insert failures; `waitlist_add` with an empty singer/title answers `unsupported`), evening-key reload on a real restart. `queue_state_shadow.py` is
 unchanged: it still skips any poll with the waitlist setting on or a waiting row, so nothing about the waitlist runs in a show.
+
+## M4: rotation lock and duets in the Rust model (Stage B step 3)
+
+Covered now: the rotation lock (setting `rotation_locked`, event `rotation_lock` = the Lock/Unlock button), duet singer names ("A & B"), and the
+failure path a duet exposes (the attention list and the failed-id set). Oracle as before: the real `_add_song_to_queue`, `_rotation_*lock*`,
+`toggle_rotation_lock_button`, `_parse_duet_singer`, `_duet_participants_from_display`, `_check_queue_song_limit`, `process_external_request`,
+`_apply_resolved_remote_add`, `_record_remote_attention_request` and the reconcile intake loop. Replay changes: config key `rotation_locked`, op
+`rotation_lock` (result code `lock=0|1`), snapshot fields `duet_display` per song, `rotation_lock_new` / `rotation_lock_order` per singer,
+`rotation.lock_setting` / `lock_insert_count`, top level `attention` (id -> reason) and `unmatched_remote_ids`; generator names include
+`DUETS`; new adversarial cases (lock weave, lock refused while the marked singer is next, a saved lock that comes and goes with the marker, lock in
+classic mode, duet counts both names, duet partner at the limit, duet separators and odd names).
+
+### Lock rules
+
+1. **Setting versus effect.** `_is_rotation_locked()` = rotation mode AND the saved setting AND `_rotation_lock_can_enable()` (queue not empty and
+   the marked singer is NOT index 0). The setting itself is not cleared when the marker is first: a saved lock goes dormant and wakes up again the
+   moment the marker moves off the top (reorder, a removal). Only the button (toggle), `_rotation_clear_lock`, or the sanitize pass (which runs from
+   the button refresh, not from any modelled op) clear it.
+2. **What the lock changes** (in modelled ops): ONLY where a song is added. A new singer is woven into the NEXT rotation instead of going before
+   the marker: it is flagged `rotation_lock_new` with the next `rotation_lock_order`, inserted right after the marker (or at the round boundary if
+   there is no marker) and the tail is re-woven; an existing singer adding a song stays where they are, then the tail is re-woven. Remote
+   arrivals, host adds and waitlist adds all take the same two paths. Move, remove, skip, advance, complete and duplicate suppression ignore the lock.
+3. **Reweave.** From the marker (or the first locked newcomer, whichever is earlier) to the end: a marked singer with no active songs is pinned
+   first; the remaining old singers keep their order, the locked newcomers are sorted by `rotation_lock_order`, and the two lists are interleaved
+   old, new, old, new, ... Everything before the tail start is untouched.
+4. **Button.** Unlock if locked; if not rotation mode or the lock cannot be enabled it clears (and says "ignored"); otherwise it sets the setting
+   and resets `rotation_lock_insert_count` to 0. Clearing resets the counter and drops every `rotation_lock_new` / `rotation_lock_order`.
+5. The branch of `_rotation_insert_locked_new_singer` that handles "marker is already first" is unreachable from `_add_song_to_queue` (the lock is
+   not active then); it is ported anyway. The playback code (`play_next_file`) clears the lock when the next rotation begins: out of scope here.
+6. The replay world's `restart` rebuilds settings from the initial config, so the lock setting returns to its initial value and the insert counter to 0
+   (the real app persists settings; the locked-singer flags persist in the copied queue). Rust mirrors the harness.
+
+### Duet rules
+
+1. **Parsing** (`_parse_duet_singer`, after the first-letter capitalisation of every word): whitespace collapsed; the FIRST match of
+   `\s*(&|\+|/w|w/|/|,|\band\b|\bwith\b)\s*` (any case) splits the name; if either side is empty it is not a duet (the whole name stays, e.g. "Flo &").
+   The row is the first name; the song carries `duet_display` "First & Second" (always an ampersand, even when typed "and"/"with").
+   "A & B & C" gives the partner "B & C" (one name).
+2. **Counting.** A song counts against every participant (`_duet_participants_from_display(singer row name, duet_display)`, deduplicated by the
+   casefolded name), skipped singers and skipped songs excluded. So a duet entry under Amber also uses Delores's allowance, and "Delores" may be a
+   row of her own.
+3. **Matching.** The row lookup, adoption of local entries by (name, artist, title) and the per-singer wire order use the FIRST name only.
+4. **Limit asymmetry (the surprise).** The reconcile intake pre-check, `process_external_request` and `_apply_resolved_remote_add` all check
+   `queue_singer` (the first name) only, so a request "Bob & Ada" with Ada at the limit passes all three and fails inside `_add_song_to_queue`
+   (which checks both names). That failure records an attention item (`queue_insert_failed`, then overwritten by `auto_accept_failed` from the
+   reconcile), puts the id in the failed set (skipped on later polls until the server stops listing it) and forces the request onto the waitlist view
+   (even with the waitlist setting off; the entry has no `state`, so the snapshot shows an empty state). A raw server row added by `waitlist_add`
+   is different: its singer is the raw "Bob & Ada", so the pre-check sees both names and answers `not_added` without recording anything; an
+   attention-sourced entry (first name only) fails late again and its reason becomes `queue_insert_failed`.
+5. **State kept.** `_remote_attention_requests` and `_unmatched_remote_request_ids` live in memory only (restart clears them); the waitlist entry
+   survives. A successful remote add clears the attention item and the waitlist entry; the duplicate path also clears the attention item. While the waitlist is on, every
+   poll adds attention items to the rebuilt waitlist unless the id is handled or queued; with it off only entries with an `attention_reason` survive.
+
+### Surprises (reported, NOT changed)
+
+- "Snow/Joe" is a duet ("Sno" and "Joe"): `w/` and `/w` match inside words. Any name with a slash, comma or plus is split.
+- The partner-limit asymmetry above: a duet whose partner is full is accepted by every pre-check and then fails, landing on the waitlist under
+  `auto_accept_failed` even when the waitlist is disabled.
+- A dormant saved lock (marker first) silently re-activates when the marker moves.
+- "A & B & C" counts the partner "B & C" as a single person.
+
+### Still not modelled
+
+The lock being cleared by playback, the sanitize pass, the real `_delete_rotation_singer_row` (the replay world stubs it), `_merge_duplicate_rotation_singers`,
+`_unmatched_request_sigs` (library-match failures), rename-merge and singer aliases, server singer ids / sessions, sort_order, deferred adds and
+server-terminal rows. `queue_state_shadow.py` is unchanged: it still skips a poll when the lock setting is on, a duet name is present or the waitlist,
+attention or unmatched sets change.

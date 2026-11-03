@@ -66,11 +66,11 @@ def _quiet(*_a, **_k):
 class World:
     """One bare app plus the alias tables that make snapshots comparable across runs and implementations."""
 
-    def __init__(self, queue_mode="rotation", limit=20, accepting=True, waitlist=False, tombstone_dir=None):
+    def __init__(self, queue_mode="rotation", limit=20, accepting=True, waitlist=False, tombstone_dir=None, rotation_locked=False):
         self.m = load_app_module()
         self.dir = Path(tombstone_dir or tempfile.mkdtemp(prefix="singws-replay-world-"))
         self.clock = 1_700_000_000.0
-        self.settings = {"queue_mode": queue_mode, "limit_pending_max": limit, "requests_accepting": bool(accepting), "waitlist": bool(waitlist)}
+        self.settings = {"queue_mode": queue_mode, "limit_pending_max": limit, "requests_accepting": bool(accepting), "waitlist": bool(waitlist), "rotation_locked": bool(rotation_locked)}
         self.singer_alias: dict[str, str] = {}   # real singer_id -> S<n>
         self.entry_alias: dict[str, str] = {}    # real entry id (remote:N / local:uuid) -> R<N> / L<n>
         self.seen_singer_keys: set[str] = set()
@@ -106,6 +106,7 @@ class World:
             "shell_commands": "apply", "queue_state_shadow": False,  # the harness drives the Rust side itself
         }
         app.settings.update(self.settings)
+        app.settings["rotation_lock_insert_count"] = 0
         app.settings["use_waiting_for_add"] = bool(self.settings.get("waitlist", False))
         app.queue = queue if queue is not None else []
         app.singer_history = {"singers": {}, "deletions": {}}
@@ -229,7 +230,7 @@ class World:
         return result
 
     def op_config(self, e):
-        for k in ("queue_mode", "limit_pending_max", "requests_accepting"):
+        for k in ("queue_mode", "limit_pending_max", "requests_accepting", "rotation_locked"):
             if k in e:
                 self.app.settings[k] = e[k]
         if "waitlist" in e:
@@ -319,6 +320,11 @@ class World:
         self.app._waitlist_restore_request(req)
         return {"ok": True, "code": "restored"}
 
+    def op_rotation_lock(self, e):
+        """The host's Lock/Unlock button (toggle_rotation_lock_button): locks only while the marked singer is not already next."""
+        self.app.toggle_rotation_lock_button()
+        return {"ok": True, "code": f"lock={int(bool(self.app.settings.get('rotation_locked', False)))}"}
+
     def op_restart(self, e):
         """App restart: tombstones come back from disk, queue and waitlist from their persisted copies; every in-memory set is rebuilt."""
         app = self.app
@@ -357,7 +363,7 @@ class World:
                 rec = {
                     "id": eid_alias[eid], "remote_request_id": rid, "artist": str(entry.get("artist", "")), "title": str(entry.get("title", "")),
                     "song_info": _jsonable(entry.get("song_info")), "key": entry.get("key", 0), "tempo_percent": entry.get("tempo_percent", 100),
-                    "skipped": bool(entry.get("skipped", False)),
+                    "skipped": bool(entry.get("skipped", False)), "duet_display": entry.get("duet_display"),
                 }
                 songs.append(rec)
                 if rid is not None:
@@ -367,6 +373,7 @@ class World:
                 "has_sung": bool(singer.get("has_sung", False)), "round_sung": bool(singer.get("round_sung", False)),
                 "rotation_marker": bool(singer.get("rotation_marker", False)), "songs": songs,
                 "temporary_empty_slot": bool(singer.get("temporary_empty_slot", False)),
+                "rotation_lock_new": bool(singer.get("rotation_lock_new", False)), "rotation_lock_order": int(singer.get("rotation_lock_order", 0) or 0),
             })
         tomb = {}
         data = app._ensure_remote_request_tombstones()
@@ -387,7 +394,10 @@ class World:
             lifecycle[str(rid)] = {"state": state, "copies_in_queue": len(in_queue.get(rid, []))}
         return {
             "queue": singers,
-            "rotation": {"mode": app.settings.get("queue_mode"), "locked": bool(app._is_rotation_locked()) if hasattr(app, "_is_rotation_locked") else False},
+            "rotation": {"mode": app.settings.get("queue_mode"), "locked": bool(app._is_rotation_locked()), "lock_setting": bool(app.settings.get("rotation_locked", False)),
+                         "lock_insert_count": int(app.settings.get("rotation_lock_insert_count", 0) or 0)},
+            "attention": {str(k): str((v or {}).get("attention_reason", "")) for k, v in sorted(app._remote_attention_requests.items(), key=lambda kv: str(kv[0]))},
+            "unmatched_remote_ids": sorted(int(x) for x in getattr(app, "_unmatched_remote_request_ids", set()) or set()),
             "waitlist": waitlist, "removed_tonight": removed_tonight, "handled_waitlist_ids": sorted(app._waiting_for_add_handled_ids),
             "tombstones": tomb, "removed_ids": sorted(int(x) for x in app._remote_removed_request_ids),
             "deferred_remote_adds": len(app._deferred_remote_adds), "lifecycle": lifecycle,
@@ -435,7 +445,7 @@ class PythonImpl(Implementation):
 
     def reset(self, config=None):
         cfg = dict(config or {})
-        self.world = World(queue_mode=cfg.get("queue_mode", "rotation"), limit=cfg.get("limit_pending_max", 20), accepting=cfg.get("requests_accepting", True), waitlist=cfg.get("waitlist", False))
+        self.world = World(queue_mode=cfg.get("queue_mode", "rotation"), limit=cfg.get("limit_pending_max", 20), accepting=cfg.get("requests_accepting", True), waitlist=cfg.get("waitlist", False), rotation_locked=cfg.get("rotation_locked", False))
 
     def apply(self, event):
         return self.world.apply(event)
@@ -575,6 +585,8 @@ def equivalent_reordering(stream: list[dict], rng: random.Random) -> list[dict]:
 
 # ------------------------------------------------------------------------------------------------------ corpus
 SINGERS = ["Ada", "Bob", "Cy", "Dee", "Eve", "Flo"]
+# duet spellings: every separator, odd spacing, case, a partner who is also a solo singer, "w/" inside a word, a third name
+DUETS = ["Ada & Bob", "cy and dee", "Eve WITH Flo", "Ada/Bob", "Bob, Cy", "ada + Eve", "Dee /w Flo", "Snow/Joe", "Ada & Bob & Cy", "Flo &", "& Flo", "Andrea", "Sandy And Mandy", "Brand New", "Ada Andrea", "Bob Without Cy", "Zowith Joe"]
 TITLES = ["Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot", "Golf", "Hotel", "India", "Juliet"]
 
 
@@ -638,6 +650,28 @@ def adversarial_cases() -> dict[str, list[dict]]:
                                          {"op": "remote_arrive", "requests": [dict(a1, tempo=99)]}],
         "classic_mode_basics": [dict(cfg, queue_mode="classic"), {"op": "remote_arrive", "requests": [a1, b1, a2]}, {"op": "remove_song", "entry": "R1003"}, {"op": "remove_song", "entry": "R1001"},
                                 {"op": "add_song", "singer": "Cy", "title": "Local"}, {"op": "move_singer", "singer": "S3", "where": "top"}, {"op": "rotation_advance", "singer": "S1"}],
+        "rotation_lock_weaves_new_singers_into_the_next_rotation": [cfg, {"op": "remote_arrive", "requests": [a1, b1, _req(1004, "Cy", "Delta"), _req(1005, "Dee", "Echo")]},
+                                                                      {"op": "move_singer", "singer": "S3", "where": "top"}, {"op": "rotation_lock"},
+                                                                      {"op": "remote_arrive", "requests": [_req(1006, "Eve", "Foxtrot"), _req(1007, "Flo", "Golf")]},
+                                                                      {"op": "add_song", "singer": "Gus", "title": "Local"}, {"op": "remote_arrive", "requests": [_req(1008, "Bob", "Hotel")]},
+                                                                      {"op": "rotation_lock"}, {"op": "remote_arrive", "requests": [_req(1009, "Hal", "India")]}],
+        "rotation_lock_refused_while_the_marked_singer_is_next": [cfg, {"op": "remote_arrive", "requests": [a1, b1]}, {"op": "rotation_lock"}, {"op": "remote_arrive", "requests": [_req(1004, "Cy", "Delta")]},
+                                                                    {"op": "move_singer", "singer": "S2", "where": "top"}, {"op": "rotation_lock"}, {"op": "remote_arrive", "requests": [_req(1005, "Dee", "Echo")]},
+                                                                    {"op": "move_singer", "singer": "S1", "where": "top"}, {"op": "remote_arrive", "requests": [_req(1006, "Eve", "Foxtrot")]}],
+        "saved_lock_comes_and_goes_with_the_marker": [dict(cfg, rotation_locked=True), {"op": "remote_arrive", "requests": [a1, b1, _req(1004, "Cy", "Delta")]},
+                                                      {"op": "move_singer", "singer": "S3", "where": "top"}, {"op": "remote_arrive", "requests": [_req(1005, "Dee", "Echo")]},
+                                                      {"op": "move_singer", "singer": "S1", "where": "top"}, {"op": "remote_arrive", "requests": [_req(1006, "Eve", "Foxtrot")]}, {"op": "restart"},
+                                                      {"op": "remote_arrive", "requests": [_req(1007, "Flo", "Golf")]}],
+        "lock_in_classic_mode_does_nothing": [dict(cfg, queue_mode="classic", rotation_locked=True), {"op": "remote_arrive", "requests": [a1, b1]}, {"op": "rotation_lock"}, {"op": "add_song", "singer": "Cy", "title": "L"}],
+        "duet_goes_under_the_first_name_and_counts_both": [dict(cfg, limit_pending_max=2), {"op": "add_song", "singer": "amber and delores", "title": "A"}, {"op": "add_song", "singer": "Delores", "title": "B"},
+                                                           {"op": "add_song", "singer": "Delores", "title": "C"}, {"op": "remote_arrive", "requests": [_req(1001, "Delores", "D"), _req(1002, "Amber & Delores", "E")]}],
+        "duet_partner_at_limit_fails_late_and_lands_in_attention": [dict(cfg, limit_pending_max=2, waitlist=True), {"op": "remote_arrive", "requests": [a1, a2]},
+                                                                     {"op": "remote_arrive", "requests": [_req(1010, "Bob & Ada", "Late")]}, {"op": "remote_arrive", "requests": [_req(1010, "Bob & Ada", "Late")]},
+                                                                     {"op": "waitlist_add", "request_id": 1010}, {"op": "remove_song", "entry": "R1001"}, {"op": "waitlist_add", "request_id": 1010},
+                                                                     {"op": "restart"}, {"op": "remote_arrive", "requests": [_req(1010, "Bob & Ada", "Late")]}],
+        "duet_separators_and_odd_names": [cfg, {"op": "add_song", "singer": "Snow/Joe", "title": "1"}, {"op": "add_song", "singer": "Ada, Bob", "title": "2"}, {"op": "add_song", "singer": "Flo &", "title": "3"},
+                                          {"op": "add_song", "singer": "Sandy and Mandy", "title": "4"}, {"op": "add_song", "singer": "Ada /W Bob", "title": "5"}, {"op": "add_song", "singer": "Andrea", "title": "6"},
+                                          {"op": "add_song", "singer": "Ada & Bob & Cy", "title": "7"}],
         "accepting_off_blocks_new_arrivals": [cfg, {"op": "config", "requests_accepting": False}, {"op": "remote_arrive", "requests": [a1]},
                                               {"op": "config", "requests_accepting": True}, {"op": "remote_arrive", "requests": [a1]}],
     }
@@ -660,6 +694,11 @@ def generate_stream(seed: int, length: int = 40, profile: str = "full") -> list[
     world = World(queue_mode=rng.choice(["rotation", "classic"]), limit=rng.choice([2, 3, 20]))
     wl = rng.random() < 0.5 and profile != "core"
     stream = [{"op": "config", "queue_mode": world.settings["queue_mode"], "limit_pending_max": world.settings["limit_pending_max"], "waitlist": wl}]
+    if profile != "core" and rng.random() < 0.2:
+        stream[0]["rotation_locked"] = True  # a lock saved from an earlier session: only counts while the marked singer is not next
+
+    def who():
+        return rng.choice(DUETS) if profile != "core" and rng.random() < 0.3 else rng.choice(SINGERS)
     world.apply(stream[0])
     next_rid = 5000
     arrived: list[dict] = []
@@ -683,7 +722,7 @@ def generate_stream(seed: int, length: int = 40, profile: str = "full") -> list[
             choices += ["wl_restore"]
         choices += ["restart", "stale_ref"]
         if profile != "core":  # waitlist pressure: re-lists in other shapes, toggling the setting, stale ids, id reuse
-            choices += ["wl_relist", "wl_relist", "wl_as_pending", "wl_flip", "wl_stale", "wl_reuse", "wl_flags", "wl_add_hot", "wl_both", "wl_both"]
+            choices += ["lock", "lock", "lock", "wl_relist", "wl_relist", "wl_as_pending", "wl_flip", "wl_stale", "wl_reuse", "wl_flags", "wl_add_hot", "wl_both", "wl_both"]
             if snap["waitlist"]:
                 choices += ["wl_add_hot"] * 2
         pick = rng.choice(choices)
@@ -691,7 +730,7 @@ def generate_stream(seed: int, length: int = 40, profile: str = "full") -> list[
             batch = []
             for _i in range(rng.randint(1, 3)):
                 next_rid += 1
-                r = _req(next_rid, rng.choice(SINGERS), rng.choice(TITLES), key=rng.choice([0, 0, 2, -3]), tempo=rng.choice([0, 0, 10, -20]))
+                r = _req(next_rid, who(), rng.choice(TITLES), key=rng.choice([0, 0, 2, -3]), tempo=rng.choice([0, 0, 10, -20]))
                 if profile == "core" and rng.random() < 0.2:
                     r["singer"] = rng.choice([r["singer"].lower(), r["singer"].upper()])
                 if wl and rng.random() < 0.4:
@@ -702,7 +741,7 @@ def generate_stream(seed: int, length: int = 40, profile: str = "full") -> list[
         elif pick == "relist" and arrived:
             emit({"op": "remote_arrive", "requests": [dict(r, key=rng.choice([r["key"], 1]), tempo=rng.choice([r["tempo"], 5])) for r in rng.sample(arrived, min(len(arrived), rng.randint(1, 5)))]})
         elif pick == "add_local":
-            emit({"op": "add_song", "singer": rng.choice(SINGERS), "title": rng.choice(TITLES) + str(rng.randint(1, 3))})
+            emit({"op": "add_song", "singer": who(), "title": rng.choice(TITLES) + str(rng.randint(1, 3))})
         elif pick == "tick":
             emit({"op": "tick", "seconds": rng.choice([1, 30, 400])})
         elif pick == "remove_song" and entries:
@@ -725,6 +764,8 @@ def generate_stream(seed: int, length: int = 40, profile: str = "full") -> list[
             emit({"op": "waitlist_remove", "request_id": int(rng.choice(sorted(snap["waitlist"])))})
         elif pick == "wl_restore" and snap["removed_tonight"]:
             emit({"op": "waitlist_restore", "request_id": int(rng.choice(sorted(snap["removed_tonight"])))})
+        elif pick == "lock":
+            emit({"op": "rotation_lock"} if rng.random() < 0.8 else {"op": "config", "rotation_locked": rng.random() < 0.5})
         elif pick == "wl_relist" and arrived:
             # any earlier row again, as a waiting row (the server keeps listing what the host has not decided)
             emit({"op": "remote_arrive", "requests": [dict(r, state="waiting", pending_reason=rng.choice(["rotation_full", "host_not_accepting", "singer_limit_waitlist"])) for r in rng.sample(arrived, min(len(arrived), rng.randint(1, 4)))]})
