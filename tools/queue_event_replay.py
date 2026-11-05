@@ -66,11 +66,11 @@ def _quiet(*_a, **_k):
 class World:
     """One bare app plus the alias tables that make snapshots comparable across runs and implementations."""
 
-    def __init__(self, queue_mode="rotation", limit=20, accepting=True, waitlist=False, tombstone_dir=None, rotation_locked=False):
+    def __init__(self, queue_mode="rotation", limit=20, accepting=True, waitlist=False, tombstone_dir=None, rotation_locked=False, defer=False):
         self.m = load_app_module()
         self.dir = Path(tombstone_dir or tempfile.mkdtemp(prefix="singws-replay-world-"))
         self.clock = 1_700_000_000.0
-        self.settings = {"queue_mode": queue_mode, "limit_pending_max": limit, "requests_accepting": bool(accepting), "waitlist": bool(waitlist), "rotation_locked": bool(rotation_locked)}
+        self.settings = {"queue_mode": queue_mode, "limit_pending_max": limit, "requests_accepting": bool(accepting), "waitlist": bool(waitlist), "rotation_locked": bool(rotation_locked), "defer": bool(defer)}
         self.singer_alias: dict[str, str] = {}   # real singer_id -> S<n>
         self.entry_alias: dict[str, str] = {}    # real entry id (remote:N / local:uuid) -> R<N> / L<n>
         self.seen_singer_keys: set[str] = set()
@@ -79,7 +79,7 @@ class World:
         self._build()
 
     # -- construction -------------------------------------------------------------------------------
-    def _build(self, queue=None, waitlist=None, handled=None, removed_tonight=None):
+    def _build(self, queue=None, waitlist=None, handled=None, removed_tonight=None, deferred=None):
         m = self.m
         m.REMOTE_REQUEST_TOMBSTONES_PATH = self.dir / "tombstones.json"
         m.WAITLIST_REMOVED_TONIGHT_PATH = self.dir / "waitlist_removed_tonight.json"
@@ -107,6 +107,7 @@ class World:
         }
         app.settings.update(self.settings)
         app.settings["rotation_lock_insert_count"] = 0
+        app.settings["defer_remote_adds_until_between_singers"] = bool(self.settings.get("defer", False))
         app.settings["use_waiting_for_add"] = bool(self.settings.get("waitlist", False))
         app.queue = queue if queue is not None else []
         app.singer_history = {"singers": {}, "deletions": {}}
@@ -114,7 +115,7 @@ class World:
         app._remote_removed_request_ids = set()
         app._unmatched_remote_request_ids = set()
         app._pending_remote_order_syncs = {}
-        app._deferred_remote_adds = []
+        app._deferred_remote_adds = deferred if deferred is not None else []
         app._remote_request_intake_inflight = set()
         app._queue_revision = int(app._remote_request_tombstones.get("revision", 0) or 0) if isinstance(app._remote_request_tombstones, dict) else 0
         app._remote_attention_requests = {}
@@ -235,7 +236,19 @@ class World:
                 self.app.settings[k] = e[k]
         if "waitlist" in e:
             self.app.settings["use_waiting_for_add"] = bool(e["waitlist"])
+        if "defer" in e:
+            self.app.settings["defer_remote_adds_until_between_singers"] = bool(e["defer"])
         return {"ok": True, "code": ""}
+
+    def op_set_playing(self, e):
+        """The only playback fact the deferral rule reads: whether a song is playing (the app's `karaoke_playing`). Nothing is started."""
+        self.app.karaoke_playing = bool(e.get("playing", False))
+        return {"ok": True, "code": f"playing={int(self.app.karaoke_playing)}"}
+
+    def op_flush_deferred(self, e):
+        """`_flush_deferred_remote_adds`: the end-of-song / 'add now' flush of requests held while a song played."""
+        n = self.app._flush_deferred_remote_adds("manual", force=bool(e.get("force", False)))
+        return {"ok": True, "code": f"flushed={int(n)}"}
 
     def op_tick(self, e):
         self.clock += float(e.get("seconds", 1))
@@ -332,7 +345,8 @@ class World:
         waitlist = copy.deepcopy(app._waiting_for_add_requests)
         removed_tonight = copy.deepcopy(app._waiting_for_add_removed_tonight)
         handled = set(app._waiting_for_add_handled_ids)
-        self._build(queue=queue, waitlist=waitlist, handled=handled, removed_tonight=removed_tonight)
+        deferred = copy.deepcopy(app._deferred_remote_adds)  # persisted in deferred_remote_adds.json
+        self._build(queue=queue, waitlist=waitlist, handled=handled, removed_tonight=removed_tonight, deferred=deferred)
         # startup restores the removed-id memory from the persisted tombstones
         try:
             for rid in (self.app._ensure_remote_request_tombstones().get("requests") or {}):
@@ -407,7 +421,7 @@ class World:
             "queue_revision": int(getattr(app, "_queue_revision", 0) or 0),
             "pending_order_syncs": {str(k): {f: v.get(f) for f in ("request_ids", "host_order_updated_at", "order_revision", "last_order_source")} for k, v in sorted((getattr(app, "_pending_remote_order_syncs", {}) or {}).items())},
             "terminal_titles": {str(k): str(v) for k, v in sorted(object.__getattribute__(app, "__dict__").get("_remote_terminal_titles", {}).items())},
-            "deferred_remote_adds": len(app._deferred_remote_adds), "lifecycle": lifecycle,
+            "deferred_remote_adds": len(app._deferred_remote_adds), "deferred": [int(x.get("request_id") or 0) for x in app._deferred_remote_adds], "lifecycle": lifecycle,
         }
 
 
@@ -452,7 +466,7 @@ class PythonImpl(Implementation):
 
     def reset(self, config=None):
         cfg = dict(config or {})
-        self.world = World(queue_mode=cfg.get("queue_mode", "rotation"), limit=cfg.get("limit_pending_max", 20), accepting=cfg.get("requests_accepting", True), waitlist=cfg.get("waitlist", False), rotation_locked=cfg.get("rotation_locked", False))
+        self.world = World(queue_mode=cfg.get("queue_mode", "rotation"), limit=cfg.get("limit_pending_max", 20), accepting=cfg.get("requests_accepting", True), waitlist=cfg.get("waitlist", False), rotation_locked=cfg.get("rotation_locked", False), defer=cfg.get("defer", False))
 
     def apply(self, event):
         return self.world.apply(event)
@@ -793,6 +807,27 @@ def adversarial_cases() -> dict[str, list[dict]]:
         "attention_entries_do_not_survive_a_restart": [dict(cfg, limit_pending_max=2, waitlist=True), {"op": "remote_arrive", "requests": [a1, a2]}, {"op": "remote_arrive", "requests": [_req(1010, "Bob & Ada", "Late")]},
                                                        {"op": "restart"}, {"op": "remote_arrive", "requests": [a1]}],
         "both_session_keys_on_a_regular_arrival_prefer_singer_session_id": [cfg, {"op": "remote_arrive", "requests": [dict(a1, singer_session_id=5, session_id=6), dict(_req(1003, "Bob", "Charlie"), singer_session_id=0, session_id=8)]}],
+        # --- slice D: requests held while a song plays
+        "deferred_adds_wait_for_the_flush": [dict(cfg, defer=True), {"op": "set_playing", "playing": True}, {"op": "remote_arrive", "requests": [a1, a2, b1]}, {"op": "flush_deferred"},
+                                             {"op": "remote_arrive", "requests": [a1, a2, b1]}, {"op": "flush_deferred", "force": True}, {"op": "set_playing", "playing": False}, {"op": "flush_deferred"}],
+        "deferred_adds_count_against_the_cap_and_a_flush_double_counts": [dict(cfg, defer=True, limit_pending_max=2), {"op": "set_playing", "playing": True},
+                                                                          {"op": "remote_arrive", "requests": [a1, a2, _req(1004, "Ada", "Delta")]}, {"op": "remote_arrive", "requests": [a1, a2, _req(1004, "Ada", "Delta")]},
+                                                                          {"op": "set_playing", "playing": False}, {"op": "flush_deferred"}, {"op": "flush_deferred"}, {"op": "remote_arrive", "requests": [a1, a2, _req(1004, "Ada", "Delta")]}],
+        "deferred_order_follows_request_time_and_a_relist_moves_to_the_back": [dict(cfg, defer=True), {"op": "set_playing", "playing": True}, {"op": "remote_arrive", "requests": [b1]}, {"op": "remote_arrive", "requests": [a1]},
+                                                                               {"op": "remote_arrive", "requests": [b1, a2]}, {"op": "remote_arrive", "requests": [_req(1004, "Cy", "Delta"), a1, a2, b1]}, {"op": "flush_deferred", "force": True}],
+        "server_terminal_row_drops_a_deferred_request": [dict(cfg, defer=True), {"op": "set_playing", "playing": True}, {"op": "remote_arrive", "requests": [a1, b1]}, {"op": "remote_arrive", "requests": [dict(a1, state="completed"), b1]},
+                                                         {"op": "flush_deferred", "force": True}],
+        "deferred_adds_survive_a_restart_but_playing_does_not": [dict(cfg, defer=True), {"op": "set_playing", "playing": True}, {"op": "remote_arrive", "requests": [a1, b1]}, {"op": "restart"},
+                                                                 {"op": "flush_deferred"}, {"op": "set_playing", "playing": True}, {"op": "remote_arrive", "requests": [a2]}, {"op": "flush_deferred", "force": True}],
+        "defer_setting_off_adds_at_once_and_deferred_ones_stay_held": [dict(cfg, defer=True), {"op": "set_playing", "playing": True}, {"op": "remote_arrive", "requests": [a1]}, {"op": "config", "defer": False},
+                                                                       {"op": "remote_arrive", "requests": [a1, a2, b1]}, {"op": "flush_deferred", "force": True}],
+        "deferred_duets_and_waitlist_rows": [dict(cfg, defer=True, waitlist=True, limit_pending_max=2), {"op": "set_playing", "playing": True},
+                                             {"op": "remote_arrive", "requests": [_req(1001, "Amber & Delores", "A"), _waiting(1002, "Ada", "Bravo"), _req(1003, "Delores", "C"), _req(1004, "Delores", "D")]},
+                                             {"op": "waitlist_add", "request_id": 1002}, {"op": "add_song", "singer": "Delores", "title": "Host"}, {"op": "flush_deferred", "force": True}],
+        "host_remove_and_accepting_off_with_deferred": [dict(cfg, defer=True), {"op": "set_playing", "playing": True}, {"op": "remote_arrive", "requests": [a1]}, {"op": "remote_arrive", "requests": [b1]},
+                                                         {"op": "config", "requests_accepting": False}, {"op": "remote_arrive", "requests": [a1, a2]}, {"op": "flush_deferred", "force": True}],
+        "waitlist_add_of_a_request_that_is_also_held_excludes_its_own_copy": [dict(cfg, defer=True, waitlist=True, limit_pending_max=2), {"op": "remote_arrive", "requests": [a1]}, {"op": "set_playing", "playing": True},
+                                                                              {"op": "remote_arrive", "requests": [a2]}, {"op": "remote_arrive", "requests": [_waiting(1002, "Ada", "Bravo")]}, {"op": "waitlist_add", "request_id": 1002}],
         "accepting_off_blocks_new_arrivals": [cfg, {"op": "config", "requests_accepting": False}, {"op": "remote_arrive", "requests": [a1]},
                                               {"op": "config", "requests_accepting": True}, {"op": "remote_arrive", "requests": [a1]}],
     }
@@ -843,7 +878,7 @@ def generate_stream(seed: int, length: int = 40, profile: str = "full") -> list[
             choices += ["wl_restore"]
         choices += ["restart", "stale_ref"]
         if profile != "core":  # waitlist pressure: re-lists in other shapes, toggling the setting, stale ids, id reuse
-            choices += ["term", "term", "term_stale", "term_reuse", "ordr", "ordr", "ordr", "ordr", "ids", "ids", "ids"]
+            choices += ["term", "term", "term_stale", "term_reuse", "ordr", "ordr", "ordr", "ordr", "ids", "ids", "ids", "play", "play", "flush", "flush", "defer_flip"]
             choices += ["lock", "lock", "lock", "wl_relist", "wl_relist", "wl_as_pending", "wl_flip", "wl_stale", "wl_reuse", "wl_flags", "wl_add_hot", "wl_both", "wl_both"]
             if snap["waitlist"]:
                 choices += ["wl_add_hot"] * 2
@@ -929,6 +964,12 @@ def generate_stream(seed: int, length: int = 40, profile: str = "full") -> list[
                     row[rng.choice(["last_order_source", "order_source"])] = rng.choice(["host", "singer", "server", "HOST", "other", "", " Singer "])
                 rows.append(row)
             emit({"op": "remote_arrive", "requests": rows})
+        elif pick == "play":
+            emit({"op": "set_playing", "playing": rng.random() < 0.6})
+        elif pick == "flush":
+            emit({"op": "flush_deferred", "force": rng.random() < 0.5})
+        elif pick == "defer_flip":
+            emit({"op": "config", "defer": rng.random() < 0.7})
         elif pick == "ids" and arrived:
             rows = []
             for r in rng.sample(arrived, min(len(arrived), rng.randint(1, 3))):

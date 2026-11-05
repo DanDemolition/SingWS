@@ -248,6 +248,8 @@ def begin(app, rows, now: float | None = None, force: bool = False):
             return None
         if settings.get("use_waiting_for_add") or settings.get("rotation_locked") or d.get("_deferred_remote_adds"):
             return None
+        if settings.get("defer_remote_adds_until_between_singers"):
+            return None  # held-while-playing intake is modelled only in the replay (the shadow does not know when a song plays)
         if d.get("_waiting_for_add_requests") or d.get("_remote_attention_requests"):
             return None
         if float(d.get("_remote_clear_in_progress_until", 0.0) or 0.0) > time.time():

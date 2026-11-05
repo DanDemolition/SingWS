@@ -40,6 +40,7 @@ struct Settings {
     accepting: bool,
     waitlist: bool,
     locked: bool,
+    defer: bool,
 }
 
 impl Settings {
@@ -50,6 +51,7 @@ impl Settings {
             accepting: cfg.get("requests_accepting").and_then(Value::as_bool).unwrap_or(true),
             waitlist: cfg.get("waitlist").or_else(|| cfg.get("use_waiting_for_add")).map(truthy).unwrap_or(false),
             locked: cfg.get("rotation_locked").map(truthy).unwrap_or(false),
+            defer: cfg.get("defer").map(truthy).unwrap_or(false),
         }
     }
     fn rotation(&self) -> bool {
@@ -133,6 +135,16 @@ struct Tomb {
     title: String,
 }
 
+/// One request held while a song plays (`_deferred_remote_adds`): the resolved payload the flush will add.
+#[derive(Clone, Debug)]
+struct Deferred {
+    rid: u64,
+    singer: String,
+    entry: Entry,
+    item: Value,
+    request_time: f64,
+}
+
 #[derive(Clone, Debug)]
 struct Pending {
     ids: Vec<u64>,
@@ -164,6 +176,9 @@ pub struct State {
     /// `_remote_terminal_titles`: the title a server-terminal row carried (memory only; a restart forgets it).
     terminal_titles: BTreeMap<u64, String>,
     /// `_queue_revision`: a counter the order-conflict rules read, so it is modelled (bumped by tombstones, local removal by the server, waitlist restore, order records).
+    deferred: Vec<Deferred>,
+    /// `karaoke_playing`: the one playback fact the deferral rule reads (an input of the model; nothing is played).
+    playing: bool,
     queue_rev: i64,
     /// `_pending_remote_order_syncs`: singer key -> (request ids, host timestamp, revision).
     pending: BTreeMap<String, Pending>,
@@ -527,6 +542,8 @@ impl State {
             attention: BTreeMap::new(),
             failed: BTreeSet::new(),
             terminal_titles: BTreeMap::new(),
+            deferred: Vec::new(),
+            playing: false,
             queue_rev: 0,
             pending: BTreeMap::new(),
             lock_count: 0,
@@ -556,7 +573,7 @@ impl State {
         let op = ev.get("op").and_then(Value::as_str).unwrap_or("");
         let known = [
             "config", "tick", "add_song", "remote_arrive", "remove_song", "remove_singer", "move_singer", "move_song", "skip_singer",
-            "rotation_advance", "complete_song", "waitlist_add", "waitlist_remove", "waitlist_restore", "rotation_lock", "restart", "load",
+            "rotation_advance", "complete_song", "waitlist_add", "waitlist_remove", "waitlist_restore", "rotation_lock", "restart", "load", "set_playing", "flush_deferred",
         ];
         if !known.contains(&op) {
             return (false, "unknown_op".into());
@@ -586,6 +603,11 @@ impl State {
             "waitlist_add" => self.op_waitlist_add(ev),
             "waitlist_remove" => self.op_waitlist_remove(ev),
             "waitlist_restore" => self.op_waitlist_restore(ev),
+            "set_playing" => {
+                self.playing = ev.get("playing").map(truthy).unwrap_or(false);
+                (true, format!("playing={}", self.playing as i32))
+            }
+            "flush_deferred" => self.op_flush_deferred(ev),
             _ => (false, "unsupported".into()),
         };
         (ok, code)
@@ -762,10 +784,27 @@ impl State {
         c
     }
 
+    /// `_pending_request_counts_by_singer(include_deferred=True)`: held requests count against their participants (once per request id; `exclude` is the request being decided).
+    fn add_deferred_counts(&self, counts: &mut HashMap<String, i64>, exclude: Option<u64>) {
+        let mut seen = BTreeSet::new();
+        for d in &self.deferred {
+            if Some(d.rid) == exclude || !seen.insert(d.rid) {
+                continue;
+            }
+            for p in req_participants(&d.item) {
+                let k = name_key(&p);
+                if !k.is_empty() {
+                    *counts.entry(k).or_insert(0) += 1;
+                }
+            }
+        }
+    }
+
     /// `_check_queue_song_limit` with fresh live counts: true when no participant is at the cap.
-    fn limit_ok(&mut self, parts: &[String]) -> bool {
+    fn limit_ok(&mut self, parts: &[String], exclude: Option<u64>) -> bool {
         self.cleanup_duplicate_songs();
-        let counts = self.live_counts();
+        let mut counts = self.live_counts();
+        self.add_deferred_counts(&mut counts, exclude);
         let limit = self.cur.active_limit();
         !parts.iter().any(|p| {
             let k = name_key(p);
@@ -814,7 +853,7 @@ impl State {
             return true;
         }
         let parts = participants(&primary, duet.as_deref());
-        if !self.limit_ok(&parts) && remote {
+        if !self.limit_ok(&parts, if remote { entry.rid } else { None }) && remote {
             return false; // the operator's own add may exceed the cap
         }
         let k = name_key(&primary);
@@ -974,8 +1013,8 @@ impl State {
         if non_actionable(&it) || self.handled.contains(&rid) {
             return;
         }
-        if self.queue.iter().any(|s| s.songs.iter().any(|e| e.rid == Some(rid))) {
-            self.handled.insert(rid);
+        if self.queue.iter().any(|s| s.songs.iter().any(|e| e.rid == Some(rid))) || self.deferred.iter().any(|d| d.rid == rid) {
+            self.handled.insert(rid); // a held (deferred) request counts as accepted too
             self.waitlist.remove(&rid);
             self.attention.remove(&rid);
             return;
@@ -984,15 +1023,35 @@ impl State {
     }
 
     /// `process_external_request` for one request row (cap, then the remote add). Err carries nothing; the caller records what it needs.
-    fn process_external(&mut self, req: &Value, singer: &str, mut entry: Entry) -> bool {
+    fn process_external(&mut self, req: &Value, singer: &str, mut entry: Entry, allow_defer: bool) -> bool {
         entry.order = Some(add_request_order(req, entry.rid));
         entry.sid = ["singer_id", "singer_uid"].iter().filter_map(|k| req.get(*k)).find(|v| !matches!(v, Value::Null) && !matches!(v, Value::String(t) if t.is_empty())).map(pystr).unwrap_or_default();
         entry.session = py_int0(req.get("singer_session_id")).max(0); // only a positive session is stored on the entry
         let parts = req_participants(req);
-        if !self.limit_ok(&parts) {
+        if !self.limit_ok(&parts, entry.rid) {
             return false; // _record_remote_limit_blocked_request: nothing is recorded locally
         }
+        self.apply_resolved(req, singer, entry, allow_defer)
+    }
+
+    /// `_apply_resolved_remote_add`: hold the request while a song plays (when the setting is on), else add it. (Its duplicate test never fires for a row with a
+    /// request id: the request's own id is removed from the accepted-id set first.)
+    fn apply_resolved(&mut self, req: &Value, singer: &str, entry: Entry, allow_defer: bool) -> bool {
         let rid = entry.rid;
+        let parts = req_participants(req);
+        if !self.limit_ok(&parts, rid) {
+            return false;
+        }
+        if allow_defer && self.cur.defer && self.playing {
+            if let Some(r) = rid {
+                // _queue_deferred_remote_add: one payload per id, ordered by the time it was requested (stable)
+                self.deferred.retain(|d| d.rid != r);
+                self.deferred.push(Deferred { rid: r, singer: singer.to_string(), entry, item: req.clone(), request_time: self.clock });
+                self.deferred.sort_by(|a, b| a.request_time.partial_cmp(&b.request_time).unwrap_or(std::cmp::Ordering::Equal));
+                return true;
+            }
+            return false;
+        }
         if self.add_song(singer, entry, true) {
             if let Some(r) = rid {
                 self.attention.remove(&r); // _clear_remote_attention_request
@@ -1003,6 +1062,30 @@ impl State {
             self.record_attention(req, "queue_insert_failed");
             false
         }
+    }
+
+    /// `_flush_deferred_remote_adds`: apply every held request (the list itself is rewritten only at the END, so requests already added still count as held while the
+    /// next one is checked against the cap).
+    fn op_flush_deferred(&mut self, ev: &Value) -> (bool, String) {
+        let force = ev.get("force").map(truthy).unwrap_or(false);
+        if self.playing && !force {
+            return (true, "flushed=0".into());
+        }
+        let pending = self.deferred.clone();
+        if pending.is_empty() {
+            return (true, "flushed=0".into());
+        }
+        let mut added = 0;
+        let mut remaining = Vec::new();
+        for d in pending {
+            if self.apply_resolved(&d.item, &d.singer, d.entry.clone(), false) {
+                added += 1;
+            } else {
+                remaining.push(d);
+            }
+        }
+        self.deferred = remaining;
+        (true, format!("flushed={added}"))
     }
 
     // ------------------------------------------------------------------------------------------------ ops
@@ -1021,6 +1104,9 @@ impl State {
         }
         if let Some(v) = ev.get("rotation_locked") {
             self.cur.locked = truthy(v);
+        }
+        if let Some(v) = ev.get("defer") {
+            self.cur.defer = truthy(v);
         }
         ROUTE_OK.into_pair()
     }
@@ -1045,7 +1131,8 @@ impl State {
     fn op_remote_arrive(&mut self, ev: &Value) -> (bool, String) {
         self.prune_expired_slots();
         let rows = ev.get("requests").and_then(Value::as_array).cloned().unwrap_or_default();
-        let local_ids: BTreeSet<u64> = self.queue.iter().flat_map(|s| s.songs.iter().filter_map(|e| e.rid)).collect();
+        let mut local_ids: BTreeSet<u64> = self.queue.iter().flat_map(|s| s.songs.iter().filter_map(|e| e.rid)).collect();
+        local_ids.extend(self.deferred.iter().map(|d| d.rid)); // the reconcile counts held requests as local
         self.set_waiting(&rows, &local_ids);
         let waiting_ids: BTreeSet<u64> = self.waitlist.keys().copied().collect();
         struct Req {
@@ -1075,6 +1162,7 @@ impl State {
                 // The server already knows this request is done: the queued copy goes, the id is remembered as terminal together with the
                 // title it carried. No tombstone is written or retired (that is host-action state), and this runs BEFORE the tombstone check.
                 self.remove_local_by_id(rid);
+                self.deferred.retain(|d| d.rid != rid); // _remove_deferred_remote_add_by_id
                 self.removed.insert(rid);
                 self.terminal_titles.insert(rid, row_str(row, "title"));
                 continue;
@@ -1145,6 +1233,7 @@ impl State {
         let desired: BTreeSet<u64> = normalized.iter().map(|r| r.rid).collect();
         self.failed.retain(|id| desired.contains(id)); // forget ids the server no longer lists
         let mut counts = self.live_counts();
+        self.add_deferred_counts(&mut counts, None);
         for r in &normalized {
             if existing.contains(&r.rid) || waiting_ids.contains(&r.rid) || self.failed.contains(&r.rid) {
                 continue;
@@ -1174,7 +1263,7 @@ impl State {
                 sid: String::new(),
                 session: 0,
             };
-            if self.process_external(&item, &r.singer, entry) {
+            if self.process_external(&item, &r.singer, entry, true) {
                 for p in parts {
                     let k = name_key(&p);
                     if !k.is_empty() {
@@ -1395,7 +1484,7 @@ impl State {
         let tempo = int("tempo").clamp(-30, 30);
         self.prune_expired_slots();
         let entry = Entry { rid: Some(rid), local: None, artist: artist.clone(), title: title.clone(), song_info: format!("/lib/{artist}-{title}.zip"), duet: None, key, tempo: Some(100 + tempo), skipped: false, order: None, sid: String::new(), session: 0 };
-        if !self.process_external(&req, &singer, entry) {
+        if !self.process_external(&req, &singer, entry, true) {
             return (false, "not_added".into());
         }
         self.handled.insert(rid);
@@ -1591,6 +1680,8 @@ impl State {
         self.attention.clear();
         self.failed.clear();
         self.terminal_titles = ev.get("terminal_titles").and_then(Value::as_object).map(|o| o.iter().filter_map(|(k, v)| Some((k.parse::<u64>().ok()?, v.as_str()?.to_string()))).collect()).unwrap_or_default();
+        self.deferred.clear();
+        self.playing = false;
         self.queue_rev = ev.get("queue_revision").and_then(Value::as_i64).unwrap_or(0);
         self.pending = ev
             .get("pending_order_syncs")
@@ -1674,6 +1765,7 @@ impl State {
         self.terminal_titles.clear();
         self.queue_rev = 0;
         self.pending.clear();
+        self.playing = false; // the deferred list itself is persisted
         self.lock_count = 0;
         self.removed = self.tombs.keys().copied().collect();
         (true, "restarted".into())
@@ -1739,7 +1831,7 @@ impl State {
             "queue_revision": self.queue_rev,
             "pending_order_syncs": self.pending.iter().map(|(k, p)| (k.clone(), json!({"request_ids": p.ids, "host_order_updated_at": p.host, "order_revision": p.rev, "last_order_source": "host"}))).collect::<Map<String, Value>>(),
             "terminal_titles": self.terminal_titles.iter().map(|(k, v)| (k.to_string(), json!(v))).collect::<Map<String, Value>>(),
-            "deferred_remote_adds": 0, "lifecycle": life,
+            "deferred_remote_adds": self.deferred.len(), "deferred": self.deferred.iter().map(|d| d.rid).collect::<Vec<_>>(), "lifecycle": life,
         })
     }
 }

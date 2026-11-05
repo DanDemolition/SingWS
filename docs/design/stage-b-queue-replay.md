@@ -414,3 +414,32 @@ Oracle: the real `_queue_singer_match_index`, the singer-identity bookkeeping in
   without `queue_revision`, `pending_order_syncs` and the per-singer `host_order_updated_at` / `order_revision`.
 - `test_core_streams_check_clean_at_every_reconcile_even_after_unmodelled_edits`: **the live shadow was blind to the new state** (stamps, pending host orders, revision) and would have flagged ordinary polls in a show. Its state
   snapshot and `load` now carry singer order fields, server ids/sessions, `request_order`, `queue_revision`, `pending_order_syncs` and `terminal_titles`. Still log-only; it still skips polls with the waitlist, lock, duets or deferred adds.
+
+## M8: deferred remote adds (Stage B step 4, slice D)
+
+Oracle: the real `_apply_resolved_remote_add` / `_queue_deferred_remote_add` / `_flush_deferred_remote_adds` / `_pending_request_counts_by_singer` /
+`_remove_deferred_remote_add_by_id` and the reconcile and waitlist code around them. Harness: setting key `defer` (the app's `defer_remote_adds_until_between_singers`); two events:
+`set_playing` {playing} (sets the app's `karaoke_playing`: the ONLY playback fact the rule reads; nothing is started) and `flush_deferred` {force} (result code `flushed=N`); the held list survives a `restart`
+(it is persisted in `deferred_remote_adds.json`) while `playing` does not; snapshot `deferred` (request ids in order). Cases `deferred_*`, `server_terminal_row_drops_a_deferred_request`, `defer_setting_off_*`, `host_remove_and_accepting_off_with_deferred`; generator picks `play`, `flush`, `defer_flip`.
+
+### Rules
+
+1. **When a request is held.** After the cap check, `_apply_resolved_remote_add` queues the payload instead of adding it when the setting is on AND a song is playing. Held means "accepted" to the poll (the reconcile counts it against the
+   singer's allowance). This applies to regular arrivals AND to `waitlist_add`. Re-holding the same id replaces the old payload and moves it to the back (list sorted stably by request time).
+2. **Held requests count against the cap** for everyone except themselves (`_pending_request_counts_by_singer`, once per request id, duets count both names). The reconcile's intake pre-check counts them
+   WITHOUT excluding the request itself, so a held request that is listed again when the singer is at the cap is skipped by the pre-check (it stays held); the per-request checks after it exclude the request's own copy.
+3. **The poll treats a held id as local, but not as queued:** it is in `local_remote_ids` (so a non-actionable row for it is not historical, and the waitlist rebuild marks it handled), but NOT in the intake's `existing_ids`, so every poll that
+   lists it runs it through the cap check and re-holds it. A suppressed attention record (a failed late add of a held id) marks it handled, as for a queued id.
+4. **Flush** (`flush_deferred`; refused while a song plays unless forced): every held payload is applied in order with `allow_defer=False`: the cap check (own copy excluded), then the add. A failed one stays held (a late add failure also
+   records an attention item, or marks the id handled when it is held). The held list is rewritten only AFTER the whole pass.
+5. A server-terminal row removes a held request. Restart keeps the list; the playing flag resets.
+
+### Surprises (reported, NOT changed)
+
+- **The flush double-counts.** Because the list is rewritten at the end, a request already added by the flush still counts as held while the next one is checked: limit 2, two held requests for Ada: the first flush adds one and BLOCKS the other
+  (queue 1 + the still-listed first request 1 = 2 >= 2); only a second flush adds it (`deferred_adds_count_against_the_cap_and_a_flush_double_counts`). A singer with several held requests needs several flushes.
+- A held request listed again while its singer is at the cap is skipped by the intake pre-check, which does not exclude the request's own copy (rule 2), although the later checks would let it through.
+- `waitlist_add` of a waiting row is held like any request while a song plays; the host sees the row leave the waitlist but nothing in the queue until the flush.
+
+Not modelled: the async intake worker (`_start_remote_request_intake_worker`, used by the real app on the GUI thread; the harness runs the synchronous path), `_flush_deferred_remote_adds` triggered by the `media_end` / `before_play_next` / settings-off hooks (the
+event `flush_deferred` is those hooks' effect), the persistence file itself, and the shadow (`queue_state_shadow` still skips any poll while the held list is non-empty).
