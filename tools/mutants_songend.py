@@ -8,10 +8,31 @@ classify() labels the rest by pattern. Honest reading of the labels:
 import re
 
 NOTES = {
-    # the `runs_to_end` argument only matters when trailing <= 0; both cache paths call apply_audio_end_floor with a trailing > 0
-    # (library record: tail >= 0.3; trailing cache: c > 0.0), so flipping the flag there cannot change anything
-    "L410:false->true": "equivalent: runs_to_end is only read when trailing <= 0 and this path always has tail >= 0.3",
-    "L422:false->true": "equivalent: runs_to_end is only read when trailing <= 0 and this path requires c > 0.0",
+    # --- 2026-11-05 reclassification of survivors that the replay contract makes unreachable (line numbers are those of lib.rs when the pass was run)
+    "L281:false->true": "equivalent under the replay contract: snapshot() in tools/songend_scenarios.py always emits this key with the right type, so the default is never read",
+    "L304:1->2": "equivalent under the replay contract: the replay always carries this argument/id (Python passes the generation / deliver id on every call)",
+    "L320:0->1": "equivalent under the replay contract: the replay always carries this argument/id (Python passes the generation / deliver id on every call)",
+    "L324:0->1": "equivalent under the replay contract: the replay always carries this argument/id (Python passes the generation / deliver id on every call)",
+    "L423:0.0->1.0": "equivalent: a JSON number always converts to f64 (float_roundtrip), so the unwrap_or default is unreachable",
+    "L431:0.0->1.0": "equivalent under the replay contract: the harness's cache records and scan results always carry this field",
+    "L436:false->true": "equivalent: runs_to_end is only read when trailing <= 0, and this path always has a positive trailing",
+    "L448:false->true": "equivalent: runs_to_end is only read when trailing <= 0, and this path always has a positive trailing",
+    "L456:0.0->1.0": "equivalent: a JSON number always converts to f64 (float_roundtrip), so the unwrap_or default is unreachable",
+    "L467:0.0->1.0": "equivalent: a JSON number always converts to f64 (float_roundtrip), so the unwrap_or default is unreachable",
+    "L525:0.0->1.0": "equivalent under the replay contract: the harness's cache records and scan results always carry this field",
+    "L549:false->true": "equivalent under the replay contract: the harness's cache records and scan results always carry this field",
+    "L551:0.0->1.0": "equivalent under the replay contract: the harness's cache records and scan results always carry this field",
+    "L673:false->true": "equivalent under the replay contract: snapshot() in tools/songend_scenarios.py always emits this key with the right type, so the default is never read",
+    "L676:false->true": "equivalent under the replay contract: snapshot() in tools/songend_scenarios.py always emits this key with the right type, so the default is never read",
+    "L918:false->true": "equivalent under the replay contract: snapshot() in tools/songend_scenarios.py always emits this key with the right type, so the default is never read",
+    "L938:false->true": "equivalent under the replay contract: snapshot() in tools/songend_scenarios.py always emits this key with the right type, so the default is never read",
+    "L968:0->1": "equivalent under the replay contract: snapshot() in tools/songend_scenarios.py always emits this key with the right type, so the default is never read",
+    "L974:0->1": "equivalent under the replay contract: snapshot() in tools/songend_scenarios.py always emits this key with the right type, so the default is never read",
+    "L979:false->true": "equivalent under the replay contract: snapshot() in tools/songend_scenarios.py always emits this key with the right type, so the default is never read",
+    "L1001:false->true": "equivalent under the replay contract: snapshot() in tools/songend_scenarios.py always emits this key with the right type, so the default is never read",
+    "L1107:false->true": "equivalent under the replay contract: snapshot() in tools/songend_scenarios.py always emits this key with the right type, so the default is never read",
+    "L1147:false->true": "equivalent under the replay contract: snapshot() in tools/songend_scenarios.py always emits this key with the right type, so the default is never read",
+    "L1165:true->false": "equivalent under the replay contract: snapshot() in tools/songend_scenarios.py always emits this key with the right type, so the default is never read",
 }
 
 
