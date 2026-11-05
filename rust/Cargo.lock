@@ -2321,6 +2321,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "singws-songend"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "singws-start"
 version = "0.1.0"
 dependencies = [
