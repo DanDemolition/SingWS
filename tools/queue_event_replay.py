@@ -250,6 +250,23 @@ class World:
         n = self.app._flush_deferred_remote_adds("manual", force=bool(e.get("force", False)))
         return {"ok": True, "code": f"flushed={int(n)}"}
 
+    def op_rename_singer(self, e):
+        """The rotation menu's Rename (shell_queue_rename_singer): refuses a name that already belongs to another singer."""
+        sid = self.real_singer_id(e.get("singer"))
+        if not sid:
+            return {"ok": False, "code": "unknown_singer"}
+        ok, text = self.app.shell_queue_rename_singer(sid, str(e.get("name", "")))
+        return {"ok": bool(ok), "code": str(text)}
+
+    def op_rename_merge(self, e):
+        """A rename that merges into an existing singer (the host's confirmed merge, or a sync/remote rename): the real _rename_rotation_singer."""
+        sid = self.real_singer_id(e.get("singer"))
+        idx = self.app._queue_singer_index_by_id(sid) if sid else -1
+        if idx < 0:
+            return {"ok": False, "code": "unknown_singer"}
+        ok = self.app._rename_rotation_singer(idx, str(e.get("name", "")), source="sync")
+        return {"ok": bool(ok), "code": "renamed" if ok else "not_renamed"}
+
     def op_tick(self, e):
         self.clock += float(e.get("seconds", 1))
         return {"ok": True, "code": ""}
@@ -392,6 +409,7 @@ class World:
                 "host_order_updated_at": int(singer.get("host_order_updated_at", 0) or 0), "singer_order_updated_at": int(singer.get("singer_order_updated_at", 0) or 0),
                 "order_revision": int(singer.get("order_revision", 0) or 0), "last_order_source": str(singer.get("last_order_source", "") or ""),
                 "server_singer_id": str(singer.get("server_singer_id", "") or ""), "server_singer_session_id": int(singer.get("server_singer_session_id", 0) or 0),
+                "created_at": float(singer.get("created_at", 0) or 0),
             })
         tomb = {}
         data = app._ensure_remote_request_tombstones()
@@ -418,6 +436,7 @@ class World:
             "unmatched_remote_ids": sorted(int(x) for x in getattr(app, "_unmatched_remote_request_ids", set()) or set()),
             "waitlist": waitlist, "removed_tonight": removed_tonight, "handled_waitlist_ids": sorted(app._waiting_for_add_handled_ids),
             "tombstones": tomb, "removed_ids": sorted(int(x) for x in app._remote_removed_request_ids),
+            "rename_aliases": {str(k): str(v) for k, v in sorted((object.__getattribute__(app, "__dict__").get("_singer_rename_aliases") or {}).items())},
             "queue_revision": int(getattr(app, "_queue_revision", 0) or 0),
             "pending_order_syncs": {str(k): {f: v.get(f) for f in ("request_ids", "host_order_updated_at", "order_revision", "last_order_source")} for k, v in sorted((getattr(app, "_pending_remote_order_syncs", {}) or {}).items())},
             "terminal_titles": {str(k): str(v) for k, v in sorted(object.__getattribute__(app, "__dict__").get("_remote_terminal_titles", {}).items())},
@@ -828,6 +847,36 @@ def adversarial_cases() -> dict[str, list[dict]]:
                                                          {"op": "config", "requests_accepting": False}, {"op": "remote_arrive", "requests": [a1, a2]}, {"op": "flush_deferred", "force": True}],
         "waitlist_add_of_a_request_that_is_also_held_excludes_its_own_copy": [dict(cfg, defer=True, waitlist=True, limit_pending_max=2), {"op": "remote_arrive", "requests": [a1]}, {"op": "set_playing", "playing": True},
                                                                               {"op": "remote_arrive", "requests": [a2]}, {"op": "remote_arrive", "requests": [_waiting(1002, "Ada", "Bravo")]}, {"op": "waitlist_add", "request_id": 1002}],
+        # --- slice E: rename and merge of singers
+        "rename_refusals_and_plain_renames": [cfg, {"op": "remote_arrive", "requests": [a1, b1, _req(1004, "Cy", "Delta")]}, {"op": "rename_singer", "singer": "S1", "name": "bob"}, {"op": "rename_singer", "singer": "S1", "name": ""},
+                                              {"op": "rename_singer", "singer": "S1", "name": "x" * 61}, {"op": "rename_singer", "singer": "S1", "name": "Bad\nName"}, {"op": "rename_singer", "singer": "S1", "name": " Ada "},
+                                              {"op": "rename_singer", "singer": "S1", "name": "Ada Quinn"}, {"op": "rename_singer", "singer": "S9", "name": "Z"}, {"op": "rename_singer", "singer": "S2", "name": "BOB"},
+                                              {"op": "rename_singer", "singer": "Cy", "name": "Cyrus"}, {"op": "remote_arrive", "requests": [_req(1005, "cy", "Echo"), _req(1006, "Ada", "Fox")]}],
+        "rename_merge_keeps_the_oldest_row_and_appends_songs": [cfg, {"op": "remote_arrive", "requests": [a1, b1, _req(1023, "Cy", "C"), _req(1004, "Bob", "D")]}, {"op": "rename_merge", "singer": "S3", "name": "bob"},
+                                                                {"op": "remote_arrive", "requests": [_req(1005, "Cy", "E"), _req(1006, "Bob", "F")]}, {"op": "rename_merge", "singer": "S1", "name": "Ada"},
+                                                                {"op": "rename_merge", "singer": "S1", "name": "ada"}, {"op": "rename_merge", "singer": "S7", "name": "Nobody"}],
+        "merged_row_takes_the_later_slot_when_a_member_already_sang": [cfg, {"op": "remote_arrive", "requests": [a1, b1, _req(1023, "Cy", "C"), _req(1004, "Dee", "D")]}, {"op": "complete_song", "entry": "R1023"},
+                                                                       {"op": "rename_merge", "singer": "S1", "name": "Cy"}, {"op": "remote_arrive", "requests": [_req(1005, "Ada", "E")]}],
+        "merge_keeps_the_marker_and_combines_flags": [cfg, {"op": "remote_arrive", "requests": [a1, b1, _req(1023, "Cy", "C")]}, {"op": "skip_singer", "singer": "S2", "skipped": True}, {"op": "rotation_advance", "singer": "S1"},
+                                                      {"op": "rename_merge", "singer": "S2", "name": "Ada"}, {"op": "rename_merge", "singer": "S2", "name": "ADA"}],
+        "merge_with_a_locked_newcomer": [cfg, {"op": "remote_arrive", "requests": [a1, b1, _req(1023, "Cy", "C")]}, {"op": "move_singer", "singer": "S3", "where": "top"}, {"op": "rotation_lock"},
+                                         {"op": "remote_arrive", "requests": [_req(1004, "Eve", "E"), _req(1005, "Flo", "F")]}, {"op": "rename_merge", "singer": "S4", "name": "ada"}, {"op": "rename_merge", "singer": "S5", "name": "Bob"}],
+        "retired_name_attaches_to_the_survivor_until_a_restart": [cfg, {"op": "remote_arrive", "requests": [a1, b1]}, {"op": "rename_merge", "singer": "S2", "name": "Ada"}, {"op": "remote_arrive", "requests": [_req(1003, "Bob", "C"), _req(1004, "bob", "D")]},
+                                                                  {"op": "restart"}, {"op": "remote_arrive", "requests": [_req(1005, "Bob", "E")]}],
+        "alias_chains_collapse": [cfg, {"op": "remote_arrive", "requests": [a1, b1, _req(1023, "Cy", "C")]}, {"op": "rename_merge", "singer": "S1", "name": "Alpha"}, {"op": "rename_merge", "singer": "S3", "name": "Cy2"},
+                                  {"op": "rename_merge", "singer": "S1", "name": "Bob"}, {"op": "remote_arrive", "requests": [_req(1004, "Ada", "D"), _req(1005, "alpha", "E"), _req(1006, "Cy", "F")]}],
+        "rename_rewrites_held_rows": [dict(cfg, defer=True, waitlist=True, limit_pending_max=3), {"op": "remote_arrive", "requests": [a1]}, {"op": "remote_arrive", "requests": [_waiting(1011, "Ada", "W"), _waiting(1012, "Bob", "X")]},
+                                      {"op": "set_playing", "playing": True}, {"op": "remote_arrive", "requests": [_waiting(1011, "Ada", "W"), _waiting(1012, "Bob", "X"), _req(1013, "Ada", "H"), _req(1014, "Dee", "I")]},
+                                      {"op": "rename_merge", "singer": "S1", "name": "Ada Q"}, {"op": "waitlist_add", "request_id": 1011}, {"op": "flush_deferred", "force": True}, {"op": "waitlist_add", "request_id": 1012}],
+        "waitlist_rows_listed_under_a_retired_name_are_mapped": [dict(cfg, waitlist=True), {"op": "remote_arrive", "requests": [a1, b1]}, {"op": "rename_merge", "singer": "S2", "name": "Ada"},
+                                                                 {"op": "remote_arrive", "requests": [_waiting(1003, "Bob", "C"), _waiting(1004, "Zed", "Z")]}, {"op": "waitlist_add", "request_id": 1003}],
+        "rotation_advance_for_a_singer_that_left_the_queue_still_selects": [cfg, {"op": "remote_arrive", "requests": [a1, b1, _req(1023, "Cy", "C")]}, {"op": "rename_merge", "singer": "S2", "name": "Ada"}, {"op": "rotation_advance", "singer": "S2"},
+                                                                            {"op": "rotation_advance", "singer": "Ada"}, {"op": "rotation_advance", "singer": "S9"}],
+        "a_held_waitlist_add_does_not_expire_empty_slots": [dict(cfg, defer=True, waitlist=True), {"op": "remote_arrive", "requests": [a1, b1]}, {"op": "remove_song", "entry": "R1003"}, {"op": "set_playing", "playing": True},
+                                                            {"op": "remote_arrive", "requests": [_waiting(1002, "Ada", "Bravo")]}, {"op": "tick", "seconds": 400}, {"op": "waitlist_add", "request_id": 1002},
+                                                            {"op": "set_playing", "playing": False}, {"op": "flush_deferred"}],
+        "merge_moves_the_marker_onto_the_surviving_row": [cfg, {"op": "remote_arrive", "requests": [_req(1001, "Ada", "A"), _req(1002, "Bob", "B"), _req(1023, "Cy", "C"), _req(1004, "Dee", "D")]}, {"op": "move_singer", "singer": "S1", "where": "bottom"},
+                                                          {"op": "rename_merge", "singer": "S3", "name": "Ada"}],
         "accepting_off_blocks_new_arrivals": [cfg, {"op": "config", "requests_accepting": False}, {"op": "remote_arrive", "requests": [a1]},
                                               {"op": "config", "requests_accepting": True}, {"op": "remote_arrive", "requests": [a1]}],
     }
@@ -878,7 +927,7 @@ def generate_stream(seed: int, length: int = 40, profile: str = "full") -> list[
             choices += ["wl_restore"]
         choices += ["restart", "stale_ref"]
         if profile != "core":  # waitlist pressure: re-lists in other shapes, toggling the setting, stale ids, id reuse
-            choices += ["term", "term", "term_stale", "term_reuse", "ordr", "ordr", "ordr", "ordr", "ids", "ids", "ids", "play", "play", "flush", "flush", "defer_flip"]
+            choices += ["term", "term", "term_stale", "term_reuse", "ordr", "ordr", "ordr", "ordr", "ids", "ids", "ids", "play", "play", "flush", "flush", "defer_flip", "rename", "rename", "rename_merge", "rename_merge"]
             choices += ["lock", "lock", "lock", "wl_relist", "wl_relist", "wl_as_pending", "wl_flip", "wl_stale", "wl_reuse", "wl_flags", "wl_add_hot", "wl_both", "wl_both"]
             if snap["waitlist"]:
                 choices += ["wl_add_hot"] * 2
@@ -964,6 +1013,10 @@ def generate_stream(seed: int, length: int = 40, profile: str = "full") -> list[
                     row[rng.choice(["last_order_source", "order_source"])] = rng.choice(["host", "singer", "server", "HOST", "other", "", " Singer "])
                 rows.append(row)
             emit({"op": "remote_arrive", "requests": rows})
+        elif pick == "rename" and singers:
+            emit({"op": "rename_singer", "singer": rng.choice(singers), "name": rng.choice(SINGERS + ["Zed", " zed ", "ADA", "", "x" * 61, "Q\tR"])})
+        elif pick == "rename_merge" and singers:
+            emit({"op": "rename_merge", "singer": rng.choice(singers), "name": rng.choice(SINGERS + ["Zed", "ada", "BOB ", "Ada  Quinn"])})
         elif pick == "play":
             emit({"op": "set_playing", "playing": rng.random() < 0.6})
         elif pick == "flush":
@@ -1126,6 +1179,8 @@ def main(argv=None):
             if not r["equal"]:
                 bad += 1
                 print(f"DIFF {name}: {json.dumps(r['first_divergence'], default=str)[:600]}")
+                if os.environ.get("QS_DUMP_DIFF_DIR"):
+                    Path(os.environ["QS_DUMP_DIFF_DIR"], f"{name.replace(':', '_')}.jsonl").write_text("\n".join(json.dumps(e) for e in stream) + "\n")
         print(f"parity: {len(streams) - bad}/{len(streams)} identical")
         return 1 if bad else 0
     if args.cmd == "play":

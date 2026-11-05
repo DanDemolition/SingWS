@@ -117,6 +117,8 @@ struct Singer {
     /// `server_singer_id` / `server_singer_session_id`.
     server_id: String,
     server_session: i64,
+    /// `created_at` (the logical clock when the row was made; 0 = predates the field, so it counts as oldest).
+    created: f64,
     songs: Vec<Entry>,
 }
 
@@ -176,6 +178,8 @@ pub struct State {
     /// `_remote_terminal_titles`: the title a server-terminal row carried (memory only; a restart forgets it).
     terminal_titles: BTreeMap<u64, String>,
     /// `_queue_revision`: a counter the order-conflict rules read, so it is modelled (bumped by tombstones, local removal by the server, waitlist restore, order records).
+    /// `_singer_rename_aliases`: retired name key -> surviving name (memory only).
+    aliases: BTreeMap<String, String>,
     deferred: Vec<Deferred>,
     /// `karaoke_playing`: the one playback fact the deferral rule reads (an input of the model; nothing is played).
     playing: bool,
@@ -542,6 +546,7 @@ impl State {
             attention: BTreeMap::new(),
             failed: BTreeSet::new(),
             terminal_titles: BTreeMap::new(),
+            aliases: BTreeMap::new(),
             deferred: Vec::new(),
             playing: false,
             queue_rev: 0,
@@ -573,7 +578,7 @@ impl State {
         let op = ev.get("op").and_then(Value::as_str).unwrap_or("");
         let known = [
             "config", "tick", "add_song", "remote_arrive", "remove_song", "remove_singer", "move_singer", "move_song", "skip_singer",
-            "rotation_advance", "complete_song", "waitlist_add", "waitlist_remove", "waitlist_restore", "rotation_lock", "restart", "load", "set_playing", "flush_deferred",
+            "rotation_advance", "complete_song", "waitlist_add", "waitlist_remove", "waitlist_restore", "rotation_lock", "restart", "load", "set_playing", "flush_deferred", "rename_singer", "rename_merge",
         ];
         if !known.contains(&op) {
             return (false, "unknown_op".into());
@@ -608,6 +613,8 @@ impl State {
                 (true, format!("playing={}", self.playing as i32))
             }
             "flush_deferred" => self.op_flush_deferred(ev),
+            "rename_singer" => self.op_rename_singer(ev),
+            "rename_merge" => self.op_rename_merge(ev),
             _ => (false, "unsupported".into()),
         };
         (ok, code)
@@ -838,9 +845,12 @@ impl State {
     /// `_add_song_to_queue` (no duets). `remote` = the call carried remote_meta.
     fn add_song(&mut self, singer_name: &str, mut entry: Entry, remote: bool) -> bool {
         self.prune_expired_slots();
-        let (primary, duet) = parse_duet(&capitalize(singer_name));
+        let (mut primary, duet) = parse_duet(&capitalize(singer_name));
         if primary.is_empty() {
             return false;
+        }
+        if remote {
+            primary = self.resolve_alias(&primary); // a retired name attaches to the surviving singer
         }
         entry.skipped = false;
         entry.duet = duet.clone();
@@ -885,7 +895,7 @@ impl State {
         self.next_uid += 1;
         let new_uid = uid;
         let (nsid, nses) = (entry.sid.trim().to_string(), entry.session);
-        let mut new = Singer { uid, name: primary, skipped: false, has_sung: false, round_sung: false, marker: false, temp_empty: false, until: 0.0, lock_new: false, lock_order: 0, host_ts: 0, singer_ts: 0, order_rev: 0, order_src: String::new(), server_id: String::new(), server_session: 0, songs: vec![entry] };
+        let mut new = Singer { uid, name: primary, skipped: false, has_sung: false, round_sung: false, marker: false, temp_empty: false, until: 0.0, lock_new: false, lock_order: 0, host_ts: 0, singer_ts: 0, order_rev: 0, order_src: String::new(), server_id: String::new(), server_session: 0, created: self.clock, songs: vec![entry] };
         new.server_id = nsid;
         if remote && nses > 0 {
             new.server_session = nses;
@@ -1130,6 +1140,7 @@ impl State {
 
     fn op_remote_arrive(&mut self, ev: &Value) -> (bool, String) {
         self.prune_expired_slots();
+        self.merge_duplicate_singers();
         let rows = ev.get("requests").and_then(Value::as_array).cloned().unwrap_or_default();
         let mut local_ids: BTreeSet<u64> = self.queue.iter().flat_map(|s| s.songs.iter().filter_map(|e| e.rid)).collect();
         local_ids.extend(self.deferred.iter().map(|d| d.rid)); // the reconcile counts held requests as local
@@ -1412,6 +1423,7 @@ impl State {
                 s.order_src = meta.source.clone();
             }
         }
+        self.merge_duplicate_singers();
         self.cleanup_duplicate_songs();
         ROUTE_OK.into_pair()
     }
@@ -1428,6 +1440,8 @@ impl State {
             if !row.is_object() {
                 continue;
             }
+            let mapped = self.alias_mapped(row);
+            let row = &mapped;
             let rid = request_id_of(row);
             if rid <= 0 {
                 continue;
@@ -1464,6 +1478,204 @@ impl State {
         self.waitlist = candidates;
     }
 
+    // ------------------------------------------------------------------------------------------------ rename / merge
+    /// `_resolve_singer_alias`: follow retired names to the surviving one.
+    fn resolve_alias(&self, name: &str) -> String {
+        if self.aliases.is_empty() {
+            return name.to_string();
+        }
+        let mut name = name.to_string();
+        let mut key = name_key(&name);
+        let mut seen = BTreeSet::new();
+        while self.aliases.contains_key(&key) && seen.insert(key.clone()) {
+            name = self.aliases[&key].clone();
+            key = name_key(&name);
+        }
+        name
+    }
+
+    /// `_alias_mapped_request`: the row with its singer mapped through the aliases (copy on write).
+    fn alias_mapped(&self, row: &Value) -> Value {
+        let singer = first_truthy_str(row, &["singer"]);
+        if singer.is_empty() {
+            return row.clone();
+        }
+        let mapped = self.resolve_alias(&singer);
+        if mapped != singer {
+            let mut r = row.clone();
+            if let Some(o) = r.as_object_mut() {
+                o.insert("singer".into(), json!(mapped));
+            }
+            return r;
+        }
+        row.clone()
+    }
+
+    /// `_record_singer_rename_alias`.
+    fn record_alias(&mut self, old: &str, new: &str) {
+        let (ok, nk) = (name_key(old), name_key(new));
+        if ok.is_empty() || nk.is_empty() || ok == nk {
+            return;
+        }
+        self.aliases.insert(ok.clone(), new.to_string());
+        let keys: Vec<String> = self.aliases.keys().cloned().collect();
+        for k in keys {
+            if name_key(&self.aliases[&k]) == ok {
+                self.aliases.insert(k, new.to_string());
+            }
+        }
+    }
+
+    /// `_apply_singer_rename_to_requests`: stored request rows (waitlist, attention) and held payloads follow the renamed singer.
+    fn apply_rename_to_requests(&mut self, old: &str, new: &str) {
+        let ok = name_key(old);
+        if ok.is_empty() || ok == name_key(new) {
+            return;
+        }
+        for store in [&mut self.waitlist, &mut self.attention] {
+            for item in store.values_mut() {
+                if name_key(&first_truthy_str(item, &["singer"])) == ok {
+                    if let Some(o) = item.as_object_mut() {
+                        o.insert("singer".into(), json!(new));
+                    }
+                }
+            }
+        }
+        for d in &mut self.deferred {
+            if name_key(&d.singer) == ok {
+                d.singer = new.to_string(); // only the payload's own singer; the request row inside keeps its text
+            }
+        }
+    }
+
+    /// `_merge_duplicate_rotation_singers`: rows whose names match (case/space-insensitively) become one. The oldest row survives; its songs keep their order and the
+    /// others' songs follow. The merged row keeps the first slot, or the LAST slot when any member already sang.
+    fn merge_duplicate_singers(&mut self) -> usize {
+        let keys: Vec<String> = self.queue.iter().map(|s| name_key(&s.name)).collect();
+        let mut groups: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+        for (i, k) in keys.iter().enumerate() {
+            if !k.is_empty() {
+                groups.entry(k.clone()).or_default().push(i);
+            }
+        }
+        if groups.values().all(|g| g.len() < 2) {
+            return 0;
+        }
+        let mut emit_at: HashMap<String, usize> = HashMap::new();
+        for (k, g) in &groups {
+            let late = g.len() > 1 && g.iter().any(|&i| self.queue[i].round_sung || self.queue[i].has_sung);
+            emit_at.insert(k.clone(), if late { *g.last().unwrap() } else { g[0] });
+        }
+        let mut merged = 0;
+        let mut taken: Vec<Option<Singer>> = std::mem::take(&mut self.queue).into_iter().map(Some).collect();
+        let mut out: Vec<Singer> = Vec::new();
+        for i in 0..keys.len() {
+            let k = &keys[i];
+            if k.is_empty() {
+                out.push(taken[i].take().unwrap());
+                continue;
+            }
+            if emit_at[k] != i {
+                continue;
+            }
+            let g = &groups[k];
+            if g.len() == 1 {
+                out.push(taken[i].take().unwrap());
+                continue;
+            }
+            let mut best = 0;
+            for (n, &gi) in g.iter().enumerate() {
+                if taken[gi].as_ref().unwrap().created < taken[g[best]].as_ref().unwrap().created {
+                    best = n;
+                }
+            }
+            let mut survivor = taken[g[best]].take().unwrap();
+            for (n, &gi) in g.iter().enumerate() {
+                if n == best {
+                    continue;
+                }
+                let dup = taken[gi].take().unwrap();
+                survivor.songs.extend(dup.songs);
+                survivor.has_sung |= dup.has_sung;
+                survivor.round_sung |= dup.round_sung;
+                survivor.skipped = survivor.skipped && dup.skipped;
+                survivor.marker |= dup.marker;
+                let created: Vec<f64> = [survivor.created, dup.created].into_iter().filter(|c| *c != 0.0).collect();
+                if !created.is_empty() {
+                    survivor.created = created.iter().cloned().fold(f64::INFINITY, f64::min);
+                }
+                if survivor.lock_order == 0 && dup.lock_order != 0 {
+                    survivor.lock_order = dup.lock_order;
+                }
+                if dup.lock_new && !survivor.lock_new {
+                    survivor.lock_new = true;
+                }
+                merged += 1;
+            }
+            out.push(survivor);
+        }
+        self.queue = out;
+        if merged > 0 {
+            self.cleanup_duplicate_songs();
+            if self.cur.rotation() {
+                self.repair_marker();
+                self.recompute_round_state();
+            }
+        }
+        merged
+    }
+
+    /// `_rename_rotation_singer` (a merge into an existing row is allowed): true when the rename happened.
+    fn rename_singer(&mut self, si: usize, new_name: &str) -> bool {
+        if si >= self.queue.len() {
+            return false;
+        }
+        let old = self.queue[si].name.trim().to_string();
+        let new = new_name.trim().to_string();
+        if old.is_empty() || new.is_empty() || new == old {
+            return false;
+        }
+        self.queue[si].name = new.clone();
+        self.merge_duplicate_singers();
+        // the surviving row's casing wins over what was typed
+        let k = name_key(&new);
+        let canonical = if k.is_empty() { new.clone() } else { self.queue.iter().find(|s| name_key(&s.name) == k).map(|s| s.name.clone()).unwrap_or_else(|| new.clone()) };
+        self.record_alias(&old, &canonical);
+        self.apply_rename_to_requests(&old, &canonical);
+        true
+    }
+
+    fn op_rename_merge(&mut self, ev: &Value) -> (bool, String) {
+        let Some(si) = ev.get("singer").and_then(Value::as_str).and_then(|r| self.singer_by_ref(r)) else {
+            return (false, "unknown_singer".into());
+        };
+        let ok = self.rename_singer(si, ev.get("name").and_then(Value::as_str).unwrap_or(""));
+        (ok, if ok { "renamed" } else { "not_renamed" }.into())
+    }
+
+    /// `shell_queue_rename_singer`: refuses an empty / over-long / control-character name and a name that belongs to ANOTHER row.
+    fn op_rename_singer(&mut self, ev: &Value) -> (bool, String) {
+        let Some(si) = ev.get("singer").and_then(Value::as_str).and_then(|r| self.singer_by_ref(r)) else {
+            return (false, "unknown_singer".into());
+        };
+        let name = ev.get("name").and_then(Value::as_str).unwrap_or("").trim().to_string();
+        if name.is_empty() || name.chars().count() > 60 || name.chars().any(|c| c.is_control()) {
+            return (false, "bad_name".into());
+        }
+        let old = self.queue[si].name.trim().to_string();
+        if name == old {
+            return (true, "no_change".into());
+        }
+        let key = name_key(&name);
+        if self.queue.iter().enumerate().any(|(i, o)| i != si && name_key(&o.name) == key) {
+            return (false, "name_taken".into());
+        }
+        if !self.rename_singer(si, &name) {
+            return (false, "not_renamed".into());
+        }
+        (true, "renamed".into())
+    }
+
     fn op_waitlist_add(&mut self, ev: &Value) -> (bool, String) {
         let rid = ev.get("request_id").and_then(Value::as_i64).unwrap_or(0);
         let Some(req) = (rid > 0).then(|| self.waitlist.get(&(rid as u64)).cloned()).flatten() else {
@@ -1482,7 +1694,6 @@ impl State {
         let int = |k: &str| to_f64(req.get(k)).map(|f| f as i64).unwrap_or(0);
         let key = int("key");
         let tempo = int("tempo").clamp(-30, 30);
-        self.prune_expired_slots();
         let entry = Entry { rid: Some(rid), local: None, artist: artist.clone(), title: title.clone(), song_info: format!("/lib/{artist}-{title}.zip"), duet: None, key, tempo: Some(100 + tempo), skipped: false, order: None, sid: String::new(), session: 0 };
         if !self.process_external(&req, &singer, entry, true) {
             return (false, "not_added".into());
@@ -1634,10 +1845,13 @@ impl State {
     }
 
     fn op_rotation_advance(&mut self, ev: &Value) -> (bool, String) {
-        let Some(started) = ev.get("singer").and_then(Value::as_str).and_then(|r| self.singer_by_ref(r)) else {
+        // The replay keeps every alias it ever handed out, so the started singer may be one that has since left the queue (merged away or removed):
+        // the selection then simply finds no "same singer" row. A display name is accepted too.
+        let r = ev.get("singer").and_then(Value::as_str).unwrap_or("");
+        let by_alias = r.strip_prefix('S').and_then(|x| x.parse::<usize>().ok()).and_then(|n| self.singer_alias.iter().find(|(_, v)| **v == n).map(|(u, _)| *u));
+        let Some(started_uid) = by_alias.or_else(|| self.queue.iter().find(|s| s.name == r).map(|s| s.uid)) else {
             return (false, "unknown_singer".into());
         };
-        let started_uid = self.queue[started].uid;
         let mut fallback: i64 = -1;
         for (i, s) in self.queue.iter().enumerate() {
             if s.skipped || !s.songs.iter().any(|e| !e.skipped) {
@@ -1681,6 +1895,7 @@ impl State {
         self.failed.clear();
         self.terminal_titles = ev.get("terminal_titles").and_then(Value::as_object).map(|o| o.iter().filter_map(|(k, v)| Some((k.parse::<u64>().ok()?, v.as_str()?.to_string()))).collect()).unwrap_or_default();
         self.deferred.clear();
+        self.aliases.clear();
         self.playing = false;
         self.queue_rev = ev.get("queue_revision").and_then(Value::as_i64).unwrap_or(0);
         self.pending = ev
@@ -1732,6 +1947,7 @@ impl State {
                 order_src: sv.get("last_order_source").and_then(Value::as_str).unwrap_or("").to_string(),
                 server_id: sv.get("server_singer_id").and_then(Value::as_str).unwrap_or("").to_string(),
                 server_session: sv.get("server_singer_session_id").and_then(Value::as_i64).unwrap_or(0),
+                created: sv.get("created_at").and_then(Value::as_f64).unwrap_or(0.0),
                 songs,
             });
         }
@@ -1766,6 +1982,7 @@ impl State {
         self.queue_rev = 0;
         self.pending.clear();
         self.playing = false; // the deferred list itself is persisted
+        self.aliases.clear();
         self.lock_count = 0;
         self.removed = self.tombs.keys().copied().collect();
         (true, "restarted".into())
@@ -1793,7 +2010,7 @@ impl State {
                        "round_sung": s.round_sung, "rotation_marker": s.marker, "temporary_empty_slot": s.temp_empty, "rotation_lock_new": s.lock_new,
                        "rotation_lock_order": s.lock_order, "host_order_updated_at": s.host_ts, "singer_order_updated_at": s.singer_ts,
                        "order_revision": s.order_rev, "last_order_source": s.order_src, "server_singer_id": s.server_id,
-                       "server_singer_session_id": s.server_session, "songs": songs})
+                       "server_singer_session_id": s.server_session, "created_at": s.created, "songs": songs})
             })
             .collect();
         let view = |m: &BTreeMap<u64, Value>| -> Value {
@@ -1828,6 +2045,7 @@ impl State {
             "unmatched_remote_ids": self.failed.iter().collect::<Vec<_>>(),
             "waitlist": view(&self.waitlist), "removed_tonight": view(&self.removed_tonight), "handled_waitlist_ids": self.handled.iter().collect::<Vec<_>>(),
             "tombstones": tombs, "removed_ids": self.removed.iter().collect::<Vec<_>>(),
+            "rename_aliases": self.aliases.iter().map(|(k, v)| (k.clone(), json!(v))).collect::<Map<String, Value>>(),
             "queue_revision": self.queue_rev,
             "pending_order_syncs": self.pending.iter().map(|(k, p)| (k.clone(), json!({"request_ids": p.ids, "host_order_updated_at": p.host, "order_revision": p.rev, "last_order_source": "host"}))).collect::<Map<String, Value>>(),
             "terminal_titles": self.terminal_titles.iter().map(|(k, v)| (k.to_string(), json!(v))).collect::<Map<String, Value>>(),
