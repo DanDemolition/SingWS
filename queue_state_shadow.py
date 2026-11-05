@@ -150,8 +150,17 @@ def snapshot_state(app) -> dict:
             tempo = e.get("tempo_percent")
             songs.append({"rid": rid if rid and rid > 0 else None, "artist": str(e.get("artist") or ""), "title": str(e.get("title") or ""),
                           "key": int(e.get("key") or 0), "tempo": int(tempo) if isinstance(tempo, (int, float)) and not isinstance(tempo, bool) else None,
-                          "skipped": bool(e.get("skipped", False))})
-        singers.append({"name": str(singer.get("name", "") or ""), "skipped": bool(singer.get("skipped", False)), "has_sung": bool(singer.get("has_sung", False)),
+                          "skipped": bool(e.get("skipped", False)),
+                          "request_order": float(e["request_order"]) if isinstance(e.get("request_order"), (int, float)) and not isinstance(e.get("request_order"), bool) else None})
+        def _i(v):
+            try:
+                return int(v or 0)
+            except (TypeError, ValueError):
+                return 0
+        singers.append({"host_order_updated_at": _i(singer.get("host_order_updated_at")), "singer_order_updated_at": _i(singer.get("singer_order_updated_at")),
+                        "order_revision": _i(singer.get("order_revision")), "last_order_source": str(singer.get("last_order_source") or ""),
+                        "server_singer_id": str(singer.get("server_singer_id") or ""), "server_singer_session_id": _i(singer.get("server_singer_session_id")),
+                        "name": str(singer.get("name", "") or ""), "skipped": bool(singer.get("skipped", False)), "has_sung": bool(singer.get("has_sung", False)),
                         "round_sung": bool(singer.get("round_sung", False)), "rotation_marker": bool(singer.get("rotation_marker", False)),
                         "temp_empty": bool(singer.get("temporary_empty_slot", False)), "until": float(singer.get("empty_slot_until") or 0.0), "songs": songs})
     if total > MAX_SONGS:
@@ -164,7 +173,16 @@ def snapshot_state(app) -> dict:
                                     "artist": str(t.get("artist") or ""), "title": str(t.get("title") or "")}
     removed = sorted(int(x) for x in (d.get("_remote_removed_request_ids") or set()))
     handled = sorted(int(x) for x in (d.get("_waiting_for_add_handled_ids") or set()))
-    return {"settings": {"queue_mode": str(settings.get("queue_mode", "classic")), "limit_pending_max": int(settings.get("limit_pending_max", 2) or 2),
+    pending = {}
+    for k, v in ((d.get("_pending_remote_order_syncs") or {}).items() if isinstance(d.get("_pending_remote_order_syncs"), dict) else []):
+        try:
+            pending[str(k)] = {"request_ids": [int(x) for x in (v.get("request_ids") or [])], "host_order_updated_at": int(v.get("host_order_updated_at") or 0),
+                               "order_revision": int(v.get("order_revision") or 0)}
+        except Exception:  # noqa: BLE001
+            raise Unsnapshottable("odd pending order")
+    terminal_titles = {str(int(k)): str(v or "") for k, v in (d.get("_remote_terminal_titles") or {}).items()} if isinstance(d.get("_remote_terminal_titles"), dict) else {}
+    return {"queue_revision": int(d.get("_queue_revision", 0) or 0), "pending_order_syncs": pending, "terminal_titles": terminal_titles,
+            "settings": {"queue_mode": str(settings.get("queue_mode", "classic")), "limit_pending_max": int(settings.get("limit_pending_max", 2) or 2),
                          "requests_accepting": bool(settings.get("requests_accepting", True))},
             "queue": singers, "tombstones": tombs, "removed": removed, "handled": handled}
 
@@ -230,6 +248,8 @@ def begin(app, rows, now: float | None = None, force: bool = False):
             return None
         if settings.get("use_waiting_for_add") or settings.get("rotation_locked") or d.get("_deferred_remote_adds"):
             return None
+        if settings.get("defer_remote_adds_until_between_singers"):
+            return None  # held-while-playing intake is modelled only in the replay (the shadow does not know when a song plays)
         if d.get("_waiting_for_add_requests") or d.get("_remote_attention_requests"):
             return None
         if float(d.get("_remote_clear_in_progress_until", 0.0) or 0.0) > time.time():
@@ -274,7 +294,8 @@ def _say(log, text):
 
 
 def run_helper(helper: Path, pre: dict, rows: list, now: float) -> dict:
-    load = {"op": "load", "settings": pre["settings"], "queue": pre["queue"], "tombstones": pre["tombstones"], "removed": pre["removed"], "handled": pre["handled"]}
+    load = {"op": "load", "settings": pre["settings"], "queue": pre["queue"], "tombstones": pre["tombstones"], "removed": pre["removed"], "handled": pre["handled"],
+            "queue_revision": pre["queue_revision"], "pending_order_syncs": pre["pending_order_syncs"], "terminal_titles": pre["terminal_titles"]}
     arrive = {"op": "remote_arrive", "requests": rows, "now": now}
     payload = json.dumps(load) + "\n" + json.dumps(arrive) + "\n"
     proc = subprocess.run([str(helper)], input=payload, capture_output=True, text=True, timeout=TIMEOUT_S, preexec_fn=lambda: os.nice(10))

@@ -329,3 +329,117 @@ no new event (a terminal row is an ordinary `remote_arrive` row); 14 adversarial
 Slice A result: parity IDENTICAL on 37 adversarial cases plus seeded streams (`parity --seeds 100`: 143/143 before the last case was added; `--seeds 20`: 64/64 after).
 Mutation (`MUTATE_SEEDS=120`): 159 killed, 35 documented equivalent, 2 survivors (#102, #187); a targeted case was added for each and both are now killed
 (re-checked alone with `MUTATE_ONLY=102,187`; the full run was not repeated after those two cases).
+
+## M6: `sort_order`, order timestamps, revisions and pending host orders (Stage B step 4, slice B)
+
+Oracle: the real `_reconcile_remote_requests` ordering tail, `_remote_order_meta_from_req`, `_merge_remote_order_meta`, `_incoming_order_timestamp`,
+`_coerce_order_timestamp`, `_apply_order_meta_to_singer`, `_record_host_singer_order_change`, `_remote_order_now_ms`, and the real `_sync_remote_singer_order` (the harness no
+longer stubs it; its network half returns at once because no `base_url`/key is set). Harness changes: snapshot fields per singer `host_order_updated_at`,
+`singer_order_updated_at`, `order_revision`, `last_order_source`; per song `request_order`; top level `queue_revision` and `pending_order_syncs`
+(singer key -> request_ids, host stamp, revision, source). Rows may carry `sort_order`, `queue_position`, `host_order_updated_at`, `singer_order_updated_at`,
+`order_revision`/`revision`, `last_order_source`/`order_source`. New cases: `sort_order_*`, `host_reorder_survives_a_stale_poll_until_echoed`, `echo_with_old_host_stamp_is_overridden`,
+`newer_singer_order_beats_the_host`, `newer_revision_beats_the_host`, `older_singer_order_is_ignored`, `order_stamps_survive_a_restart_but_pending_does_not`,
+`host_adds_and_removes_record_the_order`; generator pick `ordr` (random stamps in seconds and milliseconds, odd values, odd sources/revisions).
+
+### Rules
+
+1. **`_queue_revision` is behaviour, not bookkeeping.** The order rules compare revisions, so the model keeps the counter. It is +1 on: a NEW tombstone (an existing one returns
+   first), a server-terminal removal that removed at least one entry, `waitlist_restore`, and every host order record. It resets to 0 on restart (stamps stored on singers survive; the counter does not).
+2. **Host order record** (`_sync_remote_singer_order` -> `_record_host_singer_order_change`), run on the singer: revision +1; `host_order_updated_at = max(now_ms, prev+1)` where
+   `prev` is the larger of the singer's two stamps (coerced) and `now_ms = int(time.time()*1000)`; `order_revision = queue_revision`; `last_order_source = "host"`;
+   `singer_order_updated_at` defaults to 0. If the singer's name key and its remote request-id list are both non-empty, `pending[name_key]` = (ids in song order, stamp, revision).
+   It is triggered by: **every successful add that is not suppressed as a duplicate** (a new singer row or a new song on an existing one: host add, remote arrival, waitlist add, via
+   `_mark_inserted_singer_order_authoritative`), `move_song` that moves something, and `remove_song` when the singer still exists. NOT by singer moves, skips, remove-singer, complete, terminal rows.
+   Consequence: after any add the singer carries a host stamp, so a plain server poll (source "server", no stamps) can no longer reorder their songs.
+3. **`request_order`.** At add time `float(sort_order or queue_position or request_id)` (falsy values fall through; an unparsable one falls back to `float(request_id)`); host adds have none.
+   After every reconcile each queued entry with a request id gets `float(sort_order)` of the LAST payload row for the id, else `float(request_id)` for a row without a usable
+   sort_order, else its stored value (entries the payload no longer lists keep theirs). Note `sort_order` 0 counts here but not at add time.
+4. **Per-singer wire order.** The ids of a singer's rows (queue singer lowercased, payload order, duplicates kept). If ANY of the singer's rows has a sort_order that is not None/""
+   and parses with `float`, the ids are stably sorted by `(sort_order, id)`; ids without one sort last in payload-rank order (last index wins for duplicates). No usable sort_order = wire order.
+5. **Pending host order vs the poll** (per pending singer): with the pending ids (those still in the payload) non-empty and set-equal to the server's ids: if the server order EQUALS the pending order,
+   a nonzero incoming host stamp OLDER than the pending one keeps the pending order (stale echo); otherwise the pending entry is dropped (echoed). If the orders differ, the pending order wins
+   unless the incoming source is `singer` with a stamp newer than the pending host stamp. Incoming stamp = singer stamp for source singer, host stamp for host, the larger of both otherwise.
+   A pending entry for a set that differs (a song added or dropped) stays untouched and is never cleared by a poll.
+6. **Apply decision** (only singers with >= 2 songs and a non-empty order): forced if the final order equals the pending ids; else if the singer has a host stamp: allowed when (singer-source and
+   newer than the local host stamp), (host-source and not older), or (incoming revision > local revision and incoming stamp >= both local stamps); otherwise ignored. With no local host stamp:
+   ignored only if the singer has a singer stamp and the incoming stamp is nonzero and older. When applied, only the server-known entries are permuted among their own positions
+   (host-local songs keep their slots), then the metadata is merged into the singer (maxima of the stamps and revision; the source is overwritten only if any of the three is nonzero).
+   Incoming metadata for a singer is the merge over all their rows (maxima, last row's source). Singers with one song never get the metadata applied.
+7. `_coerce_order_timestamp`: None/""/non-numeric/<=0 -> 0; below 1e11 means seconds and is multiplied by 1000; nan/inf -> 0. Revision: `int(order_revision or revision or 0)`, 0 if it does not parse
+   (`"3.5"` is 0, `3.7` is 3). Source: `last_order_source or order_source or "server"`, lowercased, anything but host/singer/server becomes server.
+
+### Surprises (reported, NOT changed)
+
+- **The host stamp that every add leaves behind makes `sort_order` inert** for polls without newer stamps: the sort happens, then the apply decision refuses it (`ignored_stale_remote_order`).
+  A server that only conveys order by `sort_order` (no stamps) never reorders a singer who has had a song added on the desktop. Observed in `sort_order_resorts_a_singers_songs`.
+- A `host`-source echo with an UNCHANGED stamp counts as an echo (`>=`), so a replayed old echo re-applies.
+- `request_order` for the same id differs between the add (`0` falls through to the id) and the poll (`0` is kept): a request with sort_order 0 flips between its id and 0.
+- A pending entry is only compared when the id sets match exactly; if the server drops one song, the pending entry lingers (and keeps forcing nothing) until a later poll matches again or the app restarts.
+- `float("nan")` as a sort_order is accepted by Python (compare is then arbitrary) and cannot be represented in the JSON the model speaks: the generator never sends it. Not modelled.
+
+Slice B result: full `parity --seeds 150` IDENTICAL on 211/211 streams (all adversarial cases plus seeded `core` and `full` streams); `tools/mutate_queue_state.py` with `MUTATE_SEEDS=100`:
+212 killed, 47 documented equivalent, 0 survived, 0 invalid. (The earlier mutants whose patterns the slice-A and slice-B edits moved were rewritten, and the generator's choice list grew, so
+seed-dependent kills were backed by deterministic cases.)
+
+## M7: server singer ids and sessions (Stage B step 4, slice C)
+
+Oracle: the real `_queue_singer_match_index`, the singer-identity bookkeeping in `_add_song_to_queue`, and the reconcile's request normalisation. Harness: snapshot per singer
+`server_singer_id`, `server_singer_session_id`; per song `singer_session_id`; rows may carry `singer_id`, `singer_uid`, `singer_session_id`, `session_id`; new cases `session_ids_*`,
+`singer_id_on_a_waitlist_row_attaches_to_a_differently_named_row`, `singer_id_on_a_regular_arrival_is_ignored_by_the_reconcile`, `session_branch_prefers_the_row_with_the_same_session`; generator pick `ids`.
+
+### Rules
+
+1. **Which identity reaches the add.** The reconcile does NOT pass the raw row on: its normalised request carries `singer_session_id` (= `singer_session_id or session_id or ""`) but **no `singer_id`/`singer_uid`**.
+   So for a normal arrival (and for an attention entry later added from the waitlist) only the session id is known. A raw waiting row added with `waitlist_add` keeps all its fields, including the singer id.
+2. **Row matching** (`_queue_singer_match_index`, only when a request dict is passed; a host add matches by name alone): (a) if the request has a `singer_id`/`singer_uid` (first non-empty, stripped), the
+   FIRST row whose `server_singer_id` (or host-local `singer_id`, which the model does not carry) equals it wins, **whatever the row's display name**; (b) else a row with the same normalised name AND
+   `server_singer_session_id` equal to the request's (> 0); (c) else the first row with the same normalised name; none -> a new row. Because queue rows have unique names, (b) is observationally the same as (c).
+3. **Bookkeeping when a remote add lands on a row.** `server_singer_session_id` is overwritten when the entry's session is > 0 (`int(singer_session_id or 0)`; a negative or unparsable value is 0 and is not stored on the
+   entry either); `server_singer_id` is set only if the row has none (a different incoming id is only logged, "preserved existing row identity"). A NEW row takes both from the entry. Host adds never set either.
+4. The host-local `singer_id` (a uuid minted by `_ensure_singer_id`) is also compared in (a); the model has no such id, and the replay world cannot name it (random), so a request whose singer id equals a host uuid is out of scope.
+
+### Surprises (reported, NOT changed)
+
+- A waiting row with a `singer_id` that belongs to another singer's row is added to THAT row (`singer_id_on_a_waitlist_row_attaches_to_a_differently_named_row`: Zed's song lands under Ada). The
+  duplicate-name merge log line ("[SINGER-MERGE]") is the only trace. The song limit was checked against Zed's name, not Ada's row, so Ada can exceed her cap this way.
+- Because the reconcile drops the singer id, the same person's regular (non-waitlist) requests never merge by id; only waitlist adds can. A singer who renames themselves between requests gets two rows unless the waitlist path is used.
+- A session id is written onto the row by the LAST remote add, so two requests in one poll with different sessions leave the later one on the row.
+
+### Fixes after slice B (three tests that failed on the slice B commit)
+
+- `test_relist_with_rows_in_a_different_order_reorders_songs_inside_a_singer`: **real behaviour, not a harness default.** The old harness stubbed `_sync_remote_singer_order`; with the real one, every add stamps the
+  singer's host order and the stamp survives a restart, so the post-restart relist (no newer stamp) no longer reorders. Findings 4 above ("production may push the host's order first") is therefore answered: it does.
+  The pin now expects `['R1001','R1002']`.
+- `test_commuting_removals_and_skips_in_any_order_give_the_same_final_state`: removals record time-based order stamps and bump a counter, so the exact final snapshot depends on event order. The test compares
+  without `queue_revision`, `pending_order_syncs` and the per-singer `host_order_updated_at` / `order_revision`.
+- `test_core_streams_check_clean_at_every_reconcile_even_after_unmodelled_edits`: **the live shadow was blind to the new state** (stamps, pending host orders, revision) and would have flagged ordinary polls in a show. Its state
+  snapshot and `load` now carry singer order fields, server ids/sessions, `request_order`, `queue_revision`, `pending_order_syncs` and `terminal_titles`. Still log-only; it still skips polls with the waitlist, lock, duets or deferred adds.
+
+## M8: deferred remote adds (Stage B step 4, slice D)
+
+Oracle: the real `_apply_resolved_remote_add` / `_queue_deferred_remote_add` / `_flush_deferred_remote_adds` / `_pending_request_counts_by_singer` /
+`_remove_deferred_remote_add_by_id` and the reconcile and waitlist code around them. Harness: setting key `defer` (the app's `defer_remote_adds_until_between_singers`); two events:
+`set_playing` {playing} (sets the app's `karaoke_playing`: the ONLY playback fact the rule reads; nothing is started) and `flush_deferred` {force} (result code `flushed=N`); the held list survives a `restart`
+(it is persisted in `deferred_remote_adds.json`) while `playing` does not; snapshot `deferred` (request ids in order). Cases `deferred_*`, `server_terminal_row_drops_a_deferred_request`, `defer_setting_off_*`, `host_remove_and_accepting_off_with_deferred`; generator picks `play`, `flush`, `defer_flip`.
+
+### Rules
+
+1. **When a request is held.** After the cap check, `_apply_resolved_remote_add` queues the payload instead of adding it when the setting is on AND a song is playing. Held means "accepted" to the poll (the reconcile counts it against the
+   singer's allowance). This applies to regular arrivals AND to `waitlist_add`. Re-holding the same id replaces the old payload and moves it to the back (list sorted stably by request time).
+2. **Held requests count against the cap** for everyone except themselves (`_pending_request_counts_by_singer`, once per request id, duets count both names). The reconcile's intake pre-check counts them
+   WITHOUT excluding the request itself, so a held request that is listed again when the singer is at the cap is skipped by the pre-check (it stays held); the per-request checks after it exclude the request's own copy.
+3. **The poll treats a held id as local, but not as queued:** it is in `local_remote_ids` (so a non-actionable row for it is not historical, and the waitlist rebuild marks it handled), but NOT in the intake's `existing_ids`, so every poll that
+   lists it runs it through the cap check and re-holds it. A suppressed attention record (a failed late add of a held id) marks it handled, as for a queued id.
+4. **Flush** (`flush_deferred`; refused while a song plays unless forced): every held payload is applied in order with `allow_defer=False`: the cap check (own copy excluded), then the add. A failed one stays held (a late add failure also
+   records an attention item, or marks the id handled when it is held). The held list is rewritten only AFTER the whole pass.
+5. A server-terminal row removes a held request. Restart keeps the list; the playing flag resets.
+
+### Surprises (reported, NOT changed)
+
+- **The flush double-counts.** Because the list is rewritten at the end, a request already added by the flush still counts as held while the next one is checked: limit 2, two held requests for Ada: the first flush adds one and BLOCKS the other
+  (queue 1 + the still-listed first request 1 = 2 >= 2); only a second flush adds it (`deferred_adds_count_against_the_cap_and_a_flush_double_counts`). A singer with several held requests needs several flushes.
+- A held request listed again while its singer is at the cap is skipped by the intake pre-check, which does not exclude the request's own copy (rule 2), although the later checks would let it through.
+- `waitlist_add` of a waiting row is held like any request while a song plays; the host sees the row leave the waitlist but nothing in the queue until the flush.
+
+Not modelled: the async intake worker (`_start_remote_request_intake_worker`, used by the real app on the GUI thread; the harness runs the synchronous path), `_flush_deferred_remote_adds` triggered by the `media_end` / `before_play_next` / settings-off hooks (the
+event `flush_deferred` is those hooks' effect), the persistence file itself, and the shadow (`queue_state_shadow` still skips any poll while the held list is non-empty).
