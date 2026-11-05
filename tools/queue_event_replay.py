@@ -364,7 +364,7 @@ class World:
                     "id": eid_alias[eid], "remote_request_id": rid, "artist": str(entry.get("artist", "")), "title": str(entry.get("title", "")),
                     "song_info": _jsonable(entry.get("song_info")), "key": entry.get("key", 0), "tempo_percent": entry.get("tempo_percent", 100),
                     "skipped": bool(entry.get("skipped", False)), "duet_display": entry.get("duet_display"),
-                    "request_order": entry.get("request_order"),
+                    "request_order": entry.get("request_order"), "singer_session_id": int(entry.get("singer_session_id", 0) or 0),
                 }
                 songs.append(rec)
                 if rid is not None:
@@ -377,6 +377,7 @@ class World:
                 "rotation_lock_new": bool(singer.get("rotation_lock_new", False)), "rotation_lock_order": int(singer.get("rotation_lock_order", 0) or 0),
                 "host_order_updated_at": int(singer.get("host_order_updated_at", 0) or 0), "singer_order_updated_at": int(singer.get("singer_order_updated_at", 0) or 0),
                 "order_revision": int(singer.get("order_revision", 0) or 0), "last_order_source": str(singer.get("last_order_source", "") or ""),
+                "server_singer_id": str(singer.get("server_singer_id", "") or ""), "server_singer_session_id": int(singer.get("server_singer_session_id", 0) or 0),
             })
         tomb = {}
         data = app._ensure_remote_request_tombstones()
@@ -771,6 +772,27 @@ def adversarial_cases() -> dict[str, list[dict]]:
         "revision_key_alone_beats_the_local_revision": [cfg, {"op": "remote_arrive", "requests": [a1, a2]}, {"op": "restart"}, {"op": "remote_arrive", "requests": [dict(a2, revision=50, host_order_updated_at=1700009999000), dict(a1, revision=50, host_order_updated_at=1700009999000)]}],
         "echo_with_the_pending_stamp_clears_the_pending_order": [cfg, {"op": "remote_arrive", "requests": [a1, a2]}, {"op": "move_song", "entry": "R1002", "where": "top"},
                                                                  {"op": "remote_arrive", "requests": [dict(a2, host_order_updated_at=1700000003000, last_order_source="host"), dict(a1, host_order_updated_at=1700000003000)]}],
+        # --- slice C: server singer ids and sessions
+        "session_ids_are_recorded_on_the_row_and_the_song": [cfg, {"op": "remote_arrive", "requests": [dict(a1, singer_session_id=7), dict(a2, session_id="9"), dict(b1, singer_session_id="x"), dict(_req(1004, "Bob", "Delta"), singer_session_id=3.9)]},
+                                                             {"op": "remote_arrive", "requests": [dict(_req(1005, "Ada", "Echo"), singer_session_id=0, session_id=12), dict(_req(1006, "Bob", "Fox"), session_id=-4)]},
+                                                             {"op": "add_song", "singer": "Ada", "title": "Local"}, {"op": "restart"}, {"op": "remote_arrive", "requests": [dict(_req(1007, "Ada", "Golf"), singer_session_id=21)]}],
+        "singer_id_on_a_waitlist_row_attaches_to_a_differently_named_row": [dict(cfg, waitlist=True), {"op": "remote_arrive", "requests": [dict(_waiting(1001, "Ada", "Alpha"), singer_id="X"), dict(_waiting(1002, "Zed", "Zulu"), singer_id=" X "),
+                                                                                                     dict(_waiting(1003, "Cy", "Charlie"), singer_uid="U1"), dict(_waiting(1004, "Dee", "Delta"), singer_id="", singer_uid="U1"), dict(_waiting(1005, "Eve", "Echo"), singer_id=5)]},
+                                                                            {"op": "waitlist_add", "request_id": 1001}, {"op": "waitlist_add", "request_id": 1002}, {"op": "waitlist_add", "request_id": 1003}, {"op": "waitlist_add", "request_id": 1004},
+                                                                            {"op": "waitlist_add", "request_id": 1005}],
+        "singer_id_on_a_regular_arrival_is_ignored_by_the_reconcile": [cfg, {"op": "remote_arrive", "requests": [dict(a1, singer_id="X"), dict(_req(1002, "Zed", "Zulu"), singer_id="X")]}],
+        "session_branch_prefers_the_row_with_the_same_session": [dict(cfg, waitlist=True), {"op": "remote_arrive", "requests": [dict(_waiting(1001, "Ada", "Alpha"), singer_session_id=5)]}, {"op": "waitlist_add", "request_id": 1001},
+                                                                 {"op": "remote_arrive", "requests": [dict(_req(1002, "ada", "Bravo"), singer_session_id=6), dict(_req(1003, "Ada", "Charlie"), session_id=5)]},
+                                                                 {"op": "remote_arrive", "requests": [dict(_waiting(1010, "Bob", "Echo"), singer_id="Q", singer_session_id=2)]}, {"op": "waitlist_add", "request_id": 1010},
+                                                                 {"op": "remote_arrive", "requests": [dict(_waiting(1011, "Cy", "Fox"), singer_id="Q", singer_session_id=8)]}, {"op": "waitlist_add", "request_id": 1011}],
+        "existing_server_singer_id_is_not_overwritten_and_singer_id_wins_over_uid": [dict(cfg, waitlist=True), {"op": "remote_arrive", "requests": [dict(_waiting(1001, "Ada", "Alpha"), singer_id="X"), dict(_waiting(1002, "Ada", "Bravo"), singer_id="Y"),
+                                                                                                                dict(_waiting(1003, "Bob", "Charlie"), singer_id="P", singer_uid="Q"), dict(_waiting(1004, "Cy", "Delta"), singer_id="Q"),
+                                                                                                                dict(_waiting(1005, "Dee", "Echo"), singer_session_id=5, session_id=6)]},
+                                                                                       {"op": "waitlist_add", "request_id": 1001}, {"op": "waitlist_add", "request_id": 1002}, {"op": "waitlist_add", "request_id": 1003}, {"op": "waitlist_add", "request_id": 1004},
+                                                                                       {"op": "waitlist_add", "request_id": 1005}],
+        "attention_entries_do_not_survive_a_restart": [dict(cfg, limit_pending_max=2, waitlist=True), {"op": "remote_arrive", "requests": [a1, a2]}, {"op": "remote_arrive", "requests": [_req(1010, "Bob & Ada", "Late")]},
+                                                       {"op": "restart"}, {"op": "remote_arrive", "requests": [a1]}],
+        "both_session_keys_on_a_regular_arrival_prefer_singer_session_id": [cfg, {"op": "remote_arrive", "requests": [dict(a1, singer_session_id=5, session_id=6), dict(_req(1003, "Bob", "Charlie"), singer_session_id=0, session_id=8)]}],
         "accepting_off_blocks_new_arrivals": [cfg, {"op": "config", "requests_accepting": False}, {"op": "remote_arrive", "requests": [a1]},
                                               {"op": "config", "requests_accepting": True}, {"op": "remote_arrive", "requests": [a1]}],
     }
@@ -821,7 +843,7 @@ def generate_stream(seed: int, length: int = 40, profile: str = "full") -> list[
             choices += ["wl_restore"]
         choices += ["restart", "stale_ref"]
         if profile != "core":  # waitlist pressure: re-lists in other shapes, toggling the setting, stale ids, id reuse
-            choices += ["term", "term", "term_stale", "term_reuse", "ordr", "ordr", "ordr", "ordr"]
+            choices += ["term", "term", "term_stale", "term_reuse", "ordr", "ordr", "ordr", "ordr", "ids", "ids", "ids"]
             choices += ["lock", "lock", "lock", "wl_relist", "wl_relist", "wl_as_pending", "wl_flip", "wl_stale", "wl_reuse", "wl_flags", "wl_add_hot", "wl_both", "wl_both"]
             if snap["waitlist"]:
                 choices += ["wl_add_hot"] * 2
@@ -905,6 +927,18 @@ def generate_stream(seed: int, length: int = 40, profile: str = "full") -> list[
                     row["singer_order_updated_at"] = stamp()
                     row["order_revision"] = rng.choice([0, 1, 2, 7, "5", "x", 3.7, None])
                     row[rng.choice(["last_order_source", "order_source"])] = rng.choice(["host", "singer", "server", "HOST", "other", "", " Singer "])
+                rows.append(row)
+            emit({"op": "remote_arrive", "requests": rows})
+        elif pick == "ids" and arrived:
+            rows = []
+            for r in rng.sample(arrived, min(len(arrived), rng.randint(1, 3))):
+                row = dict(r)
+                if rng.random() < 0.7:
+                    row[rng.choice(["singer_session_id", "session_id"])] = rng.choice([0, 1, 2, 5, "5", "x", 3.9, -2, None, ""])
+                if rng.random() < 0.7:
+                    row[rng.choice(["singer_id", "singer_uid"])] = rng.choice(["X", "Y", " X ", 5, "", None])
+                if wl and rng.random() < 0.6:
+                    row = dict(row, state="waiting", pending_reason="rotation_full")
                 rows.append(row)
             emit({"op": "remote_arrive", "requests": rows})
         elif pick == "term" and arrived:

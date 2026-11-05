@@ -380,3 +380,37 @@ longer stubs it; its network half returns at once because no `base_url`/key is s
 Slice B result: full `parity --seeds 150` IDENTICAL on 211/211 streams (all adversarial cases plus seeded `core` and `full` streams); `tools/mutate_queue_state.py` with `MUTATE_SEEDS=100`:
 212 killed, 47 documented equivalent, 0 survived, 0 invalid. (The earlier mutants whose patterns the slice-A and slice-B edits moved were rewritten, and the generator's choice list grew, so
 seed-dependent kills were backed by deterministic cases.)
+
+## M7: server singer ids and sessions (Stage B step 4, slice C)
+
+Oracle: the real `_queue_singer_match_index`, the singer-identity bookkeeping in `_add_song_to_queue`, and the reconcile's request normalisation. Harness: snapshot per singer
+`server_singer_id`, `server_singer_session_id`; per song `singer_session_id`; rows may carry `singer_id`, `singer_uid`, `singer_session_id`, `session_id`; new cases `session_ids_*`,
+`singer_id_on_a_waitlist_row_attaches_to_a_differently_named_row`, `singer_id_on_a_regular_arrival_is_ignored_by_the_reconcile`, `session_branch_prefers_the_row_with_the_same_session`; generator pick `ids`.
+
+### Rules
+
+1. **Which identity reaches the add.** The reconcile does NOT pass the raw row on: its normalised request carries `singer_session_id` (= `singer_session_id or session_id or ""`) but **no `singer_id`/`singer_uid`**.
+   So for a normal arrival (and for an attention entry later added from the waitlist) only the session id is known. A raw waiting row added with `waitlist_add` keeps all its fields, including the singer id.
+2. **Row matching** (`_queue_singer_match_index`, only when a request dict is passed; a host add matches by name alone): (a) if the request has a `singer_id`/`singer_uid` (first non-empty, stripped), the
+   FIRST row whose `server_singer_id` (or host-local `singer_id`, which the model does not carry) equals it wins, **whatever the row's display name**; (b) else a row with the same normalised name AND
+   `server_singer_session_id` equal to the request's (> 0); (c) else the first row with the same normalised name; none -> a new row. Because queue rows have unique names, (b) is observationally the same as (c).
+3. **Bookkeeping when a remote add lands on a row.** `server_singer_session_id` is overwritten when the entry's session is > 0 (`int(singer_session_id or 0)`; a negative or unparsable value is 0 and is not stored on the
+   entry either); `server_singer_id` is set only if the row has none (a different incoming id is only logged, "preserved existing row identity"). A NEW row takes both from the entry. Host adds never set either.
+4. The host-local `singer_id` (a uuid minted by `_ensure_singer_id`) is also compared in (a); the model has no such id, and the replay world cannot name it (random), so a request whose singer id equals a host uuid is out of scope.
+
+### Surprises (reported, NOT changed)
+
+- A waiting row with a `singer_id` that belongs to another singer's row is added to THAT row (`singer_id_on_a_waitlist_row_attaches_to_a_differently_named_row`: Zed's song lands under Ada). The
+  duplicate-name merge log line ("[SINGER-MERGE]") is the only trace. The song limit was checked against Zed's name, not Ada's row, so Ada can exceed her cap this way.
+- Because the reconcile drops the singer id, the same person's regular (non-waitlist) requests never merge by id; only waitlist adds can. A singer who renames themselves between requests gets two rows unless the waitlist path is used.
+- A session id is written onto the row by the LAST remote add, so two requests in one poll with different sessions leave the later one on the row.
+
+### Fixes after slice B (three tests that failed on the slice B commit)
+
+- `test_relist_with_rows_in_a_different_order_reorders_songs_inside_a_singer`: **real behaviour, not a harness default.** The old harness stubbed `_sync_remote_singer_order`; with the real one, every add stamps the
+  singer's host order and the stamp survives a restart, so the post-restart relist (no newer stamp) no longer reorders. Findings 4 above ("production may push the host's order first") is therefore answered: it does.
+  The pin now expects `['R1001','R1002']`.
+- `test_commuting_removals_and_skips_in_any_order_give_the_same_final_state`: removals record time-based order stamps and bump a counter, so the exact final snapshot depends on event order. The test compares
+  without `queue_revision`, `pending_order_syncs` and the per-singer `host_order_updated_at` / `order_revision`.
+- `test_core_streams_check_clean_at_every_reconcile_even_after_unmodelled_edits`: **the live shadow was blind to the new state** (stamps, pending host orders, revision) and would have flagged ordinary polls in a show. Its state
+  snapshot and `load` now carry singer order fields, server ids/sessions, `request_order`, `queue_revision`, `pending_order_syncs` and `terminal_titles`. Still log-only; it still skips polls with the waitlist, lock, duets or deferred adds.

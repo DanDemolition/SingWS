@@ -73,6 +73,9 @@ struct Entry {
     skipped: bool,
     /// `request_order` (the server's sort position as the app stores it; None for host-local entries).
     order: Option<f64>,
+    /// `singer_id` / `singer_uid` and `singer_session_id` the request row carried (remote adds only).
+    sid: String,
+    session: i64,
 }
 
 impl Entry {
@@ -109,6 +112,9 @@ struct Singer {
     singer_ts: i64,
     order_rev: i64,
     order_src: String,
+    /// `server_singer_id` / `server_singer_session_id`.
+    server_id: String,
+    server_session: i64,
     songs: Vec<Entry>,
 }
 
@@ -369,6 +375,18 @@ fn truthy(v: &Value) -> bool {
         Value::Array(a) => !a.is_empty(),
         Value::Object(o) => !o.is_empty(),
     }
+}
+
+/// `a or b or ""`: the first truthy value (the empty string if none), as the app's normalised request row stores it.
+fn first_truthy_value(row: &Value, keys: &[&str]) -> Value {
+    for k in keys {
+        if let Some(v) = row.get(*k) {
+            if truthy(v) {
+                return v.clone();
+            }
+        }
+    }
+    Value::String(String::new())
 }
 
 /// `str(x)` for the JSON values a request row carries.
@@ -800,8 +818,19 @@ impl State {
             return false; // the operator's own add may exceed the cap
         }
         let k = name_key(&primary);
-        if let Some(i) = self.queue.iter().position(|s| name_key(&s.name) == k && !k.is_empty()) {
+        // _queue_singer_match_index: a server singer id first (any row, whatever its name), then the same name with the same session, then the name alone
+        let by_id = if remote && !entry.sid.is_empty() { self.queue.iter().position(|s| s.server_id == entry.sid.trim()) } else { None };
+        let by_session = if by_id.is_none() && remote && entry.session > 0 && !k.is_empty() { self.queue.iter().position(|s| name_key(&s.name) == k && s.server_session == entry.session) } else { None };
+        let matched = by_id.or(by_session).or_else(|| if k.is_empty() { None } else { self.queue.iter().position(|s| name_key(&s.name) == k) });
+        if let Some(i) = matched {
             let s = &mut self.queue[i];
+            if remote && entry.session > 0 {
+                s.server_session = entry.session;
+            }
+            let rsid = entry.sid.trim().to_string();
+            if !rsid.is_empty() && s.server_id.is_empty() {
+                s.server_id = rsid;
+            }
             s.songs.push(entry);
             Self::clear_temp_slot(s);
             if self.is_locked() {
@@ -816,7 +845,12 @@ impl State {
         let uid = self.next_uid;
         self.next_uid += 1;
         let new_uid = uid;
-        let new = Singer { uid, name: primary, skipped: false, has_sung: false, round_sung: false, marker: false, temp_empty: false, until: 0.0, lock_new: false, lock_order: 0, host_ts: 0, singer_ts: 0, order_rev: 0, order_src: String::new(), songs: vec![entry] };
+        let (nsid, nses) = (entry.sid.trim().to_string(), entry.session);
+        let mut new = Singer { uid, name: primary, skipped: false, has_sung: false, round_sung: false, marker: false, temp_empty: false, until: 0.0, lock_new: false, lock_order: 0, host_ts: 0, singer_ts: 0, order_rev: 0, order_src: String::new(), server_id: String::new(), server_session: 0, songs: vec![entry] };
+        new.server_id = nsid;
+        if remote && nses > 0 {
+            new.server_session = nses;
+        }
         if self.cur.rotation() {
             self.recompute_round_state();
             if self.is_locked() {
@@ -952,6 +986,8 @@ impl State {
     /// `process_external_request` for one request row (cap, then the remote add). Err carries nothing; the caller records what it needs.
     fn process_external(&mut self, req: &Value, singer: &str, mut entry: Entry) -> bool {
         entry.order = Some(add_request_order(req, entry.rid));
+        entry.sid = ["singer_id", "singer_uid"].iter().filter_map(|k| req.get(*k)).find(|v| !matches!(v, Value::Null) && !matches!(v, Value::String(t) if t.is_empty())).map(pystr).unwrap_or_default();
+        entry.session = py_int0(req.get("singer_session_id")).max(0); // only a positive session is stored on the entry
         let parts = req_participants(req);
         if !self.limit_ok(&parts) {
             return false; // _record_remote_limit_blocked_request: nothing is recorded locally
@@ -995,7 +1031,7 @@ impl State {
         let title = ev.get("title").and_then(Value::as_str).unwrap_or("");
         let key = ev.get("key").and_then(Value::as_i64).unwrap_or(0);
         self.next_local += 1;
-        let entry = Entry { rid: None, local: Some(self.next_local), artist: String::new(), title: title.into(), song_info: format!("/lib/{artist}-{title}.zip"), duet: None, key, tempo: None, skipped: false, order: None };
+        let entry = Entry { rid: None, local: Some(self.next_local), artist: String::new(), title: title.into(), song_info: format!("/lib/{artist}-{title}.zip"), duet: None, key, tempo: None, skipped: false, order: None, sid: String::new(), session: 0 };
         // artist is stored from the track dict, which carries the event artist; the harness' local entries use it for the song path only
         let mut entry = entry;
         entry.artist = artist.into();
@@ -1022,6 +1058,7 @@ impl State {
             tempo: i64,
             sort: Option<Value>,
             meta: OrderMeta,
+            session: Value,
         }
         let mut normalized: Vec<Req> = Vec::new();
         for row in &rows {
@@ -1079,7 +1116,7 @@ impl State {
                 let p = parse_duet(&singer).0;
                 if p.is_empty() { singer.clone() } else { p }
             };
-            normalized.push(Req { rid, singer, queue_singer, artist: o.get("artist").and_then(Value::as_str).unwrap_or("").trim().to_string(), title, key, tempo, sort: o.get("sort_order").cloned(), meta: order_meta_of(row) });
+            normalized.push(Req { rid, singer, queue_singer, artist: o.get("artist").and_then(Value::as_str).unwrap_or("").trim().to_string(), title, key, tempo, sort: o.get("sort_order").cloned(), meta: order_meta_of(row), session: first_truthy_value(row, &["singer_session_id", "session_id"]) });
         }
         
         let mut existing: BTreeSet<u64> = self.queue.iter().flat_map(|s| s.songs.iter().filter_map(|e| e.rid)).filter(|r| *r > 0).collect();
@@ -1113,7 +1150,7 @@ impl State {
                 continue;
             }
             let item = json!({"request_id": r.rid, "singer": r.singer, "queue_singer": r.queue_singer, "artist": r.artist, "title": r.title, "key": r.key,
-                              "tempo": r.tempo, "sort_order": r.sort.clone().unwrap_or(Value::Null), "pending_reason": "", "pending_status": "", "last_error": ""});
+                              "tempo": r.tempo, "sort_order": r.sort.clone().unwrap_or(Value::Null), "singer_session_id": r.session.clone(), "pending_reason": "", "pending_status": "", "last_error": ""});
             // the intake cap check sees the queue singer only (a duet partner is checked later, by the add itself)
             let parts = req_participants(&item);
             let limit = self.cur.active_limit();
@@ -1134,6 +1171,8 @@ impl State {
                 tempo: Some(100 + r.tempo),
                 skipped: false,
                 order: None,
+                sid: String::new(),
+                session: 0,
             };
             if self.process_external(&item, &r.singer, entry) {
                 for p in parts {
@@ -1355,7 +1394,7 @@ impl State {
         let key = int("key");
         let tempo = int("tempo").clamp(-30, 30);
         self.prune_expired_slots();
-        let entry = Entry { rid: Some(rid), local: None, artist: artist.clone(), title: title.clone(), song_info: format!("/lib/{artist}-{title}.zip"), duet: None, key, tempo: Some(100 + tempo), skipped: false, order: None };
+        let entry = Entry { rid: Some(rid), local: None, artist: artist.clone(), title: title.clone(), song_info: format!("/lib/{artist}-{title}.zip"), duet: None, key, tempo: Some(100 + tempo), skipped: false, order: None, sid: String::new(), session: 0 };
         if !self.process_external(&req, &singer, entry) {
             return (false, "not_added".into());
         }
@@ -1379,7 +1418,7 @@ impl State {
         }
         self.removed_tonight.insert(rid, item);
         self.handled.insert(rid);
-        let entry = Entry { rid: Some(rid), local: None, artist: row_str(&req, "artist"), title: row_str(&req, "title"), song_info: String::new(), duet: None, key: 0, tempo: None, skipped: false, order: None };
+        let entry = Entry { rid: Some(rid), local: None, artist: row_str(&req, "artist"), title: row_str(&req, "title"), song_info: String::new(), duet: None, key: 0, tempo: None, skipped: false, order: None, sid: String::new(), session: 0 };
         self.tombstone(rid, &entry, &row_str(&req, "singer"), "waiting_for_add_cleared", "removed");
         self.waitlist.remove(&rid);
         (true, "removed".into())
@@ -1553,7 +1592,18 @@ impl State {
         self.failed.clear();
         self.terminal_titles = ev.get("terminal_titles").and_then(Value::as_object).map(|o| o.iter().filter_map(|(k, v)| Some((k.parse::<u64>().ok()?, v.as_str()?.to_string()))).collect()).unwrap_or_default();
         self.queue_rev = ev.get("queue_revision").and_then(Value::as_i64).unwrap_or(0);
-        self.pending.clear();
+        self.pending = ev
+            .get("pending_order_syncs")
+            .and_then(Value::as_object)
+            .map(|o| {
+                o.iter()
+                    .map(|(k, v)| {
+                        let ids = v.get("request_ids").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_u64).collect()).unwrap_or_default();
+                        (k.clone(), Pending { ids, host: v.get("host_order_updated_at").and_then(Value::as_i64).unwrap_or(0), rev: v.get("order_revision").and_then(Value::as_i64).unwrap_or(0) })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         self.lock_count = 0;
         self.singer_alias.clear();
         self.next_uid = 1;
@@ -1570,7 +1620,7 @@ impl State {
                     None
                 };
                 let text = |k: &str| e.get(k).and_then(Value::as_str).unwrap_or("").to_string();
-                songs.push(Entry { rid, local, artist: text("artist"), title: text("title"), song_info: text("song_info"), duet: e.get("duet_display").and_then(Value::as_str).map(String::from), key: e.get("key").and_then(Value::as_i64).unwrap_or(0), tempo: e.get("tempo").and_then(Value::as_i64), skipped: f(&e, "skipped"), order: e.get("request_order").and_then(Value::as_f64) });
+                songs.push(Entry { rid, local, artist: text("artist"), title: text("title"), song_info: text("song_info"), duet: e.get("duet_display").and_then(Value::as_str).map(String::from), key: e.get("key").and_then(Value::as_i64).unwrap_or(0), tempo: e.get("tempo").and_then(Value::as_i64), skipped: f(&e, "skipped"), order: e.get("request_order").and_then(Value::as_f64), sid: String::new(), session: 0 });
             }
             let uid = self.next_uid;
             self.next_uid += 1;
@@ -1589,6 +1639,8 @@ impl State {
                 singer_ts: sv.get("singer_order_updated_at").and_then(Value::as_i64).unwrap_or(0),
                 order_rev: sv.get("order_revision").and_then(Value::as_i64).unwrap_or(0),
                 order_src: sv.get("last_order_source").and_then(Value::as_str).unwrap_or("").to_string(),
+                server_id: sv.get("server_singer_id").and_then(Value::as_str).unwrap_or("").to_string(),
+                server_session: sv.get("server_singer_session_id").and_then(Value::as_i64).unwrap_or(0),
                 songs,
             });
         }
@@ -1621,18 +1673,7 @@ impl State {
         self.failed.clear();
         self.terminal_titles.clear();
         self.queue_rev = 0;
-        self.pending = ev
-            .get("pending_order_syncs")
-            .and_then(Value::as_object)
-            .map(|o| {
-                o.iter()
-                    .map(|(k, v)| {
-                        let ids = v.get("request_ids").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_u64).collect()).unwrap_or_default();
-                        (k.clone(), Pending { ids, host: v.get("host_order_updated_at").and_then(Value::as_i64).unwrap_or(0), rev: v.get("order_revision").and_then(Value::as_i64).unwrap_or(0) })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+        self.pending.clear();
         self.lock_count = 0;
         self.removed = self.tombs.keys().copied().collect();
         (true, "restarted".into())
@@ -1653,13 +1694,14 @@ impl State {
                             in_queue.entry(r).or_default().push(e.alias());
                         }
                         json!({"id": e.alias(), "remote_request_id": e.rid, "artist": e.artist, "title": e.title, "song_info": e.song_info,
-                               "key": e.key, "tempo_percent": e.tempo, "skipped": e.skipped, "duet_display": e.duet, "request_order": e.order})
+                               "key": e.key, "tempo_percent": e.tempo, "skipped": e.skipped, "duet_display": e.duet, "request_order": e.order, "singer_session_id": e.session})
                     })
                     .collect();
                 json!({"id": format!("S{}", self.singer_alias.get(&s.uid).copied().unwrap_or(0)), "name": s.name, "skipped": s.skipped, "has_sung": s.has_sung,
                        "round_sung": s.round_sung, "rotation_marker": s.marker, "temporary_empty_slot": s.temp_empty, "rotation_lock_new": s.lock_new,
                        "rotation_lock_order": s.lock_order, "host_order_updated_at": s.host_ts, "singer_order_updated_at": s.singer_ts,
-                       "order_revision": s.order_rev, "last_order_source": s.order_src, "songs": songs})
+                       "order_revision": s.order_rev, "last_order_source": s.order_src, "server_singer_id": s.server_id,
+                       "server_singer_session_id": s.server_session, "songs": songs})
             })
             .collect();
         let view = |m: &BTreeMap<u64, Value>| -> Value {
