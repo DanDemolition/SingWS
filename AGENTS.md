@@ -392,6 +392,21 @@ change for any of them, re-run that module under `.venv-universal`:
 (`0.0 != 1.0`) rather than an ImportError, because the decode path degrades
 silently to zero instead of raising. The shipped .app is unaffected; it bundles its own Qt.
 
+**Measured 2026-11-05 (the full suite, 2568 tests, run in pieces; the venvs named above mostly no longer exist, this is what works now):**
+
+- `.venv-test-arm64-fresh` (Python 3.13, has PyQt6 6.9.1, `mpv`, `pyobjc`, `mutagen`, `pytest`) runs everything EXCEPT `test_dbw_parity`.
+  It needs a signed copy of its Qt platform plugins: `cp -R .venv-test-arm64-fresh/lib/python3.13/site-packages/PyQt6/Qt6/plugins/platforms $D;
+  codesign --force --sign - $D/*.dylib`, then `QT_QPA_PLATFORM=offscreen QT_QPA_PLATFORM_PLUGIN_PATH=$D`. Add `--ignore=test_dbw_parity.py`.
+- `test_dbw_parity` must run on a Python whose SQLite matches the one bundled in the Rust crates (3.50.x): the 3.13 venv links SQLite 3.53.4, which writes
+  a REAL into a TEXT column differently (`0.30000000000000004` vs `0.3`), a false failure. Use the system 3.14 / `.venv`:
+  `SINGWS_HOME=$(mktemp -d) .venv/bin/python -m unittest test_dbw_parity` (IDENTICAL).
+- `.venv-test-314` (system Python 3.14, SQLite 3.50.4) has the same packages but Qt will not start in it (its Qt frameworks are unsigned and signing them did not
+  help), so it is only good for non-Qt tests.
+- Several modules run PREBUILT Rust binaries from `~/.cache/singws-rust-target/` (`singws-shell`, the db CLIs, ...). A stale one makes tests hang or fail
+  (the Oct 26 `singws-shell` hung 90 s per test; 9 shell tests failed until it was rebuilt: `CARGO_TARGET_DIR=~/.cache/singws-rust-target cargo build -p singws-shell`
+  in `rust/`). Rebuild before blaming the code.
+- A venv missing `mutagen` makes `media_helpers.probe_duration_seconds` return 0.0 silently, which fails `test_phrase_detect` and the `libmpv` background test.
+
 Always run with a scratch `SINGWS_HOME` (see live-show rule 7);
 `tools/run_tests.sh` now creates and cleans one automatically.
 
