@@ -19,6 +19,31 @@ const CONFIDENT_MIN_S: f64 = 0.7;
 const CDG_SECTOR_THRESHOLD: f64 = 120.0;
 const END_OVERLAP_MS: i64 = 3200;
 
+/// `float(text)` for ASCII text: the six ASCII whitespace characters are stripped, a single underscore is allowed between digits, and inf/nan spellings
+/// parse. None is a ValueError (the app's `except` then uses its fallback). Non-ASCII text is treated as a ValueError (Python also accepts other scripts' digits).
+fn py_float_from_text(s: &str) -> Option<f64> {
+    if !s.is_ascii() {
+        return None;
+    }
+    let t = s.trim_matches(|c| matches!(c, ' ' | '\t' | '\n' | '\r' | '\x0b' | '\x0c'));
+    let b = t.as_bytes();
+    let mut cleaned = String::with_capacity(t.len());
+    for (i, &c) in b.iter().enumerate() {
+        if c == b'_' {
+            let ok = i > 0 && i + 1 < b.len() && b[i - 1].is_ascii_digit() && b[i + 1].is_ascii_digit();
+            if !ok {
+                return None;
+            }
+        } else {
+            cleaned.push(c as char);
+        }
+    }
+    if cleaned.is_empty() {
+        return None;
+    }
+    cleaned.parse::<f64>().ok()
+}
+
 enum Deferred {
     Audio { path: String, duration: f64, trailing: f64, source: String, runs_to_end: bool },
     Visual { path: String, safe: bool, visual_end: Option<f64>, conf: f64, reason: String },
@@ -209,6 +234,7 @@ impl Machine {
             None => Some(dflt),
             Some(Value::Number(n)) => n.as_f64(),
             Some(Value::Bool(b)) => Some(if *b { 1.0 } else { 0.0 }),
+            Some(Value::String(t)) => py_float_from_text(t),
             _ => None,
         }
     }

@@ -1,0 +1,18 @@
+[package]
+name = "singws-settingsmig"
+version = "0.1.0"
+edition = "2021"
+description = "Offline port of the one-off settings migrations that KaraokeApp.__init__ applies to a loaded settings.json (the *_migrated flags and their value rewrites). Pure: settings object in, settings object out. Proof only: Python still runs them; tools/settings_migrate_parity.py compares both on a large corpus."
+publish = false
+
+[lib]
+name = "singws_settingsmig"
+path = "src/lib.rs"
+
+[[bin]]
+name = "singws-settingsmig"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = { version = "1.0.151", features = ["float_roundtrip", "preserve_order"] }
+singws-dbw = { path = "../singws-dbw" }

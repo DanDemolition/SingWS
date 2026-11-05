@@ -638,6 +638,7 @@ def scripted():
     out.append(scen("scan_audio_runs_to_end_mp4", [start(0, "mp4", 120.0, dict(arm_runs, scan_probe=120.0), duration_hint=120.0, audio_path="/t/y.mp4")], 135))
     out.append(scen("scan_zero_trailing_not_proven", [start(0, "cdg", 200.0, dict(arm_runs, scan_audible_end=False), duration_hint=200.0)], 215))
     arm_scan_cap = {"scan_probe": 200.0, "scan_trailing": 6.0}
+    arm_leg_for_omit = {"cached": {LIB: {"duration": 200.0, "audio_end": 190.0}, "/t/x.cdg": {"visual_end": 192.0, "visual_confidence": 0.9}}}
     # --- settings keys missing from an old settings file (each side's built-in default must agree)
     for key in ("bgm_fallback_prestart_sec",):
         out.append(scen(f"omit_{key}", [start(0, "cdg", 200.0, {"scan_probe": "raise", "scan_trailing": "raise"}, duration_hint=200.0)], 215, _omit=(key,)))
@@ -647,6 +648,20 @@ def scripted():
         out.append(scen(f"omit_{key}_fallback", [start(0, "cdg", 100.0, {"scan_probe": "raise", "scan_trailing": "raise"}, duration_hint=100.0)], 115, _omit=(key,)))
     out.append(scen("omit_all_audio_settings", [start(0, "cdg", 200.0, arm_ok, library_path=LIB, duration_hint=200.0)], 215,
                     _omit=tuple(BASE)))
+    # --- a numeric setting holding something that is not a number (hand-edited or very old settings.json): each side's fallback must agree
+    for key, shape in (("bgm_overlap_before_audio_end_sec", "verified"), ("bgm_fallback_prestart_sec", "fallback"), ("bg_volume", "verified"), ("bg_volume", "fallback"),
+                       ("end_silence_trim_threshold_sec", "verified")):
+        for bad_i, bad in enumerate(("abc", None, "", [], "3.5", True)):
+            if shape == "verified":
+                sc_list = [start(0, "cdg", 200.0, arm_ok, library_path=LIB, duration_hint=200.0)]
+                run_s = 215
+            else:
+                sc_list = [start(0, "cdg", 100.0, {"scan_probe": "raise", "scan_trailing": "raise"}, duration_hint=100.0)]
+                run_s = 115
+            out.append(scen(f"bad_value_{key}_{shape}_{bad_i}", sc_list, run_s, **{key: bad}))
+    # karaoke_auto_advance missing while the legacy detector decides the early end
+    out.append(scen("legacy_omit_auto_advance", [start(0, "cdg", 200.0, arm_leg_for_omit, library_path=LIB, duration_hint=200.0, sectors=50)], 215,
+                    _omit=("karaoke_auto_advance",), karaoke_trim_verified_tail=False, karaoke_allow_early_silence_trim=True, end_silence_trim_enabled=True))
     # --- exact boundaries
     out.append(scen("record_tail_exactly_point_three", [start(0, "cdg", 200.0, {"cached": {LIB: {"duration": 0.3, "audio_end": 0.0}}, "scan_probe": 200.0, "scan_trailing": 1.0}, library_path=LIB, duration_hint=200.0)], 215))
     out.append(scen("scan_trailing_exactly_the_cap", [start(0, "cdg", 200.0, dict(arm_scan_cap, scan_trailing=8.0), duration_hint=200.0)], 215))
