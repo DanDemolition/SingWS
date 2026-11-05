@@ -443,3 +443,39 @@ Oracle: the real `_apply_resolved_remote_add` / `_queue_deferred_remote_add` / `
 
 Not modelled: the async intake worker (`_start_remote_request_intake_worker`, used by the real app on the GUI thread; the harness runs the synchronous path), `_flush_deferred_remote_adds` triggered by the `media_end` / `before_play_next` / settings-off hooks (the
 event `flush_deferred` is those hooks' effect), the persistence file itself, and the shadow (`queue_state_shadow` still skips any poll while the held list is non-empty).
+
+## M9: rename and merge of singers (Stage B step 4, slice E)
+
+Oracle: the real `shell_queue_rename_singer`, `_rename_rotation_singer`, `_merge_duplicate_rotation_singers` (+ `_absorb_duplicate_singer`), `_record_singer_rename_alias`, `_resolve_singer_alias`, `_alias_mapped_request`,
+`_apply_singer_rename_to_requests`. Harness events: `rename_singer` {singer, name} (the shell/rotation-menu path: refuses `bad_name`, answers `no_change`, refuses `name_taken`) and `rename_merge` {singer, name} (the
+real `_rename_rotation_singer` with `source="sync"`: merges into an existing row, the host's confirmed merge or a sync/remote rename). Snapshot: per singer `created_at`, top level `rename_aliases` (retired name key -> surviving
+name; memory only, a restart forgets it). New cases `rename_*`, `merge*`, `retired_name_*`, `alias_chains_collapse`, `rename_rewrites_held_rows`, `waitlist_rows_listed_under_a_retired_name_are_mapped`; generator picks `rename`, `rename_merge`.
+
+### Rules
+
+1. **Rename** (`_rename_rotation_singer`): stripped old/new names; refused (False) when either is empty or they are IDENTICAL after stripping (a case-only change is a rename). The row gets the new name, then the duplicate merge runs;
+   the surviving row's own spelling is the "canonical" name (found by the plain name match). The old key is recorded as an alias of the canonical name (chains collapse: every alias that pointed at the retired key now points at the canonical),
+   and stored request rows follow the rename.
+2. **Merge** (`_merge_duplicate_rotation_singers`): rows whose names match case/space-insensitively collapse into the OLDEST (smallest `created_at`, a row without one counts as 0 = oldest, ties by position). The survivor keeps its
+   songs and the others' songs are appended in group order (exact duplicate request ids are then cleaned). Flags: `has_sung`/`round_sung`/marker are OR-ed, `skipped` only stays if EVERY member was skipped, `created_at` becomes the
+   earliest non-zero, `rotation_lock_order` is taken from a duplicate only if the survivor has none, `rotation_lock_new` if any member has it. Placement: the FIRST member's slot, but the LAST member's slot when any member has already
+   sung ("a renamed singer must not jump ahead of waiting singers"). Afterwards the marker is repaired (rotation mode) and the round state recomputed. The same pass runs at the start and the end of every reconcile (a no-op while no duplicates exist).
+3. **Shell rename** (`rename_singer`): empty, > 60 characters or a control character -> `bad_name`; the same name (stripped, exact) -> `no_change`; a name that already belongs to ANOTHER row (case/space-insensitive) -> `name_taken`.
+   So the shell path can never merge; only `rename_merge` (the interactive confirm, sync, remote renames) does.
+4. **Aliases** are consulted twice: a remote add names its singer through `_resolve_singer_alias` (so a request still filed under a retired name lands on the survivor, also after several hops, and it is checked against the survivor's cap),
+   and the waitlist rebuild maps each row's `singer` through them (copy on write). The reconcile's intake pre-check, wire order and per-poll counts still use the name AS LISTED by the server.
+5. **Stored rows follow a rename:** waitlist and attention rows whose `singer` has the retired key get the canonical name; held (deferred) payloads get it on the payload's own `singer` only. The request row inside the payload
+   (which the song-limit participants and the later attention records read) keeps the old text; `item.get("request")`, the key `_apply_singer_rename_to_requests` looks for, does not exist.
+
+### Surprises (reported, NOT changed)
+
+- A held request keeps its OLD singer text inside its request row after a rename (rule 5), so the cap check for that held request, and any attention record it later makes, still use the retired name.
+- `rotation_advance` for a singer that has left the queue (merged away or removed) still answers (`next_index=...`): the app's selection treats the unknown id as "no row is the same singer". The replay keeps handing out aliases for departed rows, so the model resolves them too.
+- A held `waitlist_add` does not run the empty-slot expiry (only the real add does), so a slot that expired while the request was held stays flagged until the flush (`a_held_waitlist_add_does_not_expire_empty_slots`). The Rust model used to prune up front; it no longer does.
+- The retired-name alias exists only in memory: after a restart a request filed under the old name creates a new row again.
+
+Not modelled: singer preferences/history merging (`_merge_singer_prefs_and_history`), the server push of the rename, now-playing references, the singer-level `duet_display` (queue code never sets it), and the interactive collision prompt (the harness event `rename_merge` is the answered "Merge").
+
+Slice E result: full `parity --seeds 400 --length 80` IDENTICAL on 489/489; the related unit tests (130) and the crate tests (7) pass. Mutation (37 new mutants, `MUTATE_SEEDS=100`): 25 killed, 5 + 4 documented
+equivalent (attention rows never carry a plain row name; the payload rewrite is covered by the alias; the survivor is already the oldest; merged rows never share a request id), 6 survivors then resolved by a marker case, more seeds, or the
+equivalents above; every new mutant was re-checked alone. The previous slices' mutants were not re-run in full after slice E (only the new ones).
