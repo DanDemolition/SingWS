@@ -51,3 +51,33 @@ class EndAudioCreditCap(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AudioRunsToEnd(EndAudioCreditCap):
+    """trailing == 0.0 is ambiguous; only a scan that PROVED the last half second audible makes the file end the verified audio end."""
+
+    def apply_end(self, duration, trailing, **kw):
+        app = self.bare_app()
+        app._karaoke_audio_end_path = "/t/x.mp3"
+        lines = []
+        with mock.patch.object(self.singws, "_diag", lambda text, *a, **k: lines.append(str(text))):
+            app._apply_audio_end_floor("/t/x.mp3", duration, trailing, "scan", **kw)
+        return app, lines
+
+    def test_zero_trailing_without_proof_stays_unverified(self):
+        app, lines = self.apply_end(200.0, 0.0)
+        self.assertIsNone(app._karaoke_audio_end_s)
+        self.assertTrue(any("no trailing silence found" in x for x in lines), lines)
+
+    def test_zero_trailing_with_proof_makes_the_file_end_the_audio_end(self):
+        app, lines = self.apply_end(200.0, 0.0, runs_to_end=True)
+        self.assertEqual(app._karaoke_audio_end_s, 200.0)
+        self.assertTrue(any("audio runs to the end of the file" in x for x in lines), lines)
+
+    def test_proof_is_ignored_when_there_is_real_trailing_silence(self):
+        app, _ = self.apply_end(200.0, 5.5, runs_to_end=True)
+        self.assertAlmostEqual(app._karaoke_audio_end_s, 194.5, places=2)
+
+    def test_proof_needs_a_known_duration(self):
+        app, _ = self.apply_end(0.0, 0.0, runs_to_end=True)
+        self.assertIsNone(app._karaoke_audio_end_s)

@@ -20,7 +20,7 @@ const CDG_SECTOR_THRESHOLD: f64 = 120.0;
 const END_OVERLAP_MS: i64 = 3200;
 
 enum Deferred {
-    Audio { path: String, duration: f64, trailing: f64, source: String },
+    Audio { path: String, duration: f64, trailing: f64, source: String, runs_to_end: bool },
     Visual { path: String, safe: bool, visual_end: Option<f64>, conf: f64, reason: String },
 }
 
@@ -310,7 +310,7 @@ impl Machine {
 
     fn deliver(&mut self, id: i64) {
         match self.deferred.remove(&id) {
-            Some(Deferred::Audio { path, duration, trailing, source }) => self.apply_audio_end_floor(&path, duration, trailing, &source),
+            Some(Deferred::Audio { path, duration, trailing, source, runs_to_end }) => self.apply_audio_end_floor(&path, duration, trailing, &source, runs_to_end),
             Some(Deferred::Visual { path, safe, visual_end, conf, reason }) => self.apply_visual_end_floor(&path, safe, visual_end, conf, &reason),
             None => {}
         }
@@ -407,7 +407,7 @@ impl Machine {
                     if rec_dur > 0.0 {
                         let tail = 0.0_f64.max(rec_dur - rec_end);
                         if tail >= 0.3 {
-                            self.apply_audio_end_floor(audio_path, rec_dur, tail, "library-cache");
+                            self.apply_audio_end_floor(audio_path, rec_dur, tail, "library-cache", false);
                             return;
                         }
                     }
@@ -417,8 +417,9 @@ impl Machine {
         let cached = self.snap["arm"]["trailing_cached"][audio_path].as_f64();
         let true_dur = self.snap["audio_true_duration"][audio_path].as_f64().unwrap_or(0.0);
         if let Some(c) = cached {
-            if true_dur > 0.0 {
-                self.apply_audio_end_floor(audio_path, true_dur, c, "cache");
+            // a cached 0.0 is ambiguous (see audible_through_end in phrase_detect.py), so it is re-scanned, never trusted
+            if c > 0.0 && true_dur > 0.0 {
+                self.apply_audio_end_floor(audio_path, true_dur, c, "cache", false);
                 return;
             }
         }
@@ -443,16 +444,23 @@ impl Machine {
                 return;
             }
         };
-        self.run_on_ui_thread(Deferred::Audio { path: audio_path.to_string(), duration: scan_duration, trailing, source: "scan".into() });
+        // trailing == 0.0 is ambiguous: only a clearly audible last half second proves the audio runs to the end of the file
+        let runs_to_end = trailing <= 0.0 && self.snap["arm"]["scan_audible_end"].as_bool().unwrap_or(false);
+        self.run_on_ui_thread(Deferred::Audio { path: audio_path.to_string(), duration: scan_duration, trailing, source: "scan".into(), runs_to_end });
     }
 
-    fn apply_audio_end_floor(&mut self, path: &str, duration: f64, trailing: f64, source: &str) {
+    fn apply_audio_end_floor(&mut self, path: &str, duration: f64, trailing: f64, source: &str, runs_to_end: bool) {
         if path != self.audio_end_path {
             return;
         }
         let mut trailing = 0.0_f64.max(trailing);
         if duration > 0.0 {
             self.audio_dur = Some(duration);
+        }
+        if trailing <= 0.0 && runs_to_end && duration > 0.0 {
+            self.audio_end = Some(duration);
+            self.log(format!("[END-AUDIO] audio runs to the end of the file; end verified at {:.2}s source={} file={}", duration, source, base(path)));
+            return;
         }
         if trailing <= 0.0 {
             self.audio_end = None;

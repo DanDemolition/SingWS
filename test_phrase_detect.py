@@ -311,6 +311,16 @@ class DetectTrailingSilenceTests(ToneWavFixture, unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "duration unavailable"):
                 pd.detect_trailing_silence(path, raise_on_error=True)
 
+    def test_audible_through_end_true_when_music_runs_to_the_last_sample(self):
+        path = self._write_wav((2.0, 0.5))
+        self.assertTrue(pd.audible_through_end(path))
+
+    def test_audible_through_end_false_for_silent_hiss_quiet_or_missing_tail(self):
+        for tail in ((1.5, 0.0), (1.5, 0.001), (1.5, 0.005)):
+            path = self._write_wav((2.0, 0.5), tail)
+            self.assertFalse(pd.audible_through_end(path), tail)
+        self.assertFalse(pd.audible_through_end("/nonexistent/file.mp3"))
+
     def test_tone_to_the_end_returns_zero(self):
         path = self._write_wav((2.0, 0.5))
         self.assertAlmostEqual(pd.detect_trailing_silence(path), 0.0, delta=0.15)

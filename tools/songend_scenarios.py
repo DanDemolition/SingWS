@@ -412,7 +412,9 @@ def run(scenario):
                 if v in (None, "raise"):
                     raise RuntimeError("probe")
                 return v
-            main.phrase_detect = types.SimpleNamespace(probe_duration_seconds=probe)
+            def audible_end(path, duration_hint=0.0):
+                return bool(world.sc_state["arm"].get("scan_audible_end", False))
+            main.phrase_detect = types.SimpleNamespace(probe_duration_seconds=probe, audible_through_end=audible_end)
 
             def det(path, duration_hint=None, raise_on_error=False):
                 v = world.sc_state["arm"].get("scan_trailing")
@@ -629,6 +631,10 @@ def scripted():
     sc_ = scen("late_ticks_around_end", [start(0, "cdg", 200.0, arm_ok, library_path=LIB, duration_hint=200.0)], 215)
     sc_["tick_skips"] = [[196, 205]]
     out.append(sc_)
+    arm_runs = {"scan_probe": 200.0, "scan_trailing": 0.0, "scan_audible_end": True}
+    out.append(scen("scan_audio_runs_to_end", [start(0, "cdg", 200.0, arm_runs, duration_hint=200.0)], 215))
+    out.append(scen("scan_audio_runs_to_end_mp4", [start(0, "mp4", 120.0, dict(arm_runs, scan_probe=120.0), duration_hint=120.0, audio_path="/t/y.mp4")], 135))
+    out.append(scen("scan_zero_trailing_not_proven", [start(0, "cdg", 200.0, dict(arm_runs, scan_audible_end=False), duration_hint=200.0)], 215))
     out.append(scen("fallback_cdg", [start(0, "cdg", 200.0, {"scan_probe": "raise", "scan_trailing": "raise"}, duration_hint=200.0)], 215))
     for lead in (0.5, 2.0, 5.0, 8.0, 12.0):
         out.append(scen(f"fallback_prestart_{lead}", [start(0, "mp4", 120.0, {"scan_probe": "raise", "scan_trailing": "raise"}, duration_hint=120.0, audio_path="/t/y.mp4")], 130,
@@ -763,7 +769,7 @@ def random_scenario(seed):
     dur_audio = max(10.0, dur_audio)
     tail = r.choice([0.0, 0.2, r.uniform(0.3, 3.0), r.uniform(3.0, 12.0), r.uniform(12.0, 25.0)])
     arm = {}
-    src = r.choice(["library", "cache", "scan", "scan_fail", "none"])
+    src = r.choice(["library", "cache", "scan", "scan_runs", "scan_fail", "none"])
     audio_path = "/t/x.mp3" if mode == "cdg" else "/t/x.mp4"
     if src == "library":
         arm["cached"] = {LIB: {"duration": round(dur_audio, 3), "audio_end": round(max(0.0, dur_audio - tail), 3)}}
@@ -771,6 +777,8 @@ def random_scenario(seed):
         arm["trailing_cached"] = {audio_path: round(tail, 3)}
     elif src == "scan":
         arm.update({"scan_probe": round(dur_audio, 3), "scan_trailing": round(tail, 3)})
+    elif src == "scan_runs":
+        arm.update({"scan_probe": round(dur_audio, 3), "scan_trailing": 0.0, "scan_audible_end": r.random() < 0.7})
     elif src == "scan_fail":
         arm.update({"scan_probe": r.choice([None, "raise"]), "scan_trailing": "raise"})
     else:

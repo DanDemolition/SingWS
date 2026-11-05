@@ -42993,7 +42993,8 @@ class KaraokeApp(QWidget):
 
         cached = trailing_silence_cached(audio_path)
         true_dur = float(self.__dict__.get("_audio_true_duration", {}).get(str(audio_path), 0.0) or 0.0)
-        if cached is not None and true_dur > 0.0:
+        # A cached 0.0 is ambiguous (see phrase_detect.audible_through_end), so it is re-scanned, never trusted.
+        if cached is not None and float(cached) > 0.0 and true_dur > 0.0:
             self._apply_audio_end_floor(audio_path, true_dur, float(cached), "cache")
             return
 
@@ -43027,11 +43028,20 @@ class KaraokeApp(QWidget):
             # no event loop, so the callback never runs. The scan completed and
             # posted its answer into a void -- which is why [END-AUDIO] still
             # logged nothing at all after the last fix.
+            # trailing == 0.0 is ambiguous. Only a clearly audible last half second proves the audio runs to the end of the file; that
+            # is then a VERIFIED end (the unverified fallback pre-start no longer applies to it).
+            extra = {}
+            if trailing <= 0.0:
+                try:
+                    if phrase_detect.audible_through_end(scan_path, duration_hint=scan_duration):
+                        extra["runs_to_end"] = True
+                except Exception:
+                    pass
             try:
                 self.__dict__.setdefault("_audio_true_duration", {})[str(scan_path)] = float(scan_duration)
                 self._run_on_ui_thread(
                     lambda: self._apply_audio_end_floor(
-                        scan_path, scan_duration, trailing, "scan"
+                        scan_path, scan_duration, trailing, "scan", **extra
                     )
                 )
             except Exception as e:
@@ -43047,7 +43057,7 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
 
-    def _apply_audio_end_floor(self, scan_path: str, duration: float, trailing: float, source: str):
+    def _apply_audio_end_floor(self, scan_path: str, duration: float, trailing: float, source: str, runs_to_end: bool = False):
         # A late scan must not be applied to whatever is playing now.
         if str(scan_path) != str(getattr(self, "_karaoke_audio_end_path", "")):
             return
@@ -43058,6 +43068,13 @@ class KaraokeApp(QWidget):
             return
         if duration > 0.0:
             self._karaoke_audio_duration_s = duration
+        if trailing <= 0.0 and runs_to_end and duration > 0.0:
+            self._karaoke_audio_end_s = duration
+            _diag(
+                f"[END-AUDIO] audio runs to the end of the file; end verified at {duration:.2f}s "
+                f"source={source} file={os.path.basename(scan_path)}"
+            )
+            return
         if trailing <= 0.0:
             self._karaoke_audio_end_s = None
             _diag(

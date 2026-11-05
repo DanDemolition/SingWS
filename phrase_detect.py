@@ -215,6 +215,47 @@ def detect_trailing_silence(
         return 0.0
 
 
+def audible_through_end(
+    path: str,
+    window_seconds: float = 0.5,
+    threshold_db: float = -40.0,
+    sr: int = 16000,
+    *,
+    duration_hint: float = 0.0,
+) -> bool:
+    """True only when the LAST ``window_seconds`` of the file are clearly programme audio.
+
+    detect_trailing_silence answers 0.0 for several different situations (music runs to the last sample, a fully silent tail, a quiet
+    outro, steady hiss), so a 0.0 cannot be read as "the audio ends at the end of the file". This probe separates the first case: a
+    loud-enough final window means the audio genuinely ends with the file. Any doubt (missing file, decode problem, short decode) is False.
+    """
+    try:
+        import os
+
+        if not path or not os.path.exists(str(path)):
+            return False
+        sr = max(1000, int(sr))
+        window_seconds = max(0.1, float(window_seconds))
+        duration = probe_duration_seconds(path)
+        if duration <= 0:
+            duration = max(0.0, float(duration_hint or 0.0))
+        if not np.isfinite(duration) or duration <= 0:
+            return False
+        samples = _decode_pcm(
+            path, sr=sr, channels=2,
+            start_seconds=max(0.0, duration - (window_seconds + 1.5)), timeout=20)
+        frames = samples.size // 2
+        need = int(round(window_seconds * sr))
+        if frames < need:
+            return False
+        tail = samples[: frames * 2].reshape(-1, 2)[-need:].astype(np.float64)
+        rms = np.sqrt(np.mean(np.square(tail), axis=0))
+        level_db = 20.0 * np.log10(max(float(rms.max()), 1e-9))
+        return bool(level_db > float(threshold_db))
+    except Exception:
+        return False
+
+
 def peaks(pcm: np.ndarray, n_cols: int) -> np.ndarray:
     """min/max envelope per output column for the waveform.
     Returns an (n_cols, 2) array of (min, max) in [-1, 1]."""
