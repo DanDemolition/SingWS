@@ -1621,7 +1621,18 @@ impl State {
         self.failed.clear();
         self.terminal_titles.clear();
         self.queue_rev = 0;
-        self.pending.clear();
+        self.pending = ev
+            .get("pending_order_syncs")
+            .and_then(Value::as_object)
+            .map(|o| {
+                o.iter()
+                    .map(|(k, v)| {
+                        let ids = v.get("request_ids").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_u64).collect()).unwrap_or_default();
+                        (k.clone(), Pending { ids, host: v.get("host_order_updated_at").and_then(Value::as_i64).unwrap_or(0), rev: v.get("order_revision").and_then(Value::as_i64).unwrap_or(0) })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         self.lock_count = 0;
         self.removed = self.tombs.keys().copied().collect();
         (true, "restarted".into())

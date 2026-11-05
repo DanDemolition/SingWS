@@ -4,6 +4,7 @@ import _test_profile  # noqa: F401  (isolate SINGWS_HOME before the app is loade
 import contextlib
 import json
 import os
+import copy
 import random
 import subprocess
 import sys
@@ -104,7 +105,9 @@ class AdversarialRuleTests(unittest.TestCase):
         steps = qr.run_stream(qr.PythonImpl(), self.cases["restart_keeps_ids_and_order"])
         order = lambda snap: [[x["id"] for x in s["songs"]] for s in snap["queue"] if s["id"] == "S1"][0]
         self.assertEqual(order(steps[2]["snapshot"]), ["R1001", "R1002"])
-        self.assertEqual(order(steps[-1]["snapshot"]), ["R1002", "R1001"])
+        # Since the harness runs the REAL _sync_remote_singer_order (it was stubbed before), every add leaves a host order stamp on the singer and the stamp survives
+        # the restart, so a plain relist (no newer stamp) no longer reorders: production does push the host's order first. The old pin was an artifact of the stub.
+        self.assertEqual(order(steps[-1]["snapshot"]), ["R1001", "R1002"])
 
     def test_remove_singer_tombstones_every_request(self):
         snap = final(self.cases["remove_singer_removes_all_their_requests"])
@@ -137,10 +140,19 @@ class ReorderingTests(unittest.TestCase):
     def test_commuting_removals_and_skips_in_any_order_give_the_same_final_state(self):
         tail = [{"op": "remove_song", "entry": f"R{2000 + i}"} for i in (1, 3, 6, 9)] + [{"op": "skip_singer", "singer": f"S{i}", "skipped": True} for i in (1, 3)]
         stream = self.base() + tail
-        want = qr.canonical(final(stream))
+        def strip(snap):
+            # host order stamps, revisions and pending host orders depend on WHEN each removal ran (time-based stamps, a counter): bookkeeping, not queue state
+            snap = copy.deepcopy(snap)
+            for key in ("queue_revision", "pending_order_syncs"):
+                snap.pop(key, None)
+            for s in snap["queue"]:
+                for key in ("host_order_updated_at", "order_revision"):
+                    s.pop(key, None)
+            return snap
+        want = qr.canonical(strip(final(stream)))
         for seed in range(12):
             other = self.base() + qr.equivalent_reordering(tail, random.Random(seed))
-            self.assertEqual(qr.canonical(final(other)), want, seed)
+            self.assertEqual(qr.canonical(strip(final(other))), want, seed)
 
     def test_arrival_batch_order_is_NOT_commutative(self):
         """Finding, pinned: rows of one poll are inserted in the order the server lists them, so batch order decides queue order
