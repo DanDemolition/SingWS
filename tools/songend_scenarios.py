@@ -579,9 +579,11 @@ BASE = {"seamless_transitions_enabled": True, "karaoke_bgm_crossfade_enabled": T
         "bgm_overlap_before_audio_end_sec": 2.0, "bgm_fallback_prestart_sec": 5.0, "end_silence_trim_threshold_sec": 2.5}
 
 
-def scen(name, script, run_s, **settings):
+def scen(name, script, run_s, _omit=(), **settings):
     s = dict(BASE)
     s.update(settings)
+    for key in _omit:      # an older settings.json simply lacks the key: both sides must fall back to their built-in default
+        s.pop(key, None)
     return {"name": name, "settings": s, "script": script, "run_ms": int(run_s * 1000)}
 
 
@@ -635,6 +637,31 @@ def scripted():
     out.append(scen("scan_audio_runs_to_end", [start(0, "cdg", 200.0, arm_runs, duration_hint=200.0)], 215))
     out.append(scen("scan_audio_runs_to_end_mp4", [start(0, "mp4", 120.0, dict(arm_runs, scan_probe=120.0), duration_hint=120.0, audio_path="/t/y.mp4")], 135))
     out.append(scen("scan_zero_trailing_not_proven", [start(0, "cdg", 200.0, dict(arm_runs, scan_audible_end=False), duration_hint=200.0)], 215))
+    arm_scan_cap = {"scan_probe": 200.0, "scan_trailing": 6.0}
+    # --- settings keys missing from an old settings file (each side's built-in default must agree)
+    for key in ("bgm_fallback_prestart_sec",):
+        out.append(scen(f"omit_{key}", [start(0, "cdg", 200.0, {"scan_probe": "raise", "scan_trailing": "raise"}, duration_hint=200.0)], 215, _omit=(key,)))
+    for key in ("bgm_overlap_before_audio_end_sec", "karaoke_trim_verified_tail", "karaoke_auto_advance", "bg_volume", "bg_enabled",
+                "bg_autoplay_on_idle", "seamless_transitions_enabled", "karaoke_bgm_crossfade_enabled", "end_silence_trim_threshold_sec"):
+        out.append(scen(f"omit_{key}", [start(0, "cdg", 200.0, arm_ok, library_path=LIB, duration_hint=200.0)], 215, _omit=(key,)))
+        out.append(scen(f"omit_{key}_fallback", [start(0, "cdg", 100.0, {"scan_probe": "raise", "scan_trailing": "raise"}, duration_hint=100.0)], 115, _omit=(key,)))
+    out.append(scen("omit_all_audio_settings", [start(0, "cdg", 200.0, arm_ok, library_path=LIB, duration_hint=200.0)], 215,
+                    _omit=tuple(BASE)))
+    # --- exact boundaries
+    out.append(scen("record_tail_exactly_point_three", [start(0, "cdg", 200.0, {"cached": {LIB: {"duration": 0.3, "audio_end": 0.0}}, "scan_probe": 200.0, "scan_trailing": 1.0}, library_path=LIB, duration_hint=200.0)], 215))
+    out.append(scen("scan_trailing_exactly_the_cap", [start(0, "cdg", 200.0, dict(arm_scan_cap, scan_trailing=8.0), duration_hint=200.0)], 215))
+    out.append(scen("scan_trailing_just_over_the_cap", [start(0, "cdg", 200.0, dict(arm_scan_cap, scan_trailing=8.01), duration_hint=200.0)], 215))
+    for conf in (0.85, 0.8499, 0.8501):
+        out.append(scen(f"visual_cache_conf_{conf}", [start(0, "cdg", 200.0, {"cached": {LIB: {"duration": 200.0, "audio_end": 193.0}, "/t/x.cdg": {"visual_end": 195.0, "visual_confidence": conf}}}, library_path=LIB, duration_hint=200.0)], 215))
+        out.append(scen(f"visual_scan_conf_{conf}", [start(0, "cdg", 200.0, {"cached": {LIB: {"duration": 200.0, "audio_end": 193.0}}, "cdg_scan": {"safe": True, "visual_end": 194.0, "confidence": conf, "reason": "verified_final_clear"}}, library_path=LIB, duration_hint=200.0)], 215))
+    # single failing operand of the visual-scan acceptance test, and of the cached record test
+    base_cached = {LIB: {"duration": 200.0, "audio_end": 193.0}}
+    out.append(scen("visual_scan_unsafe_only", [start(0, "cdg", 200.0, {"cached": base_cached, "cdg_scan": {"safe": False, "visual_end": 194.0, "confidence": 0.95, "reason": "verified_final_clear"}}, library_path=LIB, duration_hint=200.0)], 215))
+    out.append(scen("visual_scan_no_end_only", [start(0, "cdg", 200.0, {"cached": base_cached, "cdg_scan": {"safe": True, "visual_end": None, "confidence": 0.95, "reason": "verified_final_clear"}}, library_path=LIB, duration_hint=200.0)], 215))
+    out.append(scen("visual_scan_low_conf_only", [start(0, "cdg", 200.0, {"cached": base_cached, "cdg_scan": {"safe": True, "visual_end": 194.0, "confidence": 0.5, "reason": "verified_final_clear"}}, library_path=LIB, duration_hint=200.0)], 215))
+    out.append(scen("visual_cache_negative_end_only", [start(0, "cdg", 200.0, {"cached": {LIB: {"duration": 200.0, "audio_end": 193.0}, "/t/x.cdg": {"visual_end": -1.0, "visual_confidence": 0.95}}}, library_path=LIB, duration_hint=200.0)], 215))
+    out.append(scen("visual_scan_empty_reason_cdg", [start(0, "cdg", 200.0, {"cached": base_cached, "cdg_scan": {"safe": False, "visual_end": None, "confidence": 0.0, "reason": ""}}, library_path=LIB, duration_hint=200.0)], 215))
+    out.append(scen("visual_scan_reason_mp4", [start(0, "mp4", 200.0, {"cached": base_cached, "cdg_scan": {"safe": False, "visual_end": None, "confidence": 0.0, "reason": "static_or_active_nonblank_final_screen"}}, library_path=LIB, audio_path="/t/x.mp4", visual_path="/t/x.mp4")], 215))
     out.append(scen("fallback_cdg", [start(0, "cdg", 200.0, {"scan_probe": "raise", "scan_trailing": "raise"}, duration_hint=200.0)], 215))
     for lead in (0.5, 2.0, 5.0, 8.0, 12.0):
         out.append(scen(f"fallback_prestart_{lead}", [start(0, "mp4", 120.0, {"scan_probe": "raise", "scan_trailing": "raise"}, duration_hint=120.0, audio_path="/t/y.mp4")], 130,

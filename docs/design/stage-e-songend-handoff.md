@@ -157,7 +157,7 @@ clock exists; the only levers are the detection time, the 120 ms, the 1000 ms fa
 ## Coverage
 
 Parity: 109 scripted + 400 seeded-random scenarios (500+ events each on average), identical commands, return values and state after every event.
-Mutation: 491 mutants, 338 killed in the first pass; two survivor rounds against an extended corpus killed 11 more (about 349); 88 survive and are labelled GAP-default 38, GAP-tie 30, GAP-return 10, GAP-other 7, equivalent 3 (see `tools/mutants_songend.py`). They are open gaps, not proofs of equivalence, except the 3 labelled equivalent. Mutation: `tools/mutate_songend.py` generates mutants mechanically on every code line of `Machine::event` onward
+Mutation: 507 mutants (after the audio-runs-to-end rule and 35 more scenarios on 2026-11-05: omitted settings keys, exact boundaries, single-failing-operand cases), 369 killed; 83 survive (was 88 of 491): GAP-default 31, GAP-tie 32, GAP-return 10, GAP-other 5, equivalent 5 (the earlier text below is the 491-mutant history) (see `tools/mutants_songend.py`). They are open gaps, not proofs of equivalence, except the 3 labelled equivalent. Mutation: `tools/mutate_songend.py` generates mutants mechanically on every code line of `Machine::event` onward
 (comparison operators, `&&`/`||`, negation, numeric constants, `true`/`false`, `min`/`max`, `+`/`-`), builds each in a detached copy of the crate, and
 requires the parity corpus to change; survivors are listed with a reason in `tools/mutants_songend.py`.
 

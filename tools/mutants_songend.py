@@ -7,7 +7,12 @@ classify() labels the rest by pattern. Honest reading of the labels:
   GAP-other   anything else (listed in the design doc)"""
 import re
 
-NOTES = {}
+NOTES = {
+    # the `runs_to_end` argument only matters when trailing <= 0; both cache paths call apply_audio_end_floor with a trailing > 0
+    # (library record: tail >= 0.3; trailing cache: c > 0.0), so flipping the flag there cannot change anything
+    "L410:false->true": "equivalent: runs_to_end is only read when trailing <= 0 and this path always has tail >= 0.3",
+    "L422:false->true": "equivalent: runs_to_end is only read when trailing <= 0 and this path requires c > 0.0",
+}
 
 
 def classify(snippet, old, new):
