@@ -1,0 +1,17 @@
+[package]
+name = "singws-karafun"
+version = "0.1.0"
+edition = "2021"
+description = "Offline port of the KaraFun search AppleScript builder (KaraokeApp._karafun_search_script, karafun_match_title, _karafun_applescript_literal). Pure: query and flags in, script lines out. Proof only: Python still builds and runs the script; tools/karafun_script_parity.py compares every line on a large corpus."
+publish = false
+
+[lib]
+name = "singws_karafun"
+path = "src/lib.rs"
+
+[[bin]]
+name = "singws-karafun"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = { version = "1.0.151", features = ["float_roundtrip", "preserve_order"] }

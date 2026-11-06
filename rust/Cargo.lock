@@ -2215,6 +2215,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "singws-karafun"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "singws-karaoke-proto"
 version = "0.1.0"
 dependencies = [
