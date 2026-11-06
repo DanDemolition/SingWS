@@ -3,14 +3,16 @@
 //! The ~230 fixed script lines live in `script_lines.rs`, GENERATED from the Python source by `tools/gen_karafun_script_rs.py` (never edited by
 //! hand; the tool's `--check` fails when it is stale). What is written by hand here is only the part that has logic: quoting a value as an
 //! AppleScript literal, reducing a queued title to what KaraFun lists, and putting the blocks together for the flags.
+mod casefold_table;
 mod script_lines;
+pub mod pure;
 
 /// Python `str.isspace` for one character (what `str.strip()` and the regex `\s` use on text).
-fn py_space(c: char) -> bool {
+pub(crate) fn py_space(c: char) -> bool {
     matches!(c, '\t' | '\n' | '\u{0b}' | '\u{0c}' | '\r' | '\u{1c}'..='\u{1f}' | ' ' | '\u{85}' | '\u{a0}' | '\u{1680}' | '\u{2000}'..='\u{200a}' | '\u{2028}' | '\u{2029}' | '\u{202f}' | '\u{205f}' | '\u{3000}')
 }
 
-fn py_strip(s: &str) -> &str {
+pub(crate) fn py_strip(s: &str) -> &str {
     s.trim_matches(py_space)
 }
 

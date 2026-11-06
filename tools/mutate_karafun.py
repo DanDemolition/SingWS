@@ -29,21 +29,36 @@ import mutate_songend as ms  # noqa: E402  (code_spans, PATTERNS)
 
 # "L<line>:<old>-><new>" -> "equivalent: why" | "GAP: what the corpus lacks"
 SURVIVOR_NOTES: dict = {
-    "L19:2->3": "equivalent: only a capacity hint of the output string",
-    "L36:0->1": "equivalent: with the counter starting at 1 the empty suffix at the very end matches, which cuts nothing (the text is stripped, so no earlier suffix is only whitespace)",
-    "L50:1->2": "equivalent: the counter is only ever tested for being above zero",
-    "L55: > -> >= ": "equivalent: a match with no group at all is the empty suffix at the very end, which cuts nothing",
+    # key: "<file>|<first 70 chars of the line>|<old>-><new>"
+    "lib.rs|let mut out = String::with_capacity(value.len() + 2);|2->3": "equivalent: only a capacity hint of the output string",
+    "lib.rs|let mut groups = 0;|0->1": "equivalent: with the counter starting at 1 the empty suffix at the very end matches, which cuts nothing (the text is stripped, so no earlier suffix is only whitespace)",
+    "lib.rs|groups += 1;|1->2": "equivalent: the counter is only ever tested for being above zero",
+    "lib.rs|return groups > 0 && chars[j..].is_empty();| > -> >= ": "equivalent: a match with no group at all is the empty suffix at the very end, which cuts nothing",
+    "pure.rs|let mut it = text.splitn(2, '.');|2->3": "equivalent: a text with two dots reaches None either way (the number test fails, then the clock test fails)",
+    "pure.rs|let values: Vec<u128> = parts.iter().map(|p| if p.len() > 30 { u128::M| > -> >= ": "equivalent: overflow guard for absurdly long digit runs; every such value ends as None",
+    "pure.rs|let values: Vec<u128> = parts.iter().map(|p| if p.len() > 30 { u128::M|30->31": "equivalent: same overflow guard, only the bound moves",
+    "pure.rs|let values: Vec<u128> = parts.iter().map(|p| if p.len() > 30 { u128::M|4->5": "equivalent: same overflow guard, only the 'huge' value moves; it is far above 86400 either way",
+    "pure.rs|Value::Number(n) => n.as_i64().unwrap_or_else(|| n.as_f64().unwrap_or(|0.0->1.0": "equivalent: a JSON number always has an f64 value, the fallback never runs",
+    "pure.rs|Value::String(s) => s.trim().parse::<f64>().map(|f| f.trunc() as i64).|0->1": "not modelled: Python int() of an unparsable string raises; the app only passes numbers here",
+    "pure.rs|_ => 0,|0->1": "not modelled: Python int() of None or a container raises; the app only passes numbers here",
+    "pure.rs|Value::Number(n) => n.as_f64().unwrap_or(0.0),|0.0->1.0": "equivalent: a JSON number always has an f64 value, the fallback never runs",
+    "pure.rs|_ => 0.0,|0.0->1.0": "not modelled: a string seek offset (Python float() would parse it); the app only passes numbers or None",
+    "pure.rs|let mut in_space = false;|false->true": "equivalent: the whitespace collapse runs after the regex that already turned every non-alphanumeric run into one space, and the result is stripped",
+    "pure.rs|in_space = true;|true->false": "equivalent: same reason, no run of spaces can reach the collapse",
 }
 
 
-def generate(text):
+FILES = ("lib.rs", "pure.rs")
+
+
+def generate(name, text):
     lines = text.split("\n")
-    first = next(i for i, l in enumerate(lines) if l.startswith("fn py_space"))
-    last = next(i for i, l in enumerate(lines) if l.startswith("#[cfg(test)]"))
+    first = next(i for i, l in enumerate(lines) if l.startswith(("fn ", "pub(crate) fn ", "pub fn ", "pub enum ", "/// A value", "use ", "pub enum")))
+    last = next((i for i, l in enumerate(lines) if l.startswith("#[cfg(test)]")), len(lines))
     out = []
     for ln in range(first, last):
         line = lines[ln]
-        if line.strip().startswith(("//", "///")) or ("fn " in line and "{" in line and "(" in line and "if " not in line and "match" not in line):
+        if line.strip().startswith(("//", "///", "use ", "static ")) or ("fn " in line and "{" in line and "(" in line and "if " not in line and "match" not in line):
             continue
         for a, b in ms.code_spans(line):
             seg = line[a:b]
@@ -59,7 +74,7 @@ def generate(text):
                     else:
                         new = repl
                     if line[:s] + new + line[e:] != line:
-                        out.append((ln + 1, s, e, new, line.strip()[:90]))
+                        out.append((name, ln + 1, s, e, new, line.strip()[:90]))
     return out
 
 
@@ -67,74 +82,72 @@ def setup():
     (WORK / "src").mkdir(parents=True, exist_ok=True)
     (WORK / "Cargo.toml").write_text((REAL / "Cargo.toml").read_text() + "\n[workspace]\n")
     shutil.copy(ROOT / "rust/Cargo.lock", WORK / "Cargo.lock")
-    for name in ("main.rs", "script_lines.rs"):
+    for name in ("main.rs", "script_lines.rs", "casefold_table.rs", "lib.rs", "pure.rs"):
         shutil.copy(REAL / "src" / name, WORK / "src" / name)
-    (WORK / "src/lib.rs").write_text((REAL / "src/lib.rs").read_text())
 
 
 def main():
     import karafun_script_parity as par
-    match_title, literal, search = par.load_python()
-    cs = par.cases(SEEDS)
-    requests, expected = [], []
-    for c in cs:
-        requests.append(dict(c, op="search_script"))
-        expected.append({"lines": search(query=c["query"], safe_title=c["safe_title"], safe_artist=c["safe_artist"],
-                                          require_exact_title=c["require_exact_title"], resolve_only=c["resolve_only"])})
-    for s in sorted({c["safe_title"] for c in cs} | set(par.TITLES)):
-        requests.append({"op": "match_title", "title": s})
-        expected.append({"title": match_title(s)})
-    for s in sorted({c["query"] for c in cs} | {c["safe_artist"] for c in cs}):
-        requests.append({"op": "literal", "value": s})
-        expected.append({"literal": literal(s)})
-    print(f"oracle ready: {len(requests)} requests", flush=True)
+    release = Path(os.path.expanduser("~/.cache/singws-rust-target-karafun/release/singws-karafun"))
+    real_run = par.run_rust
+    captured = []
+
+    def spy(binary, batch):
+        resp = real_run(binary, batch)
+        captured.append((batch, resp))
+        return resp
+    par.run_rust = spy
+    assert par.main(["--seeds", str(SEEDS), "--binary", str(release)]) == 0, "the unmutated crate must equal the Python first"
+    print(f"oracle ready: {sum(len(b) for b, _ in captured)} requests in {len(captured)} batches", flush=True)
     setup()
-    src = WORK / "src/lib.rs"
-    original = src.read_text()
-    muts = generate(original)
+    originals = {n: (WORK / "src" / n).read_text() for n in FILES}
+    muts = [m for n in FILES for m in generate(n, originals[n])]
     print(f"mutants: {len(muts)}", flush=True)
     binary = Path(TARGET) / "debug" / "singws-karafun"
-    payload = json.dumps({"batch": requests}).encode()
+    payloads = [(json.dumps({"batch": b}).encode(), r) for b, r in captured]
 
     def build():
         return subprocess.run(["cargo", "build"], capture_output=True, text=True, env=ENV, cwd=WORK)
 
-    def answers():
-        proc = subprocess.run([str(binary)], input=payload, capture_output=True, timeout=300)
-        if proc.returncode != 0:
-            return None
-        return json.loads(proc.stdout)
-
-    def agrees(got):
-        return got is not None and got == expected
+    def agrees():
+        for payload, resp in payloads:
+            proc = subprocess.run([str(binary)], input=payload, capture_output=True, timeout=300)
+            if proc.returncode != 0 or json.loads(proc.stdout) != resp:
+                return False
+        return True
 
     base = build()
     assert base.returncode == 0, base.stderr[-600:]
-    assert agrees(answers()), "the unmutated crate must agree with Python on the corpus"
+    assert agrees(), "the unmutated crate must agree with its own baseline"
     survivors, noncompiling, killed = [], [], 0
     try:
-        for n, (ln, s, e, new, snippet) in enumerate(muts, 1):
+        for n, (name, ln, s, e, new, snippet) in enumerate(muts, 1):
             if ONLY and n not in ONLY:
                 continue
-            lines = original.split("\n")
+            src = WORK / "src" / name
+            lines = originals[name].split("\n")
             old = lines[ln - 1][s:e]
             lines[ln - 1] = lines[ln - 1][:s] + new + lines[ln - 1][e:]
             src.write_text("\n".join(lines))
             b = build()
             if b.returncode != 0:
                 noncompiling.append(n)
-                print(f"#{n} L{ln}: does not compile", flush=True)
+                print(f"#{n} {name} L{ln}: does not compile", flush=True)
+                src.write_text(originals[name])
                 continue
-            if agrees(answers()):
-                key = f"L{ln}:{old}->{new}"
+            ok = agrees()
+            src.write_text(originals[name])
+            if ok:
+                key = f"{name}|{snippet[:70]}|{old}->{new}"
                 note = SURVIVOR_NOTES.get(key)
                 survivors.append((n, key, note, snippet))
-                print(f"#{n} L{ln} '{old}'->'{new}': SURVIVED {note or '(UNDOCUMENTED)'}   [{snippet}]", flush=True)
+                print(f"#{n} {name} L{ln} '{old}'->'{new}': SURVIVED {note or '(UNDOCUMENTED)'}   [{snippet}]", flush=True)
             else:
                 killed += 1
-                print(f"#{n} L{ln} '{old}'->'{new}': killed", flush=True)
+                print(f"#{n} {name} L{ln} '{old}'->'{new}': killed", flush=True)
     finally:
-        src.write_text(original)
+        for name, text in originals.items():
+            (WORK / "src" / name).write_text(text)
     undocumented = [x for x in survivors if not x[2]]
     print(f"mutants={len(muts)} killed={killed} survivors={len(survivors)} undocumented={len(undocumented)} non-compiling={len(noncompiling)}")
     for n, key, note, snippet in undocumented:

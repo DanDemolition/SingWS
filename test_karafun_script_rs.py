@@ -25,5 +25,24 @@ class KarafunScriptRustTests(unittest.TestCase):
         self.assertIn("IDENTICAL", proc.stdout)
 
 
+class TranscribedRuleGuard(unittest.TestCase):
+    """The accept/reject rule for a search answer is inline in KaraokeApp._automate_karafun_search_and_play, so the parity tool compares the Rust port with a
+    TRANSCRIBED copy. These lines must still be in the Python; if one changed, update tools/karafun_script_parity.py (ref_classify) and pure.rs together."""
+
+    def test_the_inline_rule_is_still_what_was_transcribed(self):
+        source = (ROOT / "0.2.18.1.py").read_text(encoding="utf-8")
+        for line in (
+            'query_has_artist = bool(safe_artist_match) and safe_artist_match.casefold() in query_key',
+            'if safe_artist_match and not query_has_artist:',
+            'accepted = {"FOUND"}',
+            'accepted = {"FOUND", "TITLE_ONLY", "FIRST"}',
+            'if len(parts) >= 3 and kind in accepted:',
+            'if len(parts) >= 3 and kind in {"FOUND", "TITLE_ONLY", "FIRST"}:',
+            'last_error = parts[-1] if parts else "KaraFun search failed"',
+            'parts = str(candidate or "").split("|")',
+        ):
+            self.assertIn(line, source, f"the inline accept/reject rule changed: {line!r}")
+
+
 if __name__ == "__main__":
     unittest.main()
