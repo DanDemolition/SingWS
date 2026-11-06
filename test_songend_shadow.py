@@ -1,4 +1,4 @@
-"""songend_shadow: the opt-in, log-only comparison of where the app starts the background music at a song's end with the Rust song-end model driven through an idealised run."""
+"""songend_shadow: the log-only comparison of where the app starts the background music at a song's end with the Rust song-end model driven through an idealised run."""
 import _test_profile  # noqa: F401  (isolate SINGWS_HOME before the app is loaded)
 import os
 import sys
@@ -21,10 +21,10 @@ class Pure(unittest.TestCase):
     def setUp(self):
         se._clean_noted = False
 
-    def test_off_by_default(self):
-        self.assertFalse(se.enabled({}))
-        self.assertFalse(se.enabled(None))
-        self.assertTrue(se.enabled({"songend_shadow": True}))
+    def test_on_by_default_and_can_be_switched_off(self):
+        self.assertTrue(se.enabled({}))
+        self.assertTrue(se.enabled(None))
+        self.assertFalse(se.enabled({"songend_shadow": False}))
 
     def test_reason_categories_ignore_the_started_or_not_wording(self):
         self.assertEqual(se.reason_of(["[CROSSFADE] BG pre-start fired (5.0s remaining)"]), "prestart")
@@ -63,13 +63,12 @@ class Pure(unittest.TestCase):
 
     def test_announce_lines(self):
         lines = []
-        self.assertIn("off (songend_shadow=false)", se.announce({}, lines.append))
-        self.assertIn("enabled available=", se.announce({"songend_shadow": True}, lines.append))
+        self.assertIn("off (songend_shadow=false)", se.announce({"songend_shadow": False}, lines.append))
+        self.assertIn("enabled available=", se.announce({}, lines.append))
         self.assertTrue(all(x.startswith("[SONGEND-SHADOW]") for x in lines))
 
-    def test_nothing_is_recorded_or_compared_while_off(self):
-        app = types.SimpleNamespace(settings={}, __dict__={})
-        app = types.SimpleNamespace(settings={})
+    def test_nothing_is_recorded_or_compared_while_switched_off(self):
+        app = types.SimpleNamespace(settings={"songend_shadow": False})
         se.note_song_start(app, "cdg")
         self.assertNotIn("_songend_shadow_rec", app.__dict__)
         self.assertIsNone(se.note_music_start(app, "prestart"))
@@ -139,9 +138,9 @@ class DriverMatchesTheHarness(unittest.TestCase):
 
 
 class Wiring(unittest.TestCase):
-    def test_the_app_hooks_the_song_start_and_the_three_music_starts_and_ships_the_flag_off(self):
+    def test_the_app_hooks_the_song_start_and_the_three_music_starts_and_ships_the_flag_on(self):
         src = Path("0.2.18.1.py").read_text(encoding="utf-8")
-        self.assertIn('"songend_shadow": False,', src)
+        self.assertIn('"songend_shadow": True,', src)
         self.assertIn("_songend_shadow_note(self, None, mode)", src)
         self.assertIn('_songend_shadow_note(self, "verified_end")', src)
         self.assertIn('_songend_shadow_note(self, "prestart")', src)

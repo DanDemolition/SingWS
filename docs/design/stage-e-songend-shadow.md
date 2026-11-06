@@ -1,11 +1,12 @@
-# Song-end shadow (opt-in, default off)
+# Song-end shadow (default on, log-only)
 
 Question it answers on a real show: **at the song position where the app starts the background music at the end of a native karaoke song, would the Rust model of that decision
 (`singws-songend`) have started it at the same place, for the same reason?** Python always decides; this only compares and logs.
 
 ## Switch
-`"songend_shadow": true` in `~/SingWS/settings.json` (default **false**, AGENTS rule 9: instrumentation near live playback stays off until asked for). The Rust helper must be bundled
-(`rust/build_songend.sh`, called by both installer build scripts); without it the shadow is skipped silently. Launch line: `[SONGEND-SHADOW] enabled available=1`.
+**Default ON** since 2026-11-05 (operator's decision; it was built opt-in because it adds four hooks near the song-end path and AGENTS rule 9 keeps that kind of instrumentation off until asked for).
+Turn it off with `"songend_shadow": false` in `~/SingWS/settings.json`. The Rust helper must be bundled (`rust/build_songend.sh`, called by both installer build scripts); without it the
+shadow is skipped silently. Launch line: `[SONGEND-SHADOW] enabled available=1`. When the setting is off each hook costs one settings lookup.
 
 ## What the app does when it is on
 * `_start_mpv_karaoke_transport` (after the audio and visual end floors are armed): `note_song_start` (mode only).

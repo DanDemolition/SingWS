@@ -4364,10 +4364,10 @@ DEFAULTS = {
     # settings as they were before them, and [SETTINGS-MIGRATE-SHADOW] logs ONLY a difference (key NAMES, never values; only migration-related keys are sent). Python's settings are
     # always the ones used and saved. DEFAULT ON; a missing helper is skipped silently.
     "settings_migrate_shadow": True,
-    # Stage E shadow, OPT-IN (default OFF, AGENTS rule 9: instrumentation near live playback stays off until asked for): at a native karaoke song's end the app notes the song position at
+    # Stage E shadow, DEFAULT ON (operator, 2026-11-05; it was opt-in at first because it sits near live playback, AGENTS rule 9): at a native karaoke song's end the app notes the song position at
     # which it starts the background music, and a separate low-priority process (the Rust song-end model, singws-songend) is driven through an idealised run of the same song; [SONGEND-SHADOW]
     # logs ONLY a difference (more than 1.5 s or another reason; song lengths and numbers only, never names). The app's own decision is always the one acted on.
-    "songend_shadow": False,
+    "songend_shadow": True,
     # Stage E shadow: every ~30 s the host relay messages this app just sent (playback_tick, state, queue, chat) are rebuilt by a separate low-priority process
     # (a Rust helper) from a snapshot of the same inputs, and [RELAY-MSG-SHADOW] logs ONLY a difference (never chat text, names or ids). The message the app built
     # is always the one sent; the relay schema, retries and connection are untouched.
@@ -22684,7 +22684,7 @@ class SoundboardStrip(QWidget):
 def _songend_shadow_note(app, kind, mode=None):
     """Stage E song-end shadow (songend_shadow.py): OPT-IN (setting songend_shadow, default off), log-only, every failure swallowed. ``kind`` None = a song started (with ``mode``)."""
     try:
-        if not app.settings.get("songend_shadow", False):
+        if not app.settings.get("songend_shadow", True):
             if kind is None:
                 app.__dict__.pop("_songend_shadow_rec", None)
             return

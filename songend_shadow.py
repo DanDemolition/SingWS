@@ -1,7 +1,7 @@
 """Song-end shadow (Stage E): when does the music start at the end of a karaoke song, and does the Rust model of that decision (``singws-songend``) agree?
 
-OPT-IN, DEFAULT OFF (setting ``songend_shadow``): it records a few facts on the song-end path, and AGENTS rule 9 says instrumentation near live playback stays off until
-asked for. SHADOW ONLY: the app's own decision is always the one acted on; nothing here starts, stops or changes anything.
+DEFAULT ON since 2026-11-05 (setting ``songend_shadow``, operator's choice; it began opt-in because it records a few facts on the song-end path and AGENTS rule 9 keeps
+instrumentation near live playback off until asked for). SHADOW ONLY: the app's own decision is always the one acted on; nothing here starts, stops or changes anything.
 
 How it works. At a song start the app notes the song's facts (mode, length, the settings that drive the decision). When the app really starts the background music
 at the song's end it notes the song position and the reason. After the song, a separate low-priority process (the Rust model in ``--lines`` mode) is fed an
@@ -35,7 +35,7 @@ _seen: set[str] = set()
 
 
 def enabled(settings) -> bool:
-    return bool((settings or {}).get("songend_shadow", False))
+    return bool((settings or {}).get("songend_shadow", True))
 
 
 def find_helper() -> Path | None:
