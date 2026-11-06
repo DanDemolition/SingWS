@@ -60,6 +60,13 @@
           "logs": [
             "show.log"
           ]
+        },
+        {
+          "date": "2026-11-05",
+          "label": "show 2026-11-05 intel 1.0.3.0 (operator: clean)",
+          "logs": [
+            "singws_2026-11-05.log"
+          ]
         }
       ]
     },
@@ -122,6 +129,13 @@
           "label": "show 2026-11-01 intel 1.0.2.8",
           "logs": [
             "show.log"
+          ]
+        },
+        {
+          "date": "2026-11-05",
+          "label": "show 2026-11-05 intel 1.0.3.0 (operator: clean)",
+          "logs": [
+            "singws_2026-11-05.log"
           ]
         }
       ]
@@ -186,6 +200,13 @@
           "logs": [
             "show.log"
           ]
+        },
+        {
+          "date": "2026-11-05",
+          "label": "show 2026-11-05 intel 1.0.3.0 (operator: clean)",
+          "logs": [
+            "singws_2026-11-05.log"
+          ]
         }
       ]
     },
@@ -197,6 +218,13 @@
           "label": "show 2026-10-30 intel 1.0.2.5 (two runs, first ended in a native crash during a stall dump)",
           "logs": [
             "singws_2026-10-30.log"
+          ]
+        },
+        {
+          "date": "2026-11-05",
+          "label": "show 2026-11-05 intel 1.0.3.0 (operator: clean)",
+          "logs": [
+            "singws_2026-11-05.log"
           ]
         }
       ]
@@ -261,6 +289,13 @@
           "logs": [
             "show.log"
           ]
+        },
+        {
+          "date": "2026-11-05",
+          "label": "show 2026-11-05 intel 1.0.3.0 (operator: clean)",
+          "logs": [
+            "singws_2026-11-05.log"
+          ]
         }
       ]
     },
@@ -323,6 +358,13 @@
           "label": "show 2026-11-01 intel 1.0.2.8",
           "logs": [
             "show.log"
+          ]
+        },
+        {
+          "date": "2026-11-05",
+          "label": "show 2026-11-05 intel 1.0.3.0 (operator: clean)",
+          "logs": [
+            "singws_2026-11-05.log"
           ]
         }
       ]
@@ -387,6 +429,13 @@
           "logs": [
             "show.log"
           ]
+        },
+        {
+          "date": "2026-11-05",
+          "label": "show 2026-11-05 intel 1.0.3.0 (operator: clean)",
+          "logs": [
+            "singws_2026-11-05.log"
+          ]
         }
       ]
     },
@@ -426,6 +475,13 @@
           "logs": [
             "show.log"
           ]
+        },
+        {
+          "date": "2026-11-05",
+          "label": "show 2026-11-05 intel 1.0.3.0 (operator: clean)",
+          "logs": [
+            "singws_2026-11-05.log"
+          ]
         }
       ]
     },
@@ -445,6 +501,13 @@
           "label": "show 2026-11-01 intel 1.0.2.8",
           "logs": [
             "show.log"
+          ]
+        },
+        {
+          "date": "2026-11-05",
+          "label": "show 2026-11-05 intel 1.0.3.0 (operator: clean)",
+          "logs": [
+            "singws_2026-11-05.log"
           ]
         }
       ]
@@ -466,6 +529,13 @@
           "logs": [
             "show.log"
           ]
+        },
+        {
+          "date": "2026-11-05",
+          "label": "show 2026-11-05 intel 1.0.3.0 (operator: clean)",
+          "logs": [
+            "singws_2026-11-05.log"
+          ]
         }
       ]
     },
@@ -485,6 +555,13 @@
           "label": "show 2026-11-01 intel 1.0.2.8",
           "logs": [
             "show.log"
+          ]
+        },
+        {
+          "date": "2026-11-05",
+          "label": "show 2026-11-05 intel 1.0.3.0 (operator: clean)",
+          "logs": [
+            "singws_2026-11-05.log"
           ]
         }
       ]
@@ -506,6 +583,13 @@
           "logs": [
             "show.log"
           ]
+        },
+        {
+          "date": "2026-11-05",
+          "label": "show 2026-11-05 intel 1.0.3.0 (operator: clean)",
+          "logs": [
+            "singws_2026-11-05.log"
+          ]
         }
       ]
     },
@@ -525,6 +609,13 @@
           "label": "show 2026-11-01 intel 1.0.2.8",
           "logs": [
             "show.log"
+          ]
+        },
+        {
+          "date": "2026-11-05",
+          "label": "show 2026-11-05 intel 1.0.3.0 (operator: clean)",
+          "logs": [
+            "singws_2026-11-05.log"
           ]
         }
       ]
@@ -546,6 +637,13 @@
           "logs": [
             "show.log"
           ]
+        },
+        {
+          "date": "2026-11-05",
+          "label": "show 2026-11-05 intel 1.0.3.0 (operator: clean)",
+          "logs": [
+            "singws_2026-11-05.log"
+          ]
         }
       ]
     },
@@ -565,6 +663,13 @@
           "label": "show 2026-11-01 intel 1.0.2.8",
           "logs": [
             "show.log"
+          ]
+        },
+        {
+          "date": "2026-11-05",
+          "label": "show 2026-11-05 intel 1.0.3.0 (operator: clean)",
+          "logs": [
+            "singws_2026-11-05.log"
           ]
         }
       ]
@@ -586,6 +691,13 @@
           "logs": [
             "show.log"
           ]
+        },
+        {
+          "date": "2026-11-05",
+          "label": "show 2026-11-05 intel 1.0.3.0 (operator: clean)",
+          "logs": [
+            "singws_2026-11-05.log"
+          ]
         }
       ]
     },
@@ -605,6 +717,13 @@
           "label": "show 2026-11-01 intel 1.0.2.8",
           "logs": [
             "show.log"
+          ]
+        },
+        {
+          "date": "2026-11-05",
+          "label": "show 2026-11-05 intel 1.0.3.0 (operator: clean)",
+          "logs": [
+            "singws_2026-11-05.log"
           ]
         }
       ]
@@ -626,6 +745,13 @@
           "logs": [
             "show.log"
           ]
+        },
+        {
+          "date": "2026-11-05",
+          "label": "show 2026-11-05 intel 1.0.3.0 (operator: clean)",
+          "logs": [
+            "singws_2026-11-05.log"
+          ]
         }
       ]
     },
@@ -645,6 +771,13 @@
           "label": "show 2026-11-01 intel 1.0.2.8",
           "logs": [
             "show.log"
+          ]
+        },
+        {
+          "date": "2026-11-05",
+          "label": "show 2026-11-05 intel 1.0.3.0 (operator: clean)",
+          "logs": [
+            "singws_2026-11-05.log"
           ]
         }
       ]
@@ -679,6 +812,13 @@
           "label": "show 2026-11-01 intel 1.0.2.8",
           "logs": [
             "show.log"
+          ]
+        },
+        {
+          "date": "2026-11-05",
+          "label": "show 2026-11-05 intel 1.0.3.0 (operator: clean)",
+          "logs": [
+            "singws_2026-11-05.log"
           ]
         }
       ]
@@ -723,6 +863,13 @@
           "logs": [
             "show.log"
           ]
+        },
+        {
+          "date": "2026-11-05",
+          "label": "show 2026-11-05 intel 1.0.3.0 (operator: clean)",
+          "logs": [
+            "singws_2026-11-05.log"
+          ]
         }
       ]
     },
@@ -766,6 +913,13 @@
           "logs": [
             "show.log"
           ]
+        },
+        {
+          "date": "2026-11-05",
+          "label": "show 2026-11-05 intel 1.0.3.0 (operator: clean)",
+          "logs": [
+            "singws_2026-11-05.log"
+          ]
         }
       ]
     },
@@ -799,6 +953,13 @@
           "label": "show 2026-11-01 intel 1.0.2.8",
           "logs": [
             "show.log"
+          ]
+        },
+        {
+          "date": "2026-11-05",
+          "label": "show 2026-11-05 intel 1.0.3.0 (operator: clean)",
+          "logs": [
+            "singws_2026-11-05.log"
           ]
         }
       ]
@@ -834,6 +995,13 @@
           "logs": [
             "show.log"
           ]
+        },
+        {
+          "date": "2026-11-05",
+          "label": "show 2026-11-05 intel 1.0.3.0 (operator: clean)",
+          "logs": [
+            "singws_2026-11-05.log"
+          ]
         }
       ]
     },
@@ -867,6 +1035,13 @@
           "label": "show 2026-11-01 intel 1.0.2.8",
           "logs": [
             "show.log"
+          ]
+        },
+        {
+          "date": "2026-11-05",
+          "label": "show 2026-11-05 intel 1.0.3.0 (operator: clean)",
+          "logs": [
+            "singws_2026-11-05.log"
           ]
         }
       ]
@@ -911,6 +1086,13 @@
           "logs": [
             "show.log"
           ]
+        },
+        {
+          "date": "2026-11-05",
+          "label": "show 2026-11-05 intel 1.0.3.0 (operator: clean)",
+          "logs": [
+            "singws_2026-11-05.log"
+          ]
         }
       ]
     },
@@ -944,6 +1126,13 @@
           "label": "show 2026-11-01 intel 1.0.2.8",
           "logs": [
             "show.log"
+          ]
+        },
+        {
+          "date": "2026-11-05",
+          "label": "show 2026-11-05 intel 1.0.3.0 (operator: clean)",
+          "logs": [
+            "singws_2026-11-05.log"
           ]
         }
       ]
@@ -987,6 +1176,13 @@
           "label": "show 2026-11-01 intel 1.0.2.8",
           "logs": [
             "show.log"
+          ]
+        },
+        {
+          "date": "2026-11-05",
+          "label": "show 2026-11-05 intel 1.0.3.0 (operator: clean)",
+          "logs": [
+            "singws_2026-11-05.log"
           ]
         }
       ]
@@ -1036,6 +1232,13 @@
           "logs": [
             "show.log"
           ]
+        },
+        {
+          "date": "2026-11-05",
+          "label": "show 2026-11-05 intel 1.0.3.0 (operator: clean)",
+          "logs": [
+            "singws_2026-11-05.log"
+          ]
         }
       ]
     },
@@ -1084,6 +1287,13 @@
           "logs": [
             "show.log"
           ]
+        },
+        {
+          "date": "2026-11-05",
+          "label": "show 2026-11-05 intel 1.0.3.0 (operator: clean)",
+          "logs": [
+            "singws_2026-11-05.log"
+          ]
         }
       ]
     },
@@ -1110,6 +1320,13 @@
           "label": "show 2026-11-01 intel 1.0.2.8",
           "logs": [
             "show.log"
+          ]
+        },
+        {
+          "date": "2026-11-05",
+          "label": "show 2026-11-05 intel 1.0.3.0 (operator: clean)",
+          "logs": [
+            "singws_2026-11-05.log"
           ]
         }
       ]
@@ -1138,6 +1355,13 @@
           "label": "show 2026-11-01 intel 1.0.2.8",
           "logs": [
             "show.log"
+          ]
+        },
+        {
+          "date": "2026-11-05",
+          "label": "show 2026-11-05 intel 1.0.3.0 (operator: clean)",
+          "logs": [
+            "singws_2026-11-05.log"
           ]
         }
       ]
@@ -1173,6 +1397,13 @@
           "logs": [
             "show.log"
           ]
+        },
+        {
+          "date": "2026-11-05",
+          "label": "show 2026-11-05 intel 1.0.3.0 (operator: clean)",
+          "logs": [
+            "singws_2026-11-05.log"
+          ]
         }
       ]
     },
@@ -1199,6 +1430,13 @@
           "label": "show 2026-11-01 intel 1.0.2.8",
           "logs": [
             "show.log"
+          ]
+        },
+        {
+          "date": "2026-11-05",
+          "label": "show 2026-11-05 intel 1.0.3.0 (operator: clean)",
+          "logs": [
+            "singws_2026-11-05.log"
           ]
         }
       ]
@@ -1234,6 +1472,13 @@
           "label": "show 2026-11-01 intel 1.0.2.8",
           "logs": [
             "show.log"
+          ]
+        },
+        {
+          "date": "2026-11-05",
+          "label": "show 2026-11-05 intel 1.0.3.0 (operator: clean)",
+          "logs": [
+            "singws_2026-11-05.log"
           ]
         }
       ]
@@ -1290,6 +1535,13 @@
           "logs": [
             "show.log"
           ]
+        },
+        {
+          "date": "2026-11-05",
+          "label": "show 2026-11-05 intel 1.0.3.0 (operator: clean)",
+          "logs": [
+            "singws_2026-11-05.log"
+          ]
         }
       ]
     },
@@ -1331,6 +1583,13 @@
           "label": "show 2026-11-01 intel 1.0.2.8",
           "logs": [
             "show.log"
+          ]
+        },
+        {
+          "date": "2026-11-05",
+          "label": "show 2026-11-05 intel 1.0.3.0 (operator: clean)",
+          "logs": [
+            "singws_2026-11-05.log"
           ]
         }
       ]
@@ -1395,6 +1654,13 @@
           "logs": [
             "show.log"
           ]
+        },
+        {
+          "date": "2026-11-05",
+          "label": "show 2026-11-05 intel 1.0.3.0 (operator: clean)",
+          "logs": [
+            "singws_2026-11-05.log"
+          ]
         }
       ]
     },
@@ -1450,6 +1716,13 @@
           "label": "show 2026-11-01 intel 1.0.2.8",
           "logs": [
             "show.log"
+          ]
+        },
+        {
+          "date": "2026-11-05",
+          "label": "show 2026-11-05 intel 1.0.3.0 (operator: clean)",
+          "logs": [
+            "singws_2026-11-05.log"
           ]
         }
       ]
@@ -1514,6 +1787,13 @@
           "logs": [
             "show.log"
           ]
+        },
+        {
+          "date": "2026-11-05",
+          "label": "show 2026-11-05 intel 1.0.3.0 (operator: clean)",
+          "logs": [
+            "singws_2026-11-05.log"
+          ]
         }
       ]
     },
@@ -1576,6 +1856,13 @@
           "label": "show 2026-11-01 intel 1.0.2.8",
           "logs": [
             "show.log"
+          ]
+        },
+        {
+          "date": "2026-11-05",
+          "label": "show 2026-11-05 intel 1.0.3.0 (operator: clean)",
+          "logs": [
+            "singws_2026-11-05.log"
           ]
         }
       ]
@@ -1640,6 +1927,13 @@
           "logs": [
             "show.log"
           ]
+        },
+        {
+          "date": "2026-11-05",
+          "label": "show 2026-11-05 intel 1.0.3.0 (operator: clean)",
+          "logs": [
+            "singws_2026-11-05.log"
+          ]
         }
       ]
     },
@@ -1674,6 +1968,13 @@
           "logs": [
             "show.log"
           ]
+        },
+        {
+          "date": "2026-11-05",
+          "label": "show 2026-11-05 intel 1.0.3.0 (operator: clean)",
+          "logs": [
+            "singws_2026-11-05.log"
+          ]
         }
       ]
     },
@@ -1706,6 +2007,13 @@
           "logs": [
             "singws_2026-10-30.log"
           ]
+        },
+        {
+          "date": "2026-11-05",
+          "label": "show 2026-11-05 intel 1.0.3.0 (operator: clean)",
+          "logs": [
+            "singws_2026-11-05.log"
+          ]
         }
       ]
     },
@@ -1717,6 +2025,13 @@
           "label": "show 2026-11-01 intel 1.0.2.8",
           "logs": [
             "show.log"
+          ]
+        },
+        {
+          "date": "2026-11-05",
+          "label": "show 2026-11-05 intel 1.0.3.0 (operator: clean)",
+          "logs": [
+            "singws_2026-11-05.log"
           ]
         }
       ]
@@ -1767,6 +2082,13 @@
           "logs": [
             "show.log"
           ]
+        },
+        {
+          "date": "2026-11-05",
+          "label": "show 2026-11-05 intel 1.0.3.0 (operator: clean)",
+          "logs": [
+            "singws_2026-11-05.log"
+          ]
         }
       ]
     },
@@ -1808,6 +2130,13 @@
           "label": "show 2026-11-01 intel 1.0.2.8",
           "logs": [
             "show.log"
+          ]
+        },
+        {
+          "date": "2026-11-05",
+          "label": "show 2026-11-05 intel 1.0.3.0 (operator: clean)",
+          "logs": [
+            "singws_2026-11-05.log"
           ]
         }
       ]
@@ -1873,6 +2202,13 @@
           "logs": [
             "show.log"
           ]
+        },
+        {
+          "date": "2026-11-05",
+          "label": "show 2026-11-05 intel 1.0.3.0 (operator: clean)",
+          "logs": [
+            "singws_2026-11-05.log"
+          ]
         }
       ]
     },
@@ -1928,6 +2264,13 @@
           "label": "show 2026-11-01 intel 1.0.2.8",
           "logs": [
             "show.log"
+          ]
+        },
+        {
+          "date": "2026-11-05",
+          "label": "show 2026-11-05 intel 1.0.3.0 (operator: clean)",
+          "logs": [
+            "singws_2026-11-05.log"
           ]
         }
       ]
@@ -1985,6 +2328,13 @@
           "logs": [
             "show.log"
           ]
+        },
+        {
+          "date": "2026-11-05",
+          "label": "show 2026-11-05 intel 1.0.3.0 (operator: clean)",
+          "logs": [
+            "singws_2026-11-05.log"
+          ]
         }
       ]
     },
@@ -2019,6 +2369,13 @@
           "label": "show 2026-11-01 intel 1.0.2.8",
           "logs": [
             "show.log"
+          ]
+        },
+        {
+          "date": "2026-11-05",
+          "label": "show 2026-11-05 intel 1.0.3.0 (operator: clean)",
+          "logs": [
+            "singws_2026-11-05.log"
           ]
         }
       ]
