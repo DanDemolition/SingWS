@@ -12,6 +12,7 @@ python3 tools/check_native_libs_fresh.py --arch x86_64 --require || { echo "!! t
 ./rust/build_queue_state.sh || echo "!! could not build the singws-queue-state helper; queue_state_shadow will be skipped in this build"
 ./rust/build_netslice.sh || echo "!! could not build the singws-netslice helper; net_slice_shadow will be skipped in this build"
 ./rust/build_relaymsg.sh || echo "!! could not build the singws-relaymsg helper; relay_msg_shadow will be skipped in this build"
+./rust/build_settingsmig.sh || echo "!! could not build the singws-settingsmig helper; settings_migrate_shadow will be skipped in this build"
 ./rust/build_scan.sh || echo "!! could not build the singws-scan-cli helper; the scan shadow will report helper-not-found in this build"
 
 APP_NAME="SingWS"

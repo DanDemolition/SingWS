@@ -16,6 +16,7 @@ It prints one line per item: **PASS**, **FAIL**, **NOT EXERCISED** (the show nev
 | Fade-in floor | `fade-in start floor -40 dB` | 1.0.2.8 |
 | End-of-song voice guard | `kept its place` lines; ask about blips | 1.0.2.8 |
 | Queue-state + update shadows | `RAN, AGREED` | 1.0.2.8 and the slices B-E rebuild |
+| Settings-migration shadow | `RAN, AGREED` (on an already migrated profile it proves the no-op; a fresh install proves the real migration) | the next rebuild |
 | Transport drives | media_end / karafun_end agree every time | 1.0.1.x |
 | KaraFun watchdog drive | at least one decision (still has no clean show) | open |
 | CDG seek guard | **cannot be seen in a log** (it logs nothing when it clamps) | open |

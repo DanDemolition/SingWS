@@ -4360,6 +4360,10 @@ DEFAULTS = {
     # Stage E shadow: after a bug-report log package is built, a separate low-priority process (singws-logpack, Rust) rebuilds the same last-show log text
     # from the same inputs and [LOGPACK-SHADOW] logs ONLY a difference (never log text). The Python package is always the one used; nothing is sent by this.
     "logpack_shadow": True,
+    # Stage E shadow: at launch, right after the one-off settings migrations, a separate low-priority process (singws-settingsmig, Rust) runs the same migrations on the
+    # settings as they were before them, and [SETTINGS-MIGRATE-SHADOW] logs ONLY a difference (key NAMES, never values; only migration-related keys are sent). Python's settings are
+    # always the ones used and saved. DEFAULT ON; a missing helper is skipped silently.
+    "settings_migrate_shadow": True,
     # Stage E shadow: every ~30 s the host relay messages this app just sent (playback_tick, state, queue, chat) are rebuilt by a separate low-priority process
     # (a Rust helper) from a snapshot of the same inputs, and [RELAY-MSG-SHADOW] logs ONLY a difference (never chat text, names or ids). The message the app built
     # is always the one sent; the relay schema, retries and connection are untouched.
@@ -22974,7 +22978,7 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
         # One line each so a quiet shadow can be told apart from one that is off or whose helper is missing (they log nothing when all agrees).
-        for _mod_name in ("logpack_shadow", "relay_msg_shadow", "scan_shadow", "net_slice_shadow", "queue_state_shadow", "update_shadow"):
+        for _mod_name in ("logpack_shadow", "relay_msg_shadow", "scan_shadow", "net_slice_shadow", "queue_state_shadow", "update_shadow", "settings_migrate_shadow"):
             try:
                 # DEFAULTS are filled into self.settings later in __init__, so merge them here or a fresh profile would announce the wrong engine
                 __import__(_mod_name).announce({**DEFAULTS, **(self.settings if isinstance(self.settings, dict) else {})}, _diag)
@@ -23131,6 +23135,10 @@ class KaraokeApp(QWidget):
         self._rotation_view_user_opened = False
 
         # Merge defaults (non-destructive) and persist if anything was missing
+        try:  # Stage E shadow: the settings as the migrations below find them (log-only; see settings_migrate_shadow.py)
+            _migrate_shadow_before = dict(self.settings)
+        except Exception:
+            _migrate_shadow_before = None
         changed = False
         for obsolete_key in ("performance_mode", "safe_mode", "mp4_max_height"):
             if obsolete_key in self.settings:
@@ -23301,6 +23309,13 @@ class KaraokeApp(QWidget):
             if retired_key in self.settings:
                 self.settings.pop(retired_key)
                 changed = True
+        try:  # Stage E shadow: the Rust migrations on the same input; log-only, Python's settings stay the ones used and saved
+            if _migrate_shadow_before is not None:
+                import settings_migrate_shadow
+                settings_migrate_shadow.start(self.settings, _diag, before=_migrate_shadow_before, after=self.settings, changed=changed,
+                                              compare_changed=not getattr(self, "_rust_defaults_just_migrated", False))
+        except Exception:
+            pass
         _fill_before = dict(self.settings) if _settings_shadow_for(self.settings) is not None else None
         for k, v in DEFAULTS.items():
             if k not in self.settings:

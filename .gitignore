@@ -85,6 +85,7 @@ native/singws_logpack/*/singws-logpack
 native/singws_scan/*/singws-scan-cli
 # Built host relay message helper; produced by rust/build_relaymsg.sh
 native/singws_relaymsg/*/singws-relaymsg
+native/singws_settingsmig/*/singws-settingsmig
 
 # Built update-rules helper; produced by rust/build_update.sh
 native/singws_update/*/singws-update

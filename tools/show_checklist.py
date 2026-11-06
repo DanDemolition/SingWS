@@ -123,7 +123,7 @@ def check_quiet_shadows(rows):
     text = sr.quiet_shadows(rows)
     out = []
     worst = PASS
-    for tag in ("QUEUE-STATE-SHADOW", "UPDATE-SHADOW"):
+    for tag in ("QUEUE-STATE-SHADOW", "UPDATE-SHADOW", "SETTINGS-MIGRATE-SHADOW"):
         line = next((x for x in text.splitlines() if x.strip().startswith(tag)), "")
         verdict = line.split("   (")[0].replace(tag, "").strip() or "no line"
         out.append(f"{tag}: {verdict}")
@@ -196,7 +196,7 @@ def build(lines, rows, settings):
         ("Fade-in floor", *check_fade_floor(lines)),
         ("End-of-song voice guard", *check_voice_guard(lines)),
         ("CDG seek guard", *check_seek_guard(lines)),
-        ("Queue-state + update shadows", *check_quiet_shadows(rows)),
+        ("Queue-state, update + settings-migration shadows", *check_quiet_shadows(rows)),
         ("Transport drives agree with Python", *check_drives(lines)),
         ("KaraFun watchdog drive", *check_watchdog_drive(lines)),
         ("Other Rust shadows", *check_shadows(rows, settings)),
