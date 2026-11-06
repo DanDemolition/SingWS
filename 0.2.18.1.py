@@ -57334,6 +57334,150 @@ class KaraokeApp(QWidget):
         """Post a genuine two-click mouse sequence at a macOS screen point."""
         return KaraokeApp._macos_native_mouse_click(x, y, clicks=2)
 
+    @staticmethod
+    def _karafun_handoff_script(x, y, width, height):
+        return [
+            'tell application "System Events"',
+            'set kf to missing value',
+            'repeat 12 times',
+            'set matches to every application process whose name contains "KaraFun"',
+            'if (count of matches) > 0 then',
+            'set kf to item 1 of matches',
+            'exit repeat',
+            'end if',
+            'delay 0.05',
+            'end repeat',
+            'if kf is not missing value then',
+            'set frontmost of kf to true',
+            'tell kf',
+            '-- KaraFun lyrics use a separate Dual-Screen Display window.',
+            '-- Preserve an existing fullscreen renderer in place.',
+            '-- Recreating it costs 6-10 seconds after audio starts.',
+            'set mainWindow to missing value',
+            'set outputWindow to missing value',
+            'repeat with candidateWindow in windows',
+            'try',
+            'if name of candidateWindow is "Dual Renderer" then',
+            'set outputWindow to candidateWindow',
+            'else if mainWindow is missing value then',
+            'set mainWindow to candidateWindow',
+            'end if',
+            'end try',
+            'end repeat',
+            'if mainWindow is missing value then return "NOT_READY"',
+            '-- Fast start commonly finds the renderer already open. Move and',
+            '-- raise that window directly instead of toggling it closed and',
+            '-- waiting 6-10 seconds for KaraFun to create it again.',
+            'if outputWindow is not missing value then',
+            'try',
+            'set playerMenu to menu 1 of menu bar item "View" of menu bar 1',
+            'if exists menu item "Exit Player Full Screen" of playerMenu then',
+            'perform action "AXRaise" of outputWindow',
+            'return "READY"',
+            'end if',
+            'end try',
+            'try',
+            'if value of attribute "AXFullScreen" of outputWindow then',
+            'perform action "AXRaise" of outputWindow',
+            'return "READY"',
+            'end if',
+            'set value of attribute "AXFullScreen" of outputWindow to false',
+            'end try',
+            'repeat 30 times',
+            'try',
+            'if value of attribute "AXFullScreen" of outputWindow is false then exit repeat',
+            'end try',
+            'delay 0.1',
+            'end repeat',
+            'try',
+            'set value of attribute "AXMinimized" of outputWindow to false',
+            'end try',
+            f'set position of outputWindow to {{{x}, {y}}}',
+            f'set size of outputWindow to {{{width}, {height}}}',
+            'perform action "AXRaise" of outputWindow',
+            'delay 0.1',
+            'perform action "AXRaise" of outputWindow',
+            'return "READY"',
+            'end if',
+            'try',
+            'set elems to entire contents of mainWindow',
+            'set wp to position of mainWindow',
+            'set ws to size of mainWindow',
+            'set bestButton to missing value',
+            'set bestButtonX to 0',
+            'set bestButtonY to 0',
+            'repeat with elem in elems',
+            'try',
+            'if role of elem is "AXButton" then',
+            'set labelText to ""',
+            'try',
+            'set labelText to (name of elem as text) & " " & (description of elem as text) & " " & (help of elem as text)',
+            'end try',
+            'set ep to position of elem',
+            'set es to size of elem',
+            'set centerX to (item 1 of ep) + ((item 1 of es) div 2)',
+            'set centerY to (item 2 of ep) + ((item 2 of es) div 2)',
+            'ignoring case',
+            'if labelText contains "dual" or labelText contains "screen" or labelText contains "display" or labelText contains "renderer" then',
+            'set bestButton to elem',
+            'set bestButtonX to centerX',
+            'set bestButtonY to centerY',
+            'exit repeat',
+            'end if',
+            'end ignoring',
+            '-- Fallback for KaraFun builds whose Dual-Screen button has no useful AX label.',
+            'if centerX > ((item 1 of wp) + ((item 1 of ws) * 0.66)) and centerY < ((item 2 of wp) + 115) then',
+            'if bestButton is missing value or centerX > bestButtonX then',
+            'set bestButton to elem',
+            'set bestButtonX to centerX',
+            'set bestButtonY to centerY',
+            'end if',
+            'end if',
+            'end if',
+            'end try',
+            'end repeat',
+            'if bestButton is missing value then return "NO_DUAL_BUTTON"',
+            '-- No renderer exists, so click the toggle once to create it.',
+            'try',
+            'click at {bestButtonX, bestButtonY}',
+            'end try',
+            'end try',
+            '-- Renderer creation can still take 6-10 seconds on the show Mac.',
+            'repeat 100 times',
+            'set outputWindow to missing value',
+            'repeat with candidateWindow in windows',
+            'try',
+            'if name of candidateWindow is "Dual Renderer" then',
+            'set outputWindow to candidateWindow',
+            'exit repeat',
+            'end if',
+            'end try',
+            'end repeat',
+            'if outputWindow is not missing value then exit repeat',
+            'delay 0.1',
+            'end repeat',
+            'if outputWindow is not missing value then',
+            'try',
+            'set value of attribute "AXFullScreen" of outputWindow to false',
+            'end try',
+            f'set position of outputWindow to {{{x}, {y}}}',
+            f'set size of outputWindow to {{{width}, {height}}}',
+            'perform action "AXRaise" of outputWindow',
+            'delay 0.2',
+            'perform action "AXRaise" of outputWindow',
+            'return "READY"',
+            'else',
+            '-- Never fullscreen KaraFun window 1 here; that is the host/control window.',
+            '-- If the Dual Renderer is unavailable, leave the host window usable.',
+            'return "NO_DUAL_RENDERER"',
+            'end if',
+            'end tell',
+            'else',
+            'return "NOT_READY"',
+            'end if',
+            'end tell',
+        ]
+
     def _handoff_show_screen_to_karafun(self, force_managed: bool = False):
         """Hand off the audience display to KaraFun using the verified fullscreen path."""
         if sys.platform != "darwin" or not bool(self.settings.get("karafun_manage_show_screen", True)):
@@ -57401,147 +57545,7 @@ class KaraokeApp(QWidget):
             if not _handoff_is_current():
                 _diag("[KARAFUN] skipped stale show-screen handoff attempt")
                 return
-            lines = [
-                'tell application "System Events"',
-                'set kf to missing value',
-                'repeat 12 times',
-                'set matches to every application process whose name contains "KaraFun"',
-                'if (count of matches) > 0 then',
-                'set kf to item 1 of matches',
-                'exit repeat',
-                'end if',
-                'delay 0.05',
-                'end repeat',
-                'if kf is not missing value then',
-                'set frontmost of kf to true',
-                'tell kf',
-                '-- KaraFun lyrics use a separate Dual-Screen Display window.',
-                '-- Preserve an existing fullscreen renderer in place.',
-                '-- Recreating it costs 6-10 seconds after audio starts.',
-                'set mainWindow to missing value',
-                'set outputWindow to missing value',
-                'repeat with candidateWindow in windows',
-                'try',
-                'if name of candidateWindow is "Dual Renderer" then',
-                'set outputWindow to candidateWindow',
-                'else if mainWindow is missing value then',
-                'set mainWindow to candidateWindow',
-                'end if',
-                'end try',
-                'end repeat',
-                'if mainWindow is missing value then return "NOT_READY"',
-                '-- Fast start commonly finds the renderer already open. Move and',
-                '-- raise that window directly instead of toggling it closed and',
-                '-- waiting 6-10 seconds for KaraFun to create it again.',
-                'if outputWindow is not missing value then',
-                'try',
-                'set playerMenu to menu 1 of menu bar item "View" of menu bar 1',
-                'if exists menu item "Exit Player Full Screen" of playerMenu then',
-                'perform action "AXRaise" of outputWindow',
-                'return "READY"',
-                'end if',
-                'end try',
-                'try',
-                'if value of attribute "AXFullScreen" of outputWindow then',
-                'perform action "AXRaise" of outputWindow',
-                'return "READY"',
-                'end if',
-                'set value of attribute "AXFullScreen" of outputWindow to false',
-                'end try',
-                'repeat 30 times',
-                'try',
-                'if value of attribute "AXFullScreen" of outputWindow is false then exit repeat',
-                'end try',
-                'delay 0.1',
-                'end repeat',
-                'try',
-                'set value of attribute "AXMinimized" of outputWindow to false',
-                'end try',
-                f'set position of outputWindow to {{{x}, {y}}}',
-                f'set size of outputWindow to {{{width}, {height}}}',
-                'perform action "AXRaise" of outputWindow',
-                'delay 0.1',
-                'perform action "AXRaise" of outputWindow',
-                'return "READY"',
-                'end if',
-                'try',
-                'set elems to entire contents of mainWindow',
-                'set wp to position of mainWindow',
-                'set ws to size of mainWindow',
-                'set bestButton to missing value',
-                'set bestButtonX to 0',
-                'set bestButtonY to 0',
-                'repeat with elem in elems',
-                'try',
-                'if role of elem is "AXButton" then',
-                'set labelText to ""',
-                'try',
-                'set labelText to (name of elem as text) & " " & (description of elem as text) & " " & (help of elem as text)',
-                'end try',
-                'set ep to position of elem',
-                'set es to size of elem',
-                'set centerX to (item 1 of ep) + ((item 1 of es) div 2)',
-                'set centerY to (item 2 of ep) + ((item 2 of es) div 2)',
-                'ignoring case',
-                'if labelText contains "dual" or labelText contains "screen" or labelText contains "display" or labelText contains "renderer" then',
-                'set bestButton to elem',
-                'set bestButtonX to centerX',
-                'set bestButtonY to centerY',
-                'exit repeat',
-                'end if',
-                'end ignoring',
-                '-- Fallback for KaraFun builds whose Dual-Screen button has no useful AX label.',
-                'if centerX > ((item 1 of wp) + ((item 1 of ws) * 0.66)) and centerY < ((item 2 of wp) + 115) then',
-                'if bestButton is missing value or centerX > bestButtonX then',
-                'set bestButton to elem',
-                'set bestButtonX to centerX',
-                'set bestButtonY to centerY',
-                'end if',
-                'end if',
-                'end if',
-                'end try',
-                'end repeat',
-                'if bestButton is missing value then return "NO_DUAL_BUTTON"',
-                '-- No renderer exists, so click the toggle once to create it.',
-                'try',
-                'click at {bestButtonX, bestButtonY}',
-                'end try',
-                'end try',
-                '-- Renderer creation can still take 6-10 seconds on the show Mac.',
-                'repeat 100 times',
-                'set outputWindow to missing value',
-                'repeat with candidateWindow in windows',
-                'try',
-                'if name of candidateWindow is "Dual Renderer" then',
-                'set outputWindow to candidateWindow',
-                'exit repeat',
-                'end if',
-                'end try',
-                'end repeat',
-                'if outputWindow is not missing value then exit repeat',
-                'delay 0.1',
-                'end repeat',
-                'if outputWindow is not missing value then',
-                'try',
-                'set value of attribute "AXFullScreen" of outputWindow to false',
-                'end try',
-                f'set position of outputWindow to {{{x}, {y}}}',
-                f'set size of outputWindow to {{{width}, {height}}}',
-                'perform action "AXRaise" of outputWindow',
-                'delay 0.2',
-                'perform action "AXRaise" of outputWindow',
-                'return "READY"',
-                'else',
-                '-- Never fullscreen KaraFun window 1 here; that is the host/control window.',
-                '-- If the Dual Renderer is unavailable, leave the host window usable.',
-                'return "NO_DUAL_RENDERER"',
-                'end if',
-                'end tell',
-                'else',
-                'return "NOT_READY"',
-                'end if',
-                'end tell',
-            ]
+            lines = self._karafun_handoff_script(x, y, width, height)
             center_x = x + (width // 2)
             center_y = y + (height // 2)
             def _finish_handoff(result=""):
@@ -57960,6 +57964,33 @@ class KaraokeApp(QWidget):
         except Exception as exc:
             _diag(f"[KARAFUN] capture host activation failed: {exc}")
 
+    @staticmethod
+    def _karafun_restore_script():
+        return [
+            'tell application "System Events"',
+            'set matches to every application process whose name contains "KaraFun"',
+            'if (count of matches) > 0 then',
+            'tell item 1 of matches',
+            'set outputWindow to missing value',
+            'repeat with w in windows',
+            'try',
+            'if name of w is "Dual Renderer" then set outputWindow to w',
+            'end try',
+            'end repeat',
+            'if outputWindow is not missing value then',
+            'try',
+            'set value of attribute "AXFullScreen" of outputWindow to false',
+            'end try',
+            'delay 0.6',
+            'try',
+            'set value of attribute "AXMinimized" of outputWindow to true',
+            'end try',
+            'end if',
+            'end tell',
+            'end if',
+            'end tell',
+        ]
+
     def _restore_show_screen_from_karafun(self):
         """Restore the SingWS audience output after external KaraFun playback."""
         if bool(getattr(self, "_karafun_capture_session", False)):
@@ -58092,30 +58123,7 @@ class KaraokeApp(QWidget):
             # claims the same physical display.
             QTimer.singleShot(250, lambda: _restore_singws("karafun_hidden"))
 
-        restore_script = [
-            'tell application "System Events"',
-            'set matches to every application process whose name contains "KaraFun"',
-            'if (count of matches) > 0 then',
-            'tell item 1 of matches',
-            'set outputWindow to missing value',
-            'repeat with w in windows',
-            'try',
-            'if name of w is "Dual Renderer" then set outputWindow to w',
-            'end try',
-            'end repeat',
-            'if outputWindow is not missing value then',
-            'try',
-            'set value of attribute "AXFullScreen" of outputWindow to false',
-            'end try',
-            'delay 0.6',
-            'try',
-            'set value of attribute "AXMinimized" of outputWindow to true',
-            'end try',
-            'end if',
-            'end tell',
-            'end if',
-            'end tell',
-        ]
+        restore_script = self._karafun_restore_script()
         started = self._karafun_run_window_script(
             restore_script,
             on_complete=_after_karafun_hidden,
@@ -59136,6 +59144,221 @@ class KaraokeApp(QWidget):
         threading.Thread(target=_worker, daemon=True, name="karafun-search-only").start()
         return True
 
+    @staticmethod
+    def _karafun_click_point_script(point):
+        return [
+            'tell application "System Events"',
+            'tell (first application process whose name contains "KaraFun")',
+            'set frontmost to true',
+            f'click at {{{int(point[0])}, {int(point[1])}}}',
+            'delay 0.12',
+            f'click at {{{int(point[0])}, {int(point[1])}}}',
+            'end tell',
+            'end tell',
+        ]
+
+    @staticmethod
+    def _karafun_play_now_queue_script():
+        return [
+            'tell application "System Events"',
+            'tell application process "KaraFun"',
+            'set frontmost to true',
+            'click menu bar item "Song" of menu bar 1',
+            'delay 0.15',
+            # Play Now, not Add to Queue: Add to Queue only auto-starts
+            # when KaraFun's queue is empty (2026-09-28: a leftover queued
+            # song meant nothing started and the song failed).
+            'set playNow to menu item "Play Now" of menu 1 of menu bar item "Song" of menu bar 1',
+            'if not enabled of playNow then return "PLAY_NOW_DISABLED"',
+            'click playNow',
+            '-- Pause the start and VERIFY it holds. A single pause click sent',
+            '-- while the song is still loading did nothing and the song then',
+            '-- played (2026-09-28), so re-press until "Play" stays for 0.6s',
+            '-- after the song has been seen playing.',
+            'set seenPlaying to false',
+            'set stable to 0',
+            'repeat 80 times',
+            'try',
+            'set playbackItem to menu item 1 of menu 1 of menu bar item "Playback" of menu bar 1',
+            'set playbackName to name of playbackItem as text',
+            'ignoring case',
+            'if playbackName is "pause" then',
+            'set seenPlaying to true',
+            'set stable to 0',
+            'click playbackItem',
+            'else if playbackName is "play" and seenPlaying then',
+            'set stable to stable + 1',
+            'if stable is greater than or equal to 4 then return "QUEUED_PAUSED"',
+            'end if',
+            'end ignoring',
+            'end try',
+            'delay 0.15',
+            'end repeat',
+            'return "QUEUED_NOT_PAUSED"',
+            'end tell',
+            'end tell',
+        ]
+
+    @staticmethod
+    def _karafun_adjust_menu_script(key_item, key_steps, tempo_item, tempo_steps):
+        return [
+            'tell application "System Events"',
+            'tell application process "KaraFun"',
+            'set frontmost to true',
+            'set keyDone to 0',
+            'set tempoDone to 0',
+            f'repeat {key_steps} times',
+            'try',
+            f'click menu item "{key_item}" of menu 1 of menu bar item "Playback" of menu bar 1',
+            'set keyDone to keyDone + 1',
+            'end try',
+            'delay 0.12',
+            'end repeat',
+            f'repeat {tempo_steps} times',
+            'try',
+            f'click menu item "{tempo_item}" of menu 1 of menu bar item "Playback" of menu bar 1',
+            'set tempoDone to tempoDone + 1',
+            'end try',
+            'delay 0.08',
+            'end repeat',
+            'return "ADJUSTED|" & keyDone & "|" & tempoDone',
+            'end tell',
+            'end tell',
+        ]
+
+    @staticmethod
+    def _karafun_renderer_ready_script():
+        return [
+            'tell application "System Events"',
+            'tell application process "KaraFun"',
+            'set frontmost to true',
+            'repeat with w in windows',
+            'if name of w starts with "Results for" then',
+            'perform action "AXRaise" of w',
+            'return "READY"',
+            'end if',
+            'end repeat',
+            'try',
+            'set windowMenu to menu 1 of menu bar item "Window" of menu bar 1',
+            'repeat with menuEntry in menu items of windowMenu',
+            'set entryName to name of menuEntry as text',
+            'if entryName starts with "Results for" then',
+            'click menuEntry',
+            'return "READY"',
+            'end if',
+            'end repeat',
+            'end try',
+            'return "NO_CONTROL_WINDOW"',
+            'end tell',
+            'end tell',
+        ]
+
+    @staticmethod
+    def _karafun_start_probe_script():
+        return [
+            'tell application "System Events"',
+            'tell application process "KaraFun"',
+            # Playback menu first: it answers instantly, while the full
+            # tree scan below took 10-15s and, because KaraFun AppleScript
+            # cannot run concurrently, held up the BGM fade until the song
+            # was 15s in (2026-09-28 16:45). Scan only if the menu is
+            # unreadable.
+            'try',
+            'set playbackToggleName to name of menu item 1 of menu 1 of menu bar item "Playback" of menu bar 1 as text',
+            'ignoring case',
+            'if playbackToggleName is "pause" then return "PLAYING"',
+            'if playbackToggleName is "play" then return "IDLE"',
+            'end ignoring',
+            'end try',
+            'set mainWindow to missing value',
+            'repeat with candidateWindow in windows',
+            'try',
+            'if name of candidateWindow is not "Dual Renderer" then',
+            'set mainWindow to candidateWindow',
+            'exit repeat',
+            'end if',
+            'end try',
+            'end repeat',
+            'if mainWindow is missing value then return "ERROR|KaraFun control window not found"',
+            'set out to ""',
+            'set playingHintFound to false',
+            'set idleTextFound to false',
+            'try',
+            'set elems to entire contents of mainWindow',
+            'on error',
+            'set elems to UI elements of mainWindow',
+            'end try',
+            'repeat with elem in elems',
+            'try',
+            'set labelText to ""',
+            'set controlDescription to ""',
+            'try',
+            'set labelText to (name of elem as text) & " " & (description of elem as text) & " " & (help of elem as text) & " " & (value of elem as text)',
+            'end try',
+            'try',
+            'set controlDescription to description of elem as text',
+            'end try',
+            'ignoring case',
+            '-- The idle button help is always "Play/Pause". Its actual',
+            '-- description changes from play to pause during playback.',
+            'if controlDescription is "pause" or controlDescription is "stop" then set playingHintFound to true',
+            'if labelText contains "no item is being played" then set idleTextFound to true',
+            'end ignoring',
+            'end try',
+            'end repeat',
+            'if playingHintFound then return "PLAYING"',
+            '-- Direct result playback does not populate the queue, so',
+            '-- "Your queue is empty" remains visible while playing.',
+            'if idleTextFound then return "IDLE"',
+            'return "UNKNOWN"',
+            'end tell',
+            'end tell',
+        ]
+
+    @staticmethod
+    def _karafun_set_key_tempo_script(requested_key, requested_tempo):
+        return [
+            'tell application "System Events"',
+            'tell application process "KaraFun"',
+            'set mainWindow to missing value',
+            'repeat with candidateWindow in windows',
+            'try',
+            'if name of candidateWindow is not "Dual Renderer" then set mainWindow to candidateWindow',
+            'end try',
+            'end repeat',
+            'if mainWindow is missing value then return "ERROR|KaraFun control window not found"',
+            'try',
+            'set elems to entire contents of mainWindow',
+            'on error',
+            'set elems to UI elements of mainWindow',
+            'end try',
+            # Never open KaraFun's Audio Settings popover. It is
+            # already configured by the host and opening it here
+            # was the slow/freeze-prone part of every launch. Only
+            # adjust named controls already exposed by the player.
+            'set keySet to false',
+            'set tempoSet to false',
+            'repeat with elem in elems',
+            'try',
+            'if role of elem is "AXSlider" then',
+            'set labelText to ""',
+            'try',
+            'set labelText to (description of elem as text) & " " & (help of elem as text) & " " & (name of elem as text)',
+            'end try',
+            'ignoring case',
+            f'if labelText contains "key" or labelText contains "pitch" then set value of elem to {requested_key}',
+            f'if labelText contains "tempo" or labelText contains "speed" then set value of elem to {requested_tempo}',
+            'if labelText contains "key" or labelText contains "pitch" then set keySet to true',
+            'if labelText contains "tempo" or labelText contains "speed" then set tempoSet to true',
+            'end ignoring',
+            'end if',
+            'end try',
+            'end repeat',
+            'return "ADJUSTED|" & keySet & "|" & tempoSet',
+            'end tell',
+            'end tell',
+        ]
+
     def _automate_karafun_search_and_play(self, entry: dict, *, key=0, tempo_percent=None):
         """Search, queue, start, and adjust an exact track in the official KaraFun app."""
         if sys.platform != "darwin" or not bool(self.settings.get("karafun_auto_queue_enabled", False)):
@@ -59280,16 +59503,7 @@ class KaraokeApp(QWidget):
                             point = entry.get("karafun_result_activation_point")
                             if point:
                                 _diag("[KARAFUN-AUTO] learned native click did not start playback; trying accessibility double-click")
-                                _run_session_script([
-                                    'tell application "System Events"',
-                                    'tell (first application process whose name contains "KaraFun")',
-                                    'set frontmost to true',
-                                    f'click at {{{int(point[0])}, {int(point[1])}}}',
-                                    'delay 0.12',
-                                    f'click at {{{int(point[0])}, {int(point[1])}}}',
-                                    'end tell',
-                                    'end tell',
-                                ], timeout=5)
+                                _run_session_script(self._karafun_click_point_script(point), timeout=5)
                         time.sleep(0.5)
                 threading.Thread(target=_run, daemon=True, name="karafun-start-watch").start()
 
@@ -59449,45 +59663,7 @@ class KaraokeApp(QWidget):
                     entry["karafun_result_activation_point"] = activation_point
                     if not self._macos_native_mouse_click(*activation_point, clicks=1):
                         raise RuntimeError("Could not select the KaraFun result for key/tempo setup")
-                    queued_ok, queued_result, queued_error = _run_session_script([
-                        'tell application "System Events"',
-                        'tell application process "KaraFun"',
-                        'set frontmost to true',
-                        'click menu bar item "Song" of menu bar 1',
-                        'delay 0.15',
-                        # Play Now, not Add to Queue: Add to Queue only auto-starts
-                        # when KaraFun's queue is empty (2026-09-28: a leftover queued
-                        # song meant nothing started and the song failed).
-                        'set playNow to menu item "Play Now" of menu 1 of menu bar item "Song" of menu bar 1',
-                        'if not enabled of playNow then return "PLAY_NOW_DISABLED"',
-                        'click playNow',
-                        '-- Pause the start and VERIFY it holds. A single pause click sent',
-                        '-- while the song is still loading did nothing and the song then',
-                        '-- played (2026-09-28), so re-press until "Play" stays for 0.6s',
-                        '-- after the song has been seen playing.',
-                        'set seenPlaying to false',
-                        'set stable to 0',
-                        'repeat 80 times',
-                        'try',
-                        'set playbackItem to menu item 1 of menu 1 of menu bar item "Playback" of menu bar 1',
-                        'set playbackName to name of playbackItem as text',
-                        'ignoring case',
-                        'if playbackName is "pause" then',
-                        'set seenPlaying to true',
-                        'set stable to 0',
-                        'click playbackItem',
-                        'else if playbackName is "play" and seenPlaying then',
-                        'set stable to stable + 1',
-                        'if stable is greater than or equal to 4 then return "QUEUED_PAUSED"',
-                        'end if',
-                        'end ignoring',
-                        'end try',
-                        'delay 0.15',
-                        'end repeat',
-                        'return "QUEUED_NOT_PAUSED"',
-                        'end tell',
-                        'end tell',
-                    ], timeout=20)
+                    queued_ok, queued_result, queued_error = _run_session_script(self._karafun_play_now_queue_script(), timeout=20)
                     if not queued_ok or str(queued_result or "").strip() != "QUEUED_PAUSED":
                         # Do not fail the song. Play it normally and tell the operator
                         # the key/tempo needs a hand.
@@ -59518,30 +59694,7 @@ class KaraokeApp(QWidget):
                         tempo_steps = abs(int(requested_tempo) - 100)
                         key_item = "Key Up" if requested_key > 0 else "Key Down"
                         tempo_item = "Tempo Up" if requested_tempo > 100 else "Tempo Down"
-                        adjust_lines = [
-                            'tell application "System Events"',
-                            'tell application process "KaraFun"',
-                            'set frontmost to true',
-                            'set keyDone to 0',
-                            'set tempoDone to 0',
-                            f'repeat {key_steps} times',
-                            'try',
-                            f'click menu item "{key_item}" of menu 1 of menu bar item "Playback" of menu bar 1',
-                            'set keyDone to keyDone + 1',
-                            'end try',
-                            'delay 0.12',
-                            'end repeat',
-                            f'repeat {tempo_steps} times',
-                            'try',
-                            f'click menu item "{tempo_item}" of menu 1 of menu bar item "Playback" of menu bar 1',
-                            'set tempoDone to tempoDone + 1',
-                            'end try',
-                            'delay 0.08',
-                            'end repeat',
-                            'return "ADJUSTED|" & keyDone & "|" & tempoDone',
-                            'end tell',
-                            'end tell',
-                        ]
+                        adjust_lines = self._karafun_adjust_menu_script(key_item, key_steps, tempo_item, tempo_steps)
                         auto_adjusted = False
                         if bool(self.settings.get("karafun_auto_key_tempo", True)):
                             for adjust_attempt in (1, 2):
@@ -59643,30 +59796,7 @@ class KaraokeApp(QWidget):
                         # can change screen coordinates. Raise the control
                         # window, then resolve the exact result again before
                         # sending the double-click.
-                        raised, raise_result, raise_error = _run_session_script([
-                            'tell application "System Events"',
-                            'tell application process "KaraFun"',
-                            'set frontmost to true',
-                            'repeat with w in windows',
-                            'if name of w starts with "Results for" then',
-                            'perform action "AXRaise" of w',
-                            'return "READY"',
-                            'end if',
-                            'end repeat',
-                            'try',
-                            'set windowMenu to menu 1 of menu bar item "Window" of menu bar 1',
-                            'repeat with menuEntry in menu items of windowMenu',
-                            'set entryName to name of menuEntry as text',
-                            'if entryName starts with "Results for" then',
-                            'click menuEntry',
-                            'return "READY"',
-                            'end if',
-                            'end repeat',
-                            'end try',
-                            'return "NO_CONTROL_WINDOW"',
-                            'end tell',
-                            'end tell',
-                        ], timeout=5)
+                        raised, raise_result, raise_error = _run_session_script(self._karafun_renderer_ready_script(), timeout=5)
                         if raised and str(raise_result or "").strip() == "READY":
                             activated, activation_error = self._karafun_activate_result_for_playback(
                                 activation_point
@@ -59736,65 +59866,7 @@ class KaraokeApp(QWidget):
                 _require_current_session()
 
 
-                playback_probe_script = [
-                    'tell application "System Events"',
-                    'tell application process "KaraFun"',
-                    # Playback menu first: it answers instantly, while the full
-                    # tree scan below took 10-15s and, because KaraFun AppleScript
-                    # cannot run concurrently, held up the BGM fade until the song
-                    # was 15s in (2026-09-28 16:45). Scan only if the menu is
-                    # unreadable.
-                    'try',
-                    'set playbackToggleName to name of menu item 1 of menu 1 of menu bar item "Playback" of menu bar 1 as text',
-                    'ignoring case',
-                    'if playbackToggleName is "pause" then return "PLAYING"',
-                    'if playbackToggleName is "play" then return "IDLE"',
-                    'end ignoring',
-                    'end try',
-                    'set mainWindow to missing value',
-                    'repeat with candidateWindow in windows',
-                    'try',
-                    'if name of candidateWindow is not "Dual Renderer" then',
-                    'set mainWindow to candidateWindow',
-                    'exit repeat',
-                    'end if',
-                    'end try',
-                    'end repeat',
-                    'if mainWindow is missing value then return "ERROR|KaraFun control window not found"',
-                    'set out to ""',
-                    'set playingHintFound to false',
-                    'set idleTextFound to false',
-                    'try',
-                    'set elems to entire contents of mainWindow',
-                    'on error',
-                    'set elems to UI elements of mainWindow',
-                    'end try',
-                    'repeat with elem in elems',
-                    'try',
-                    'set labelText to ""',
-                    'set controlDescription to ""',
-                    'try',
-                    'set labelText to (name of elem as text) & " " & (description of elem as text) & " " & (help of elem as text) & " " & (value of elem as text)',
-                    'end try',
-                    'try',
-                    'set controlDescription to description of elem as text',
-                    'end try',
-                    'ignoring case',
-                    '-- The idle button help is always "Play/Pause". Its actual',
-                    '-- description changes from play to pause during playback.',
-                    'if controlDescription is "pause" or controlDescription is "stop" then set playingHintFound to true',
-                    'if labelText contains "no item is being played" then set idleTextFound to true',
-                    'end ignoring',
-                    'end try',
-                    'end repeat',
-                    'if playingHintFound then return "PLAYING"',
-                    '-- Direct result playback does not populate the queue, so',
-                    '-- "Your queue is empty" remains visible while playing.',
-                    'if idleTextFound then return "IDLE"',
-                    'return "UNKNOWN"',
-                    'end tell',
-                    'end tell',
-                ]
+                playback_probe_script = self._karafun_start_probe_script()
                 # Capture mode must verify that the post-renderer start really
                 # took. Treating an unknown menu state as PLAYING left the
                 # operator with a selected but silent result.
@@ -59918,47 +59990,7 @@ class KaraokeApp(QWidget):
                     while bool(getattr(self, "_karafun_handoff_in_progress", False)) and time.monotonic() < handoff_wait_deadline:
                         time.sleep(0.25)
                     time.sleep(1.5)
-                    adjust_script = [
-                        'tell application "System Events"',
-                        'tell application process "KaraFun"',
-                        'set mainWindow to missing value',
-                        'repeat with candidateWindow in windows',
-                        'try',
-                        'if name of candidateWindow is not "Dual Renderer" then set mainWindow to candidateWindow',
-                        'end try',
-                        'end repeat',
-                        'if mainWindow is missing value then return "ERROR|KaraFun control window not found"',
-                        'try',
-                        'set elems to entire contents of mainWindow',
-                        'on error',
-                        'set elems to UI elements of mainWindow',
-                        'end try',
-                        # Never open KaraFun's Audio Settings popover. It is
-                        # already configured by the host and opening it here
-                        # was the slow/freeze-prone part of every launch. Only
-                        # adjust named controls already exposed by the player.
-                        'set keySet to false',
-                        'set tempoSet to false',
-                        'repeat with elem in elems',
-                        'try',
-                        'if role of elem is "AXSlider" then',
-                        'set labelText to ""',
-                        'try',
-                        'set labelText to (description of elem as text) & " " & (help of elem as text) & " " & (name of elem as text)',
-                        'end try',
-                        'ignoring case',
-                        f'if labelText contains "key" or labelText contains "pitch" then set value of elem to {requested_key}',
-                        f'if labelText contains "tempo" or labelText contains "speed" then set value of elem to {requested_tempo}',
-                        'if labelText contains "key" or labelText contains "pitch" then set keySet to true',
-                        'if labelText contains "tempo" or labelText contains "speed" then set tempoSet to true',
-                        'end ignoring',
-                        'end if',
-                        'end try',
-                        'end repeat',
-                        'return "ADJUSTED|" & keySet & "|" & tempoSet',
-                        'end tell',
-                        'end tell',
-                    ]
+                    adjust_script = self._karafun_set_key_tempo_script(requested_key, requested_tempo)
                     ok, adjusted, script_error = _run_session_script(adjust_script, timeout=8)
                     if not ok:
                         _diag(f"[KARAFUN-AUTO] adjustment skipped error={str(script_error or '')[:180]!r}")
@@ -60110,6 +60142,93 @@ class KaraokeApp(QWidget):
                          terminal_title=terminal_title, row_title=str((req or {}).get("title") or ""))
         except Exception:
             pass
+
+    @staticmethod
+    def _karafun_monitor_probe_script():
+        return [
+            'tell application "System Events"',
+            'set matches to every application process whose name contains "KaraFun"',
+            'if (count of matches) is 0 then return ""',
+            'tell item 1 of matches',
+            # The control window is hidden while Dual Renderer owns
+            # a fullscreen Space, but KaraFun keeps its Playback
+            # menu available. Its first item toggles between Play
+            # and Pause and remains cheap to read in that state.
+            'set menuSaysIdle to false',
+            'try',
+            'set playbackToggleName to name of menu item 1 of menu 1 of menu bar item "Playback" of menu bar 1 as text',
+            'ignoring case',
+            'if playbackToggleName is "pause" then return "STATE|PLAYING"',
+            'if playbackToggleName is "play" then set menuSaysIdle to true',
+            'end ignoring',
+            'end try',
+            'if (count of windows) is 0 then return ""',
+            'set mainWindow to missing value',
+            'repeat with candidateWindow in windows',
+            'try',
+            'if name of candidateWindow is not "Dual Renderer" then',
+            'set mainWindow to candidateWindow',
+            'exit repeat',
+            'end if',
+            'end try',
+            'end repeat',
+            'if mainWindow is missing value then return ""',
+            'set out to ""',
+            'set idleTextFound to false',
+            'set playingHintFound to false',
+            # Everything the monitor needs (the play/pause button, the
+            # "no item is being played" text and the two clocks) is a
+            # direct child of the main split group. Walking the whole
+            # window also visits every search-result row, which took
+            # 11-31 seconds at the end of each song (2026-09-29): the
+            # end was noticed that late and background music stayed
+            # silent until then. Read just that panel; fall back to the
+            # full walk only if the layout is not what we expect.
+            'set elems to {}',
+            'try',
+            'repeat with topElement in UI elements of mainWindow',
+            'if (role of topElement as text) is "AXSplitGroup" then',
+            'set elems to UI elements of topElement',
+            'exit repeat',
+            'end if',
+            'end repeat',
+            'end try',
+            'if (count of elems) is 0 then',
+            'try',
+            'set elems to entire contents of mainWindow',
+            'on error',
+            'set elems to UI elements of mainWindow',
+            'end try',
+            'end if',
+            'repeat with elem in elems',
+            'try',
+            # Query only attributes used by the monitor. Fetching
+            # name/description/help/value on every tree node made
+            # each show-machine poll take 16-18 seconds.
+            'set elementRole to role of elem',
+            'if elementRole is "AXButton" then',
+            'set controlDescription to description of elem as text',
+            'ignoring case',
+            'if controlDescription is "pause" or controlDescription is "stop" then set playingHintFound to true',
+            'end ignoring',
+            'else if elementRole is "AXStaticText" then',
+            'set n to name of elem as text',
+            'ignoring case',
+            # Direct result playback can leave the queue empty.
+            # That label cannot distinguish playing from idle.
+            'if n contains "no item is being played" then set idleTextFound to true',
+            'end ignoring',
+            'if n contains ":" and (length of n) is less than 9 then set out to out & n & linefeed',
+            'end if',
+            'end try',
+            'end repeat',
+            'if idleTextFound and not playingHintFound then set out to out & "STATE|ENDED" & linefeed',
+            'if playingHintFound then set out to out & "STATE|PLAYING" & linefeed',
+            'if menuSaysIdle and not idleTextFound and not playingHintFound then set out to out & "STATE|IDLE" & linefeed',
+            'return out',
+            'end tell',
+            'end tell',
+        ]
 
     def _start_karafun_completion_monitor(self, entry: dict):
         """Complete the active external track once KaraFun reports end/idle state."""
@@ -60310,90 +60429,7 @@ class KaraokeApp(QWidget):
                 playing_reported = False
                 clocks = []
                 try:
-                    script = [
-                        'tell application "System Events"',
-                        'set matches to every application process whose name contains "KaraFun"',
-                        'if (count of matches) is 0 then return ""',
-                        'tell item 1 of matches',
-                        # The control window is hidden while Dual Renderer owns
-                        # a fullscreen Space, but KaraFun keeps its Playback
-                        # menu available. Its first item toggles between Play
-                        # and Pause and remains cheap to read in that state.
-                        'set menuSaysIdle to false',
-                        'try',
-                        'set playbackToggleName to name of menu item 1 of menu 1 of menu bar item "Playback" of menu bar 1 as text',
-                        'ignoring case',
-                        'if playbackToggleName is "pause" then return "STATE|PLAYING"',
-                        'if playbackToggleName is "play" then set menuSaysIdle to true',
-                        'end ignoring',
-                        'end try',
-                        'if (count of windows) is 0 then return ""',
-                        'set mainWindow to missing value',
-                        'repeat with candidateWindow in windows',
-                        'try',
-                        'if name of candidateWindow is not "Dual Renderer" then',
-                        'set mainWindow to candidateWindow',
-                        'exit repeat',
-                        'end if',
-                        'end try',
-                        'end repeat',
-                        'if mainWindow is missing value then return ""',
-                        'set out to ""',
-                        'set idleTextFound to false',
-                        'set playingHintFound to false',
-                        # Everything the monitor needs (the play/pause button, the
-                        # "no item is being played" text and the two clocks) is a
-                        # direct child of the main split group. Walking the whole
-                        # window also visits every search-result row, which took
-                        # 11-31 seconds at the end of each song (2026-09-29): the
-                        # end was noticed that late and background music stayed
-                        # silent until then. Read just that panel; fall back to the
-                        # full walk only if the layout is not what we expect.
-                        'set elems to {}',
-                        'try',
-                        'repeat with topElement in UI elements of mainWindow',
-                        'if (role of topElement as text) is "AXSplitGroup" then',
-                        'set elems to UI elements of topElement',
-                        'exit repeat',
-                        'end if',
-                        'end repeat',
-                        'end try',
-                        'if (count of elems) is 0 then',
-                        'try',
-                        'set elems to entire contents of mainWindow',
-                        'on error',
-                        'set elems to UI elements of mainWindow',
-                        'end try',
-                        'end if',
-                        'repeat with elem in elems',
-                        'try',
-                        # Query only attributes used by the monitor. Fetching
-                        # name/description/help/value on every tree node made
-                        # each show-machine poll take 16-18 seconds.
-                        'set elementRole to role of elem',
-                        'if elementRole is "AXButton" then',
-                        'set controlDescription to description of elem as text',
-                        'ignoring case',
-                        'if controlDescription is "pause" or controlDescription is "stop" then set playingHintFound to true',
-                        'end ignoring',
-                        'else if elementRole is "AXStaticText" then',
-                        'set n to name of elem as text',
-                        'ignoring case',
-                        # Direct result playback can leave the queue empty.
-                        # That label cannot distinguish playing from idle.
-                        'if n contains "no item is being played" then set idleTextFound to true',
-                        'end ignoring',
-                        'if n contains ":" and (length of n) is less than 9 then set out to out & n & linefeed',
-                        'end if',
-                        'end try',
-                        'end repeat',
-                        'if idleTextFound and not playingHintFound then set out to out & "STATE|ENDED" & linefeed',
-                        'if playingHintFound then set out to out & "STATE|PLAYING" & linefeed',
-                        'if menuSaysIdle and not idleTextFound and not playingHintFound then set out to out & "STATE|IDLE" & linefeed',
-                        'return out',
-                        'end tell',
-                        'end tell',
-                    ]
+                    script = self._karafun_monitor_probe_script()
                     probe_started = time.monotonic()
                     ok, raw, _script_error = self._run_karafun_applescript_sync(script, timeout=4)
                     if (getattr(self, "_active_external_karafun", None) is not active_session

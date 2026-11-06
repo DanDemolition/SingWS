@@ -17,6 +17,15 @@ BUILDERS = {
     "_karafun_seek_script": "_karafun_seek_to",
     "_karafun_toggle_playback_script": "_toggle_karafun_playback",
     "_karafun_double_click_script": "_karafun_activate_result_for_playback",
+    "_karafun_handoff_script": "_handoff_show_screen_to_karafun",
+    "_karafun_restore_script": "_restore_show_screen_from_karafun",
+    "_karafun_click_point_script": "_automate_karafun_search_and_play",
+    "_karafun_play_now_queue_script": "_automate_karafun_search_and_play",
+    "_karafun_adjust_menu_script": "_automate_karafun_search_and_play",
+    "_karafun_renderer_ready_script": "_automate_karafun_search_and_play",
+    "_karafun_start_probe_script": "_automate_karafun_search_and_play",
+    "_karafun_set_key_tempo_script": "_automate_karafun_search_and_play",
+    "_karafun_monitor_probe_script": "_start_karafun_completion_monitor",
 }
 
 

@@ -15,7 +15,7 @@ from karafun_fullscreen import renderer_raise_script, renderer_fullscreen_script
 def methods():
     tree = ast.parse(Path('0.2.18.1.py').read_text())
     names = {'_karafun_activate_result_for_playback', '_karafun_search_script',
-             '_handoff_show_screen_to_karafun', '_karafun_double_click_script'}
+             '_handoff_show_screen_to_karafun', '_karafun_double_click_script', '_karafun_handoff_script'}
     nodes = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name in names]
     # _karafun_search_script also uses two module-level helpers (title qualifiers, strict song-length test)
     nodes += [n for n in tree.body if (isinstance(n, ast.FunctionDef) and n.name == 'karafun_match_title')
@@ -154,6 +154,7 @@ class StartupTests(unittest.TestCase):
             settings={'karafun_manage_show_screen': True},
             _active_external_karafun={'entry': {}},
             video_window=window, _karafun_run_window_script=run_script,
+            _karafun_handoff_script=methods()['_karafun_handoff_script'],
         )
         diagnostics = []
         namespace = {'sys': SimpleNamespace(platform='darwin'), 'uuid': uuid,

@@ -23,7 +23,9 @@ ROOT = Path(__file__).resolve().parent.parent
 PY = {}  # the other real Python functions, filled by load_python()
 
 
-BUILDERS = ("_karafun_read_key_tempo_script", "_karafun_toggle_playback_script", "_karafun_apply_key_tempo_script", "_karafun_seek_script", "_karafun_double_click_script",
+BUILDERS = ("_karafun_handoff_script", "_karafun_restore_script", "_karafun_click_point_script", "_karafun_play_now_queue_script", "_karafun_adjust_menu_script",
+            "_karafun_renderer_ready_script", "_karafun_start_probe_script", "_karafun_set_key_tempo_script", "_karafun_monitor_probe_script",
+            "_karafun_read_key_tempo_script", "_karafun_toggle_playback_script", "_karafun_apply_key_tempo_script", "_karafun_seek_script", "_karafun_double_click_script",
             "_karafun_preflight_script", "_karafun_main_window_state_script", "_karafun_press_play_script", "_karafun_playback_menu_state_script",
             "_karafun_raise_results_window_script", "_karafun_search_diag_script")
 METHODS = BUILDERS + ("_karafun_search_script", "_karafun_applescript_literal", "_karafun_fallback_remaining", "_karafun_adjustment_needs_attention",
@@ -58,7 +60,12 @@ def load_python():
     PY["builders"] = {"preflight": ns["_karafun_preflight_script"], "main_window_state": ns["_karafun_main_window_state_script"], "press_play": ns["_karafun_press_play_script"],
                       "playback_menu_state": ns["_karafun_playback_menu_state_script"], "raise_results_window": ns["_karafun_raise_results_window_script"],
                       "preview_probe": ns["karafun_preview_probe_script"], "read_key_tempo": ns["_karafun_read_key_tempo_script"],
-                      "toggle_playback": ns["_karafun_toggle_playback_script"]}
+                      "toggle_playback": ns["_karafun_toggle_playback_script"], "restore": ns["_karafun_restore_script"], "play_now_queue": ns["_karafun_play_now_queue_script"],
+                      "renderer_ready": ns["_karafun_renderer_ready_script"], "start_probe": ns["_karafun_start_probe_script"], "monitor_probe": ns["_karafun_monitor_probe_script"]}
+    PY["handoff"] = ns["_karafun_handoff_script"]
+    PY["click_point"] = ns["_karafun_click_point_script"]
+    PY["adjust_menu"] = ns["_karafun_adjust_menu_script"]
+    PY["set_key_tempo"] = ns["_karafun_set_key_tempo_script"]
     PY["apply_key_tempo"] = ns["_karafun_apply_key_tempo_script"]
     PY["seek"] = ns["_karafun_seek_script"]
     PY["double_click"] = ns["_karafun_double_click_script"]
@@ -239,6 +246,26 @@ def check_pure(binary, diffs, seeds):
             req = {"op": "script", "name": "double_click", "x": x, "y": y}
             if batch([req])[0].get("lines") != PY["double_click"](x, y):
                 diffs.append(("double_click", req, "the Rust lines differ from the Python builder"))
+    for x in (0, 1680, -1, 2560):
+        for y in (0, 25, -7):
+            for w, h in ((1920, 1080), (1, 1), (3840, 2160)):
+                req = {"op": "script", "name": "handoff", "x": x, "y": y, "width": w, "height": h}
+                if batch([req])[0].get("lines") != PY["handoff"](x, y, w, h):
+                    diffs.append(("handoff", req, "the Rust lines differ from the Python builder"))
+        req = {"op": "script", "name": "click_point", "x": x, "y": x // 2}
+        if batch([req])[0].get("lines") != PY["click_point"]((x, x // 2)):
+            diffs.append(("click_point", req, "the Rust lines differ from the Python builder"))
+    for ks in (0, 1, 7):
+        for ts in (0, 3, 25):
+            for ki, ti in (("Key Up", "Tempo Up"), ("Key Down", "Tempo Down")):
+                req = {"op": "script", "name": "adjust_menu", "key_item": ki, "key_steps": ks, "tempo_item": ti, "tempo_steps": ts}
+                if batch([req])[0].get("lines") != PY["adjust_menu"](ki, ks, ti, ts):
+                    diffs.append(("adjust_menu", req, "the Rust lines differ from the Python builder"))
+    for rk in (-12, -1, 0, 5):
+        for rt in (50, 100, 125):
+            req = {"op": "script", "name": "set_key_tempo", "requested_key": rk, "requested_tempo": rt}
+            if batch([req])[0].get("lines") != PY["set_key_tempo"](rk, rt):
+                diffs.append(("set_key_tempo", req, "the Rust lines differ from the Python builder"))
     return len(vals), len(reqs), len(parts), len(es)
 
 

@@ -1,3 +1,4 @@
+from test_karafun_monitor_safety import monitor_script_builder
 import ast
 import os
 import tempfile
@@ -26,6 +27,7 @@ class KaraFunProviderTests(unittest.TestCase):
             _karafun_press_play_control=mock.Mock(return_value=(True, "")),
             _set_karafun_entry_status=mock.Mock(),
             _karafun_clock_seconds=lambda value: None,
+            _karafun_monitor_probe_script=monitor_script_builder(),
         )
         states = iter(["STATE|IDLE", "STATE|PLAYING", "STATE|PLAYING"])
         probes = []
@@ -156,7 +158,7 @@ class KaraFunProviderTests(unittest.TestCase):
             source.index('activated, activation_error = self._karafun_activate_result_for_playback('),
         )
         self.assertIn("finish the renderer handoff, then reactivate", source)
-        handoff = source[source.index("def _handoff_show_screen_to_karafun"):]
+        handoff = source[source.index("def _karafun_handoff_script"):]  # the script lives in the builder just above the method
         handoff = handoff[:handoff.index("def _restore_show_screen_from_karafun")]
         self.assertEqual(handoff.count("click at {bestButtonX, bestButtonY}"), 1)
         self.assertIn('if outputWindow is not missing value then', handoff)
@@ -179,7 +181,7 @@ class KaraFunProviderTests(unittest.TestCase):
         self.assertNotIn("set outputWindow to first window", fallback)
         self.assertIn("def _restore_show_screen_from_karafun(self):", source)
         self.assertIn('attribute "AXMinimized"', source)
-        restore = source[source.index("def _restore_show_screen_from_karafun"):]
+        restore = source[source.index("def _karafun_restore_script"):]  # the script lives in the builder just above the method
         restore = restore[:restore.index("def _copy_karafun_lookup_text")]
         self.assertIn("restore_token = uuid.uuid4().hex", restore)
         self.assertIn("skipped stale KaraFun Dual Renderer minimize", restore)
@@ -232,7 +234,7 @@ class KaraFunProviderTests(unittest.TestCase):
         self.assertNotIn('perform action "AXPress"', route)
         self.assertNotIn("audioSettingsButton", route)
         self.assertNotIn("_run_karafun_applescript_sync", route)
-        worker = source[source.index("def _automate_karafun_search_and_play"):]
+        worker = source[source.index("def _karafun_click_point_script"):]  # the six scripts are builders just above the method
         worker = worker[:worker.index("def _karafun_clock_seconds")]
         self.assertLess(worker.index("_ensure_karafun_audio_output()"), worker.index("search attempt="))
         self.assertIn("fast start continuing after result activation", worker)
@@ -247,7 +249,7 @@ class KaraFunProviderTests(unittest.TestCase):
         self.assertIn("Authorization status", source)
         self.assertIn("manager.requestWhenInUseAuthorization()", source)
         self.assertNotIn('lat_raw == "" or lng_raw == "" or source == "auto_detected"', source)
-        restore = source[source.index("def _restore_show_screen_from_karafun"):]
+        restore = source[source.index("def _karafun_restore_script"):]  # the script lives in the builder just above the method
         restore = restore[:restore.index("def _copy_karafun_lookup_text")]
         self.assertIn("restore snapshot missing; using current show-screen display", restore)
         self.assertNotIn("self._macos_native_double_click(", restore)
@@ -261,7 +263,7 @@ class KaraFunProviderTests(unittest.TestCase):
         self.assertIn("def _run_karafun_applescript_sync", source)
         search_helper = source[source.index("def _karafun_search_script"):]
         search_helper = search_helper[:search_helper.index("def _automate_karafun_search_only")]
-        worker = source[source.index("def _automate_karafun_search_and_play"):]
+        worker = source[source.index("def _karafun_click_point_script"):]  # the six scripts are builders just above the method
         worker = worker[:worker.index("def _fade_bg_for_external_karafun")]
         self.assertIn('entry["karafun_submission_state"] = "karafun_pending"', worker)
         self.assertIn('entry["karafun_pending_at"] = time.time()', worker)
@@ -353,7 +355,7 @@ class KaraFunProviderTests(unittest.TestCase):
         self.assertIn("self._handoff_show_screen_to_karafun()", worker)
         pre_play_handoff = worker[
             worker.index('managed_handoff = bool(self.settings.get("karafun_manage_show_screen", True))'):
-            worker.index('playback_probe_script = [')
+            worker.index('playback_probe_script = ')
         ]
         self.assertIn("if managed_handoff:", pre_play_handoff)
         self.assertIn('and initial_probe_state == "PLAYING" and not fast_start', worker)
@@ -407,7 +409,7 @@ class KaraFunProviderTests(unittest.TestCase):
 
     def test_karafun_monitor_requires_idle_and_end_evidence(self):
         source = Path("0.2.18.1.py").read_text(encoding="utf-8")
-        monitor = source[source.index("def _start_karafun_completion_monitor"):]
+        monitor = source[source.index("def _karafun_monitor_probe_script"):]  # the probe script lives in the builder just above the method
         monitor = monitor[:monitor.index("def _fade_bg_for_external_karafun")]
         self.assertIn('name of candidateWindow is not "Dual Renderer"', monitor)
         self.assertIn("if mainWindow is missing value then return", monitor)
@@ -516,7 +518,7 @@ class KaraFunProviderTests(unittest.TestCase):
         self.assertIn("self._show_karafun_accessibility_setup", search_only)
         self.assertIn('"permission"', search_only)
 
-        play_worker = source[source.index("def _automate_karafun_search_and_play"):]
+        play_worker = source[source.index("def _karafun_click_point_script"):]  # the six scripts are builders just above the method
         play_worker = play_worker[:play_worker.index("def _karafun_clock_seconds")]
         self.assertIn("self._is_karafun_accessibility_error", play_worker)
         self.assertIn("self._show_karafun_accessibility_setup", play_worker)
@@ -528,7 +530,7 @@ class KaraFunProviderTests(unittest.TestCase):
         self.assertIn("QApplication.clipboard().setText(text)", copy_helper)
         self.assertIn("return True", copy_helper)
 
-        monitor = source[source.index("def _start_karafun_completion_monitor"):]
+        monitor = source[source.index("def _karafun_monitor_probe_script"):]  # the probe script lives in the builder just above the method
         monitor = monitor[:monitor.index("def _fade_bg_for_external_karafun")]
         self.assertNotIn("QApplication.clipboard().setText(text)", monitor)
 

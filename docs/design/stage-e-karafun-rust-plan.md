@@ -15,33 +15,28 @@ Nothing below changes how the Python app drives KaraFun today.
 | Search query ladder (artist title, title artist, title, artist) with the title/artist cleaning | `pure.rs` (verbatim regexes, incl. the `feat\\.?` quirk) | 1,663 cleaned strings and 1,740 entries identical |
 | Accept/reject of one search answer (FOUND / TITLE_ONLY / FIRST, artist confirmation) | `pure.rs` | 1,080 cases against a TRANSCRIBED copy of the inline Python rule (source guard in `test_karafun_script_rs.py`) |
 | Live shadow, default ON: every search script the app builds is also built by the Rust helper and a difference is logged | `karafun_script_shadow.py`, helper `singws-karafun` bundled by both installers | `test_karafun_script_shadow.py`; NOT seen in a real show yet |
-| Mutation | `tools/mutate_karafun.py` over `lib.rs` and `pure.rs` | see HANDOFF for the counts |
-
-## Why the other scripts are not ported yet
-
-About 25 call sites run KaraFun scripts (`_run_karafun_applescript_sync`), but all except the search script and the diagnosis script are
-inline lists inside very large methods (`_automate_karafun_search_and_play` 899 lines, `_start_karafun_completion_monitor` 578, the hand-off pair
-~420). Porting them faithfully means first pulling each list out of its method into a pure builder, which edits the live Python on the show path.
-That refactor is the real next step and has its own risk, so it gets its own milestone, a quiet window, and a test that the extracted builder
-returns exactly the lines the inline code built.
+| **All 19 inline KaraFun scripts moved into static builders** in `0.2.18.1.py` (no behaviour change): preflight, window state, play press, playback menu state, raise results, read/apply key-tempo, seek, play/pause toggle, result double-click, show-screen hand-off and restore, click point, play-now queue, key/tempo menu adjust, renderer ready, start probe, set key/tempo sliders, completion-monitor probe | `tools/karafun_extract.py apply` (AST-driven, nothing hand-edited) | `tools/karafun_extract.py check d2d9975`: every moved list has the IDENTICAL syntax tree as the inline list in the commit before; every call site and parameter list checked; 27 call sites have `self` in scope |
+| Rust twins of all 19 builders + the search script + the diagnosis script + the preview probe, GENERATED from the Python | `rust/crates/singws-karafun/src/builders.rs` (`--check` guards drift) | `tools/karafun_script_parity.py`: every fixed script and every parametrised one (key/tempo grids, seek counts, coordinates, hand-off rectangles) identical to the Python builder |
+| Mutation | `tools/mutate_karafun.py` over `lib.rs` and `pure.rs` | 133 mutants, 111 killed, 16 documented survivors, 6 do not compile, 0 undocumented |
 
 ## Next milestones, in order
 
-1. **Extract the inline scripts into pure builders in Python (no behaviour change).** One method at a time, smallest first: main-window state,
-   play-control press, playback menu state, results-window raise, key/tempo read and apply, seek, result activation, the completion monitor.
-   Each extraction ships with a test that the builder output equals the old inline text (capture the old lines once, compare). Do it between shows.
-2. **Port each extracted builder** with the same machinery: generator output + parity tool + mutation. The monitor script and its answer parsing
-   (`playing`, idle, clock, end hints) are the most valuable; they feed the `singws-transport` KaraFun decisions that are already shadowed.
-3. **Port the search-and-play flow as a state machine** fed with script answers (search ladder, UI-not-ready retries, diagnosis on no match,
-   play, verify, recovery press at 12 s, warn at 40 s). Oracle: a replay harness that drives the real Python flow with a fake script runner and
-   compares the sequence of scripts requested and decisions logged (the same method as `queue_event_replay.py`).
-4. **Live runner on this Mac:** run the Rust-built scripts through `singws_mac::run_applescript` against the real KaraFun (never during a show),
-   compare answers with the Python runner on the same KaraFun state, and add the result to the readiness report.
-5. **Shadow in a show:** the Rust flow decides in parallel with Python and logs differences (like START-SHADOW). A show per decision (ledger policy).
-6. **Capture and show-screen hand-off:** reuse the existing ScreenCaptureKit dylib (`native/karafun_capture`) from Rust through its C interface rather
+1. ~~Extract the inline scripts into pure builders in Python, port them with generate-and-compare~~ **DONE (2026-11-06), see the table above.**
+   Not extracted on purpose: anything that is not a plain `[...]` list literal of strings (none left in the five big methods).
+2. **Port the search-and-play flow as a state machine** fed with script answers (search ladder, UI-not-ready retries, diagnosis on no match,
+   play, verify, recovery press at 12 s, warn at 40 s). The scripts and the accept/reject rule are done; what is left is the sequencing and timing in
+   `_automate_karafun_search_and_play` (899 lines) and `_start_karafun_completion_monitor` (578). Oracle: a replay harness that drives the real
+   Python flow with a fake script runner and compares the sequence of scripts requested and the decisions logged (the same method as
+   `queue_event_replay.py`; `MonitorReplay` in `test_karafun_monitor_safety.py` is the starting point for the monitor half).
+3. **Live runner on this Mac:** run the Rust-built scripts through `singws_mac::run_applescript` against the real KaraFun (never during a show),
+   compare answers with the Python runner on the same KaraFun state (done once by hand for the search script on 2026-11-06: same answer), and add the
+   result to the readiness report.
+4. **Shadow in a show:** extend `karafun_script_shadow` from the search script to every builder call, then to the flow's decisions (like START-SHADOW).
+   A clean show per decision (ledger policy).
+5. **Capture and show-screen hand-off:** reuse the existing ScreenCaptureKit dylib (`native/karafun_capture`) from Rust through its C interface rather
    than rewrite it; the hand-off/restore of the audience window depends on the Rust audience window and needs the real TV, so it comes last and
    cannot be proven offline.
-7. **Drive behind a flag** (`karafun_engine`), Python kept as the one-line fallback, after clean shows on every step above.
+6. **Drive behind a flag** (`karafun_engine`), Python kept as the one-line fallback, after clean shows on every step above.
 
 ## Constraints that stay
 

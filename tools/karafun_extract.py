@@ -16,16 +16,26 @@ SRC = ROOT / "0.2.18.1.py"
 # (method that holds the inline list, new builder name)
 # (method that holds the inline list, new builder name, builder parameters = the local names the list uses, which keeps the syntax tree identical)
 TARGETS = [
-    ("_karafun_apple_events_preflight", "_karafun_preflight_script", ()),
-    ("_karafun_main_window_state", "_karafun_main_window_state_script", ()),
-    ("_karafun_press_play_control", "_karafun_press_play_script", ()),
-    ("_karafun_playback_menu_state", "_karafun_playback_menu_state_script", ()),
-    ("_karafun_raise_results_window", "_karafun_raise_results_window_script", ()),
-    ("_karafun_read_key_tempo", "_karafun_read_key_tempo_script", ()),
-    ("_karafun_apply_key_tempo", "_karafun_apply_key_tempo_script", ("key_delta", "tempo_delta", "key_item", "tempo_item")),
-    ("_karafun_seek_to", "_karafun_seek_script", ("count", "item")),
-    ("_toggle_karafun_playback", "_karafun_toggle_playback_script", ()),
-    ("_karafun_activate_result_for_playback", "_karafun_double_click_script", ("x", "y")),
+    ("_karafun_apple_events_preflight", "_karafun_preflight_script", (), 0),
+    ("_karafun_main_window_state", "_karafun_main_window_state_script", (), 0),
+    ("_karafun_press_play_control", "_karafun_press_play_script", (), 0),
+    ("_karafun_playback_menu_state", "_karafun_playback_menu_state_script", (), 0),
+    ("_karafun_raise_results_window", "_karafun_raise_results_window_script", (), 0),
+    ("_karafun_read_key_tempo", "_karafun_read_key_tempo_script", (), 0),
+    ("_karafun_apply_key_tempo", "_karafun_apply_key_tempo_script", ("key_delta", "tempo_delta", "key_item", "tempo_item"), 0),
+    ("_karafun_seek_to", "_karafun_seek_script", ("count", "item"), 0),
+    ("_toggle_karafun_playback", "_karafun_toggle_playback_script", (), 0),
+    ("_karafun_activate_result_for_playback", "_karafun_double_click_script", ("x", "y"), 0),
+    # the big methods; several lists in one method are listed in the order they appear in the source (old_index = position, counted in the OLD source)
+    ("_handoff_show_screen_to_karafun", "_karafun_handoff_script", ("x", "y", "width", "height"), 0),
+    ("_restore_show_screen_from_karafun", "_karafun_restore_script", (), 0),
+    ("_automate_karafun_search_and_play", "_karafun_click_point_script", ("point",), 0),
+    ("_automate_karafun_search_and_play", "_karafun_play_now_queue_script", (), 1),
+    ("_automate_karafun_search_and_play", "_karafun_adjust_menu_script", ("key_item", "key_steps", "tempo_item", "tempo_steps"), 2),
+    ("_automate_karafun_search_and_play", "_karafun_renderer_ready_script", (), 3),
+    ("_automate_karafun_search_and_play", "_karafun_start_probe_script", (), 4),
+    ("_automate_karafun_search_and_play", "_karafun_set_key_tempo_script", ("requested_key", "requested_tempo"), 5),
+    ("_start_karafun_completion_monitor", "_karafun_monitor_probe_script", (), 0),
 ]
 
 
@@ -38,11 +48,12 @@ def method_node(tree, name):
     raise SystemExit(f"method {name} not found")
 
 
-def script_list(func):
-    for node in ast.walk(func):
-        if isinstance(node, ast.List) and node.elts and isinstance(node.elts[0], ast.Constant) and node.elts[0].value == 'tell application "System Events"':
-            return node
-    raise SystemExit(f"no System Events list in {func.name}")
+def script_list(func, nth=0):
+    found = sorted((n for n in ast.walk(func) if isinstance(n, ast.List) and n.elts and isinstance(n.elts[0], ast.Constant)
+                    and isinstance(n.elts[0].value, str) and n.elts[0].value.startswith("tell application")), key=lambda n: n.lineno)
+    if nth >= len(found):
+        raise SystemExit(f"no list #{nth} in {func.name}")
+    return found[nth]
 
 
 def segment(lines, node):
@@ -56,14 +67,15 @@ def segment(lines, node):
 
 def apply():
     text = SRC.read_text(encoding="utf-8")
-    for method, builder, params in TARGETS:
+    for method, builder, params, old_index in TARGETS:
         lines = text.split("\n")
         tree = ast.parse(text)
         func = method_node(tree, method)
         if any(isinstance(n, ast.FunctionDef) and n.name == builder for n in ast.walk(tree)):
             print(f"{builder}: already extracted")
             continue
-        node = script_list(func)
+        done_before = sum(1 for m, b, _p, i in TARGETS if m == method and i < old_index and any(isinstance(n, ast.FunctionDef) and n.name == b for n in ast.walk(tree)))
+        node = script_list(func, old_index - done_before)
         seg = segment(lines, node)
         seg_lines = seg.split("\n")
         closing_indent = len(seg_lines[-1]) - len(seg_lines[-1].lstrip())
@@ -86,8 +98,8 @@ def check(base="HEAD"):
     old = ast.parse(subprocess.check_output(["git", "show", f"{base}:0.2.18.1.py"], cwd=ROOT).decode("utf-8"))
     new = ast.parse(SRC.read_text(encoding="utf-8"))
     bad = 0
-    for method, builder, params in TARGETS:
-        was = script_list(method_node(old, method))
+    for method, builder, params, old_index in TARGETS:
+        was = script_list(method_node(old, method), old_index)
         func = method_node(new, builder)
         rets = [n for n in func.body if isinstance(n, ast.Return)]
         now = rets[0].value

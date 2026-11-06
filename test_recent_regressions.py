@@ -2294,7 +2294,8 @@ class KaraFunAutoStartRecoveryTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.singws = load_main_module()
-        cls.monitor = inspect.getsource(cls.singws.KaraokeApp._start_karafun_completion_monitor)
+        cls.monitor = (inspect.getsource(cls.singws.KaraokeApp._start_karafun_completion_monitor)
+                       + inspect.getsource(cls.singws.KaraokeApp._karafun_monitor_probe_script))  # the probe script is a builder now
         cls.automation = inspect.getsource(cls.singws.KaraokeApp._automate_karafun_search_and_play)
 
     def test_fast_start_records_that_playback_was_only_assumed(self):

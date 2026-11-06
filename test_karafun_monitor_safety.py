@@ -15,6 +15,16 @@ def monitor_code():
     return compile(ast.Module(body=[method], type_ignores=[]), "monitor-replay", "exec")
 
 
+def monitor_script_builder():
+    """The monitor's AppleScript now comes from a static builder (tools/karafun_extract.py); the fake host needs it."""
+    tree = ast.parse(Path("0.2.18.1.py").read_text())
+    func = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "_karafun_monitor_probe_script")
+    func.decorator_list = []
+    ns = {}
+    exec(compile(ast.Module(body=[func], type_ignores=[]), "monitor-script", "exec"), ns)
+    return ns["_karafun_monitor_probe_script"]
+
+
 class MonitorReplay:
     def __init__(self, events, *, duration=263, estimated=False, callbacks_immediate=True,
                  controlled_start=False, capture=False):
@@ -38,6 +48,7 @@ class MonitorReplay:
             _karafun_capture_session=capture,
             _run_karafun_applescript_sync=self.probe,
             _karafun_clock_seconds=self.clock_seconds,
+            _karafun_monitor_probe_script=monitor_script_builder(),
             _run_on_ui_thread=(lambda fn: fn()) if callbacks_immediate else self.callbacks.append,
             _karafun_activate_result_for_playback=mock.Mock(return_value=(True, "")),
             _karafun_press_play_control=mock.Mock(return_value=(True, "")),

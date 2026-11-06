@@ -89,6 +89,11 @@ pub fn static_script(name: &str) -> Option<Vec<String>> {
         "preview_probe" => builders::preview_probe(),
         "read_key_tempo" => builders::read_key_tempo(),
         "toggle_playback" => builders::toggle_playback(),
+        "restore" => builders::restore(),
+        "play_now_queue" => builders::play_now_queue(),
+        "renderer_ready" => builders::renderer_ready(),
+        "start_probe" => builders::start_probe(),
+        "monitor_probe" => builders::monitor_probe(),
         _ => return None,
     })
 }
@@ -111,6 +116,26 @@ pub fn seek_script(count: i64, item: &str) -> Vec<String> {
 /// `_karafun_double_click_script`: double-click a result row at (x, y).
 pub fn double_click_script(x: i64, y: i64) -> Vec<String> {
     builders::double_click(x, y)
+}
+
+/// `_karafun_handoff_script`: move and size KaraFun's Dual Renderer window onto the audience screen rectangle.
+pub fn handoff_script(x: i64, y: i64, width: i64, height: i64) -> Vec<String> {
+    builders::handoff(x, y, width, height)
+}
+
+/// `_karafun_click_point_script`: two clicks at a screen point.
+pub fn click_point_script(point: (i64, i64)) -> Vec<String> {
+    builders::click_point(point)
+}
+
+/// `_karafun_adjust_menu_script`: Key/Tempo menu clicks, `key_steps` and `tempo_steps` times.
+pub fn adjust_menu_script(key_item: &str, key_steps: i64, tempo_item: &str, tempo_steps: i64) -> Vec<String> {
+    builders::adjust_menu(key_item, key_steps, tempo_item, tempo_steps)
+}
+
+/// `_karafun_set_key_tempo_script`: set the Key and Tempo sliders to the requested values.
+pub fn set_key_tempo_script(requested_key: i64, requested_tempo: i64) -> Vec<String> {
+    builders::set_key_tempo(requested_key, requested_tempo)
 }
 
 /// `_karafun_search_script(query=, safe_title=, safe_artist=, require_exact_title=, resolve_only=)`: the AppleScript lines.

@@ -33,6 +33,14 @@ EXPR = {
     "item": "item",
     "x": "x",
     "y": "y",
+    "width": "width",
+    "height": "height",
+    "int(point[0])": "point.0",
+    "int(point[1])": "point.1",
+    "key_steps": "key_steps",
+    "tempo_steps": "tempo_steps",
+    "requested_key": "requested_key",
+    "requested_tempo": "requested_tempo",
 }
 
 
@@ -160,6 +168,15 @@ STATIC = [
     ("method", "_karafun_apply_key_tempo_script", "apply_key_tempo", [("key_delta", "i64"), ("tempo_delta", "i64"), ("key_item", "&str"), ("tempo_item", "&str")]),
     ("method", "_karafun_seek_script", "seek", [("count", "i64"), ("item", "&str")]),
     ("method", "_karafun_double_click_script", "double_click", [("x", "i64"), ("y", "i64")]),
+    ("method", "_karafun_handoff_script", "handoff", [("x", "i64"), ("y", "i64"), ("width", "i64"), ("height", "i64")]),
+    ("method", "_karafun_restore_script", "restore", []),
+    ("method", "_karafun_click_point_script", "click_point", [("point", "(i64, i64)")]),
+    ("method", "_karafun_play_now_queue_script", "play_now_queue", []),
+    ("method", "_karafun_adjust_menu_script", "adjust_menu", [("key_item", "&str"), ("key_steps", "i64"), ("tempo_item", "&str"), ("tempo_steps", "i64")]),
+    ("method", "_karafun_renderer_ready_script", "renderer_ready", []),
+    ("method", "_karafun_start_probe_script", "start_probe", []),
+    ("method", "_karafun_set_key_tempo_script", "set_key_tempo", [("requested_key", "i64"), ("requested_tempo", "i64")]),
+    ("method", "_karafun_monitor_probe_script", "monitor_probe", []),
 ]
 
 

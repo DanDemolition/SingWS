@@ -3,16 +3,22 @@
 //! stdout: {"lines":[...]} | {"title":..} | {"literal":..}   (a batch answers with a list)
 use serde_json::{json, Value};
 use singws_karafun::pure::{self, Duration, Verdict};
-use singws_karafun::{apply_key_tempo_script, applescript_literal, double_click_script, match_title, search_diag_script, search_script, seek_script, static_script};
+use singws_karafun::{adjust_menu_script, apply_key_tempo_script, applescript_literal, click_point_script, double_click_script, handoff_script, match_title, search_diag_script,
+                     search_script, seek_script, set_key_tempo_script, static_script};
 use std::io::Read;
 
 fn answer(v: &Value) -> Value {
     let s = |k: &str| v[k].as_str().unwrap_or("");
+    let i = |k: &str| v[k].as_i64().unwrap_or(0);
     match v["op"].as_str().unwrap_or("search_script") {
         "script" => match s("name") {
             "search_diag" => json!({"lines": search_diag_script(s("safe_title"))}),
             "apply_key_tempo" => json!({"lines": apply_key_tempo_script(
                 v["key_delta"].as_i64().unwrap_or(0), v["tempo_delta"].as_i64().unwrap_or(0), s("key_item"), s("tempo_item"))}),
+            "handoff" => json!({"lines": handoff_script(i("x"), i("y"), i("width"), i("height"))}),
+            "click_point" => json!({"lines": click_point_script((i("x"), i("y")))}),
+            "adjust_menu" => json!({"lines": adjust_menu_script(s("key_item"), i("key_steps"), s("tempo_item"), i("tempo_steps"))}),
+            "set_key_tempo" => json!({"lines": set_key_tempo_script(i("requested_key"), i("requested_tempo"))}),
             "seek" => json!({"lines": seek_script(v["count"].as_i64().unwrap_or(0), s("item"))}),
             "double_click" => json!({"lines": double_click_script(v["x"].as_i64().unwrap_or(0), v["y"].as_i64().unwrap_or(0))}),
             name => match static_script(name) {
