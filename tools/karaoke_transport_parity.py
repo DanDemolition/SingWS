@@ -270,6 +270,7 @@ def _run_python(case):
     mkt.print = lambda *a: w.note("print: " + " ".join(str(x) for x in a))
     plugin = FakePlugin(w, case.get("offset_supported", False))
     t = mkt.MpvKaraokeTransport(plugin, audio_path=case.get("audio", ""), video_path=case.get("video", ""), mode=case.get("mode", "cdg"))
+    t._voice_log = lambda m: w.note("log:" + m)   # the app sets this to its own log for EVERY song (also one with no voice), so the seek-guard line always reaches the log
     if case.get("voice", True):
         t.attach_voice(FakeVoice(w), log=lambda m: w.note("log:" + m))
     t.started.connect(lambda: w.note("event:started"))

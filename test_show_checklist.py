@@ -47,7 +47,8 @@ class Checks(unittest.TestCase):
     def test_voice_guard_and_seek_guard(self):
         self.assertEqual(sc.check_voice_guard([])[0], sc.NOTEX)
         self.assertEqual(sc.check_voice_guard([L("[KARAOKE-RUST] voice kept its place (x): song 1s")])[0], sc.MANUAL)
-        self.assertEqual(sc.check_seek_guard([])[0], sc.MANUAL)
+        self.assertEqual(sc.check_seek_guard([])[0], sc.NOTEX)
+        self.assertEqual(sc.check_seek_guard([L("[CDG-SEEK-GUARD] seek asked 115.00s -> moved back to 100.00s (graphics-free stretch 100.0s to 130.0s)")])[0], sc.MANUAL)
 
     def test_drives(self):
         line = L("[TRANSPORT-DRIVE] decision=media_end python=1 rust=1 selected=1 owner=rust disagreement=0")

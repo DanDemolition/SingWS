@@ -115,8 +115,11 @@ def check_voice_guard(lines):
 
 
 def check_seek_guard(lines):
-    return MANUAL, ("NOT OBSERVABLE from a log: cdg_seek_guard writes no line when it clamps a seek. To prove it, seek into the last seconds of a CDG with a long "
-                    "frame-less stretch (the 'Let Down' disc) and confirm the song does not jump to its end")
+    n = _count(lines, "[CDG-SEEK-GUARD]")
+    if not n:
+        return NOTEX, ("the guard never acted: no start or seek landed in a graphics-free stretch (or the build predates the [CDG-SEEK-GUARD] log line). To exercise it, seek into "
+                       "the last seconds of a CDG with a long frame-less stretch (the 'Let Down' disc)")
+    return MANUAL, f"the guard moved {n} start/seek(s) back out of a graphics-free stretch: ask the operator to confirm none of those songs jumped to its end"
 
 
 def check_quiet_shadows(rows):

@@ -373,6 +373,7 @@ impl<P: Picture, V: Voice> Protocol<P, V> {
         let audio = if self.cdg { Some(a.audio_path.as_str()) } else { None };
         self.seek_gap = if self.cdg { a.zones.clone() } else { Vec::new() };
         let start_seconds = singws_cdg::clamp_seek(&self.seek_gap, a.start_seconds);
+        self.log_seek_guard("start", a.start_seconds, start_seconds);
         let mut voice_on = false;
         if self.voice.is_some() {
             voice_on = self.voice_load(start_seconds);
@@ -444,7 +445,9 @@ impl<P: Picture, V: Voice> Protocol<P, V> {
     }
 
     pub fn seek(&mut self, now: f64, seconds: f64) {
-        let target = singws_cdg::clamp_seek(&self.seek_gap, seconds.max(0.0));
+        let asked = seconds.max(0.0);
+        let target = singws_cdg::clamp_seek(&self.seek_gap, asked);
+        self.log_seek_guard("seek", asked, target);
         if self.voice.is_some() && matches!(self.phase, Phase::Running | Phase::Seeking | Phase::VoiceWait) {
             // Pause both, move both, and start them together again once the voice's source is ready (it takes a moment to refill).
             if let Some(v) = self.voice.as_mut() {
@@ -660,6 +663,13 @@ impl<P: Picture, V: Voice> Protocol<P, V> {
         let rate = if self.measure_rate { self.meter.measure(now, pos, commanded) } else { commanded };
         self.voice.as_mut().unwrap().slave_to(pos, rate);
         self.log_resyncs();
+    }
+
+    /// `MpvKaraokeTransport._log_seek_guard`: say when the CDG seek guard moved a start or seek out of a graphics-free stretch (log only).
+    fn log_seek_guard(&mut self, what: &str, asked: f64, moved_to: f64) {
+        if let Some(&(before, after)) = self.seek_gap.iter().find(|(before, after)| asked > *before && asked < *after) {
+            self.say(format!("[CDG-SEEK-GUARD] {what} asked {asked:.2}s -> moved back to {moved_to:.2}s (graphics-free stretch {before:.1}s to {after:.1}s)"));
+        }
     }
 
     fn log_resyncs(&mut self) {

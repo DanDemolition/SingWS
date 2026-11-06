@@ -137,7 +137,9 @@ class MpvKaraokeTransport(QObject):
         if not source:
             raise RuntimeError("mpv source path is empty")
         self._cdg_zones = cdg_seek_guard.load_gap(self.video_path) if self.mode == "cdg" else None
-        start_seconds = cdg_seek_guard.clamp_seek(self._cdg_zones, float(start_seconds or 0.0))
+        asked = float(start_seconds or 0.0)
+        start_seconds, zone = cdg_seek_guard.clamp_seek_zone(self._cdg_zones, asked)
+        self._log_seek_guard("start", asked, start_seconds, zone)
         voice_on = False
         if self._voice is not None:
             voice_on = self._voice_load(start_seconds)
@@ -182,7 +184,9 @@ class MpvKaraokeTransport(QObject):
         self.plugin.stopMedia()
 
     def seek(self, seconds: float):
-        target = cdg_seek_guard.clamp_seek(getattr(self, "_cdg_zones", None), max(0.0, float(seconds)))
+        asked = max(0.0, float(seconds))
+        target, zone = cdg_seek_guard.clamp_seek_zone(getattr(self, "_cdg_zones", None), asked)
+        self._log_seek_guard("seek", asked, target, zone)
         if self._voice is not None and self._voice_phase in ("running", "seeking", "voice_wait"):
             # Pause both, move both, and start them together again once the voice's source is ready (it takes a moment to refill).
             try:
@@ -355,6 +359,15 @@ class MpvKaraokeTransport(QObject):
         except Exception:
             pass
         self._log_voice_resyncs(voice)
+
+    def _log_seek_guard(self, what, asked, moved_to, zone):
+        """Say in the log when the CDG seek guard moved a start or seek out of a graphics-free stretch (log only). Without this line a show cannot prove the guard ever acted."""
+        if zone is None:
+            return
+        try:
+            self._voice_log(f"[CDG-SEEK-GUARD] {what} asked {asked:.2f}s -> moved back to {moved_to:.2f}s (graphics-free stretch {zone[0]:.1f}s to {zone[1]:.1f}s)")
+        except Exception:
+            pass
 
     def _log_voice_resyncs(self, voice):
         """Say in the log whenever the voice re-seeked itself to the picture's clock, or a guard held that back (log only, never acts)."""

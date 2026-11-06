@@ -28444,6 +28444,7 @@ class KaraokeApp(QWidget):
             parent=self,
         )
         transport.duration_seconds = float(duration_seconds or 0.0)
+        transport._voice_log = _diag   # for EVERY song, voice or not: the transport's own log lines (e.g. [CDG-SEEK-GUARD]) must reach the app log, not stdout
         transport.started.connect(lambda: _diag("[MPV] audible playback started"))
         transport.visual_stalled.connect(self._handle_mpv_visual_stall)
         if str(mode).lower() != "audio":

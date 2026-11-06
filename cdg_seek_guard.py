@@ -58,6 +58,16 @@ def clamp_seek(zones, seconds: float) -> float:
     return seconds
 
 
+def clamp_seek_zone(zones, seconds: float):
+    """Like `clamp_seek`, but also answers which stretch was used: ``(target, (before, after))``, or ``(seconds, None)`` when the seek was left alone."""
+    if zones and isinstance(zones[0], float):
+        zones = [zones]
+    for before, after in zones or ():
+        if before < seconds < after:
+            return before, (before, after)
+    return seconds, None
+
+
 def load_gap(path):
     try:
         with open(path, "rb") as fh:

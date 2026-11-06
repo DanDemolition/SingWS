@@ -20,10 +20,8 @@ It prints one line per item: **PASS**, **FAIL**, **NOT EXERCISED** (the show nev
 | Settings-migration shadow | `RAN, AGREED` (on an already migrated profile it proves the no-op; a fresh install proves the real migration) | the next rebuild |
 | Transport drives | media_end / karafun_end agree every time | 1.0.1.x |
 | KaraFun watchdog drive | at least one decision (still has no clean show) | open |
-| CDG seek guard | **cannot be seen in a log** (it logs nothing when it clamps) | open |
+| CDG seek guard | `[CDG-SEEK-GUARD] start|seek asked Xs -> moved back to Ys (graphics-free stretch ...)` whenever it acts; ask the operator whether that song jumped to its end (it should not) | next rebuild |
 
 Things only the operator can answer (the tool prints them): dead air at song ends and which kind of song, blips at CDG song ends, fade-in timing, any seek that jumped to the end, anything wrong on the audience screen or ticker.
 
 If it was clean, record it: `python3 tools/gate_ledger.py add <log> --all --label "show <date> <mac>"`.
-
-Known gap: `cdg_seek_guard.clamp_seek` writes no log line, so a show can never prove the guard fired. Adding one would also need the same line in the Rust protocol twin (`karaoke_proto.rs`), because the transport parity compares log lines; not done.

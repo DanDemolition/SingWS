@@ -26,6 +26,48 @@ def build(commands):
     return bytes(data)
 
 
+class SeekGuardLogLine(unittest.TestCase):
+    """The guard must SAY when it acts (a show log is the only proof it did), through the transport's own log for every song."""
+
+    def transport(self, zones):
+        import types
+        import mpv_karaoke_transport as mkt
+        plugin = types.SimpleNamespace(loadSingWSMedia=lambda *a, **k: True, stopMedia=lambda: None, pauseMedia=lambda: None, playMedia=lambda: None,
+                                       seekMedia=lambda *a, **k: None, isPlaying=lambda: False)
+        t = mkt.MpvKaraokeTransport(plugin, audio_path="/t/x.mp3", video_path="/t/x.cdg", mode="cdg")
+        t._cdg_zones = zones
+        lines = []
+        t._voice_log = lines.append
+        return t, lines
+
+    def test_clamp_seek_zone_names_the_stretch_it_used(self):
+        self.assertEqual(g.clamp_seek_zone([(100.0, 130.0)], 115.0), (100.0, (100.0, 130.0)))
+        self.assertEqual(g.clamp_seek_zone([(100.0, 130.0)], 99.0), (99.0, None))
+        self.assertEqual(g.clamp_seek_zone(None, 5.0), (5.0, None))
+        self.assertEqual(g.clamp_seek_zone((100.0, 130.0), 130.0), (130.0, None))   # exactly at the far edge: left alone, like clamp_seek
+
+    def test_a_seek_into_a_stretch_logs_one_line_with_numbers_only(self):
+        t, lines = self.transport([(100.0, 130.0)])
+        try:
+            t.seek(115.0)
+        except Exception:
+            pass   # the fake plugin is minimal; the log line comes before any plugin call
+        self.assertEqual(lines, ["[CDG-SEEK-GUARD] seek asked 115.00s -> moved back to 100.00s (graphics-free stretch 100.0s to 130.0s)"])
+
+    def test_a_seek_outside_every_stretch_logs_nothing(self):
+        t, lines = self.transport([(100.0, 130.0)])
+        try:
+            t.seek(50.0)
+        except Exception:
+            pass
+        self.assertEqual(lines, [])
+
+    def test_the_app_routes_the_transport_log_to_its_own_log_for_every_song(self):
+        src = (ROOT / "0.2.18.1.py").read_text(encoding="utf-8")
+        self.assertIn("transport._voice_log = _diag", src)
+        self.assertLess(src.index("transport._voice_log = _diag"), src.index("transport.attach_voice(_rust_voice, log=_diag)"))
+
+
 class GuardTests(unittest.TestCase):
     def test_a_quiet_tail_before_the_closing_burst_is_found(self):
         gap = g.terminal_gap(build([0, 300, 3000, 3001, 9000, 9001, 9002]))
