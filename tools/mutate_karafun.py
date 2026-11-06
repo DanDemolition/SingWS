@@ -42,13 +42,20 @@ SURVIVOR_NOTES: dict = {
     "pure.rs|Value::String(s) => s.trim().parse::<f64>().map(|f| f.trunc() as i64).|0->1": "not modelled: Python int() of an unparsable string raises; the app only passes numbers here",
     "pure.rs|_ => 0,|0->1": "not modelled: Python int() of None or a container raises; the app only passes numbers here",
     "pure.rs|Value::Number(n) => n.as_f64().unwrap_or(0.0),|0.0->1.0": "equivalent: a JSON number always has an f64 value, the fallback never runs",
+    "ladder.rs|let mut out = String::with_capacity(s.len() + 2);|2->3": "equivalent: only a capacity hint of the output string",
+    "ladder.rs|c if (c as u32) < 0x7f => out.push(c),| < -> <= ": "equivalent: 0x7f is caught by the control-character arm above it",
+    "ladder.rs|text.contains(\"-1743\") || text.contains(\"not authorized to send apple |&&->||": "see the corpus: partial phrases are in the pool now (killed); kept for line shifts",
+    "ladder.rs|if text.is_empty() || text.contains(\"-1743\") || text.contains(\"-25211\"|||->&&": "equivalent in the ladder: a permission error raises before this check and last_error is never empty",
+    "ladder.rs|return false;|false->true": "equivalent in the ladder: last_error is never empty and permission errors raise before this check",
+    "ladder.rs|let mut ok = false;|false->true": "equivalent: ok is always assigned by the first try before it is read",
+    "ladder.rs|if parts.len() < 3 || ![\"FOUND\", \"TITLE_ONLY\", \"FIRST\"].contains(&part|||->&&": "equivalent: found is either empty or a valid accepted answer, so both halves agree",
     "pure.rs|_ => 0.0,|0.0->1.0": "not modelled: a string seek offset (Python float() would parse it); the app only passes numbers or None",
     "pure.rs|let mut in_space = false;|false->true": "equivalent: the whitespace collapse runs after the regex that already turned every non-alphanumeric run into one space, and the result is stripped",
     "pure.rs|in_space = true;|true->false": "equivalent: same reason, no run of spaces can reach the collapse",
 }
 
 
-FILES = ("lib.rs", "pure.rs")
+FILES = ("lib.rs", "pure.rs", "ladder.rs")
 
 
 def generate(name, text):
@@ -82,7 +89,7 @@ def setup():
     (WORK / "src").mkdir(parents=True, exist_ok=True)
     (WORK / "Cargo.toml").write_text((REAL / "Cargo.toml").read_text() + "\n[workspace]\n")
     shutil.copy(ROOT / "rust/Cargo.lock", WORK / "Cargo.lock")
-    for name in ("main.rs", "script_lines.rs", "casefold_table.rs", "builders.rs", "lib.rs", "pure.rs"):
+    for name in ("main.rs", "script_lines.rs", "casefold_table.rs", "builders.rs", "lib.rs", "pure.rs", "ladder.rs"):
         shutil.copy(REAL / "src" / name, WORK / "src" / name)
 
 
@@ -98,6 +105,9 @@ def main():
         return resp
     par.run_rust = spy
     assert par.main(["--seeds", str(SEEDS), "--binary", str(release)]) == 0, "the unmutated crate must equal the Python first"
+    import karafun_ladder_parity as lp
+    lp.run_rust = spy
+    assert lp.main(["--seeds", str(SEEDS * 4), "--binary", str(release)]) == 0, "the ladder must equal the Python first"
     print(f"oracle ready: {sum(len(b) for b, _ in captured)} requests in {len(captured)} batches", flush=True)
     setup()
     originals = {n: (WORK / "src" / n).read_text() for n in FILES}

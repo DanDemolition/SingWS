@@ -17,15 +17,16 @@ Nothing below changes how the Python app drives KaraFun today.
 | Live shadow, default ON: every search script the app builds is also built by the Rust helper and a difference is logged | `karafun_script_shadow.py`, helper `singws-karafun` bundled by both installers | `test_karafun_script_shadow.py`; NOT seen in a real show yet |
 | **All 19 inline KaraFun scripts moved into static builders** in `0.2.18.1.py` (no behaviour change): preflight, window state, play press, playback menu state, raise results, read/apply key-tempo, seek, play/pause toggle, result double-click, show-screen hand-off and restore, click point, play-now queue, key/tempo menu adjust, renderer ready, start probe, set key/tempo sliders, completion-monitor probe | `tools/karafun_extract.py apply` (AST-driven, nothing hand-edited) | `tools/karafun_extract.py check d2d9975`: every moved list has the IDENTICAL syntax tree as the inline list in the commit before; every call site and parameter list checked; 27 call sites have `self` in scope |
 | Rust twins of all 19 builders + the search script + the diagnosis script + the preview probe, GENERATED from the Python | `rust/crates/singws-karafun/src/builders.rs` (`--check` guards drift) | `tools/karafun_script_parity.py`: every fixed script and every parametrised one (key/tempo grids, seek counts, coordinates, hand-off rectangles) identical to the Python builder |
-| Mutation | `tools/mutate_karafun.py` over `lib.rs` and `pure.rs` | 133 mutants, 111 killed, 16 documented survivors, 6 do not compile, 0 undocumented |
+| **The search LADDER** (queries most specific first, same-query retry when KaraFun's window is not built yet, artist confirmation, one diagnosis on no match, permission errors stop everything, the error the app raises) as a pure function | `ladder.rs` | `tools/karafun_ladder_parity.py` runs the REAL Python statements (the 8 from `found = ""` to the final `raise`, read by AST) with scripted answers: 6,000 scenarios identical on found/selected query/error raised, every log line, the scripts requested with their arguments and the sleeps |
+| Mutation | `tools/mutate_karafun.py` over `lib.rs`, `pure.rs` and `ladder.rs` | 133 mutants, 111 killed, 16 documented survivors, 6 do not compile, 0 undocumented |
 
 ## Next milestones, in order
 
 1. ~~Extract the inline scripts into pure builders in Python, port them with generate-and-compare~~ **DONE (2026-11-06), see the table above.**
    Not extracted on purpose: anything that is not a plain `[...]` list literal of strings (none left in the five big methods).
-2. **Port the search-and-play flow as a state machine** fed with script answers (search ladder, UI-not-ready retries, diagnosis on no match,
-   play, verify, recovery press at 12 s, warn at 40 s). The scripts and the accept/reject rule are done; what is left is the sequencing and timing in
-   `_automate_karafun_search_and_play` (899 lines) and `_start_karafun_completion_monitor` (578). Oracle: a replay harness that drives the real
+2. **Port the rest of the flow as state machines** fed with script answers. **The search ladder is DONE** (table above). What is left: the part of
+   `_automate_karafun_search_and_play` after the ladder (apply the verified duration, queue for key/tempo, the hand-off ordering, play, verify, the
+   12 s recovery press, the 40 s warning) and `_start_karafun_completion_monitor` (578 lines: playing/idle/clock evidence, expected end, watchdog). Oracle: a replay harness that drives the real
    Python flow with a fake script runner and compares the sequence of scripts requested and the decisions logged (the same method as
    `queue_event_replay.py`; `MonitorReplay` in `test_karafun_monitor_safety.py` is the starting point for the monitor half).
 3. **Live runner on this Mac:** run the Rust-built scripts through `singws_mac::run_applescript` against the real KaraFun (never during a show),

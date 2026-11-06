@@ -2,6 +2,7 @@
 //!        {"op":"match_title","title":..}   {"op":"literal","value":..}     or  {"batch":[ ...requests... ]}
 //! stdout: {"lines":[...]} | {"title":..} | {"literal":..}   (a batch answers with a list)
 use serde_json::{json, Value};
+use singws_karafun::ladder::{self, Answer};
 use singws_karafun::pure::{self, Duration, Verdict};
 use singws_karafun::{adjust_menu_script, apply_key_tempo_script, applescript_literal, click_point_script, double_click_script, handoff_script, match_title, search_diag_script,
                      search_script, seek_script, set_key_tempo_script, static_script};
@@ -11,6 +12,20 @@ fn answer(v: &Value) -> Value {
     let s = |k: &str| v[k].as_str().unwrap_or("");
     let i = |k: &str| v[k].as_i64().unwrap_or(0);
     match v["op"].as_str().unwrap_or("search_script") {
+        "ladder" => {
+            let queries: Vec<String> = v["queries"].as_array().map(|a| a.iter().map(|q| q.as_str().unwrap_or("").to_string()).collect()).unwrap_or_default();
+            let mut answers = v["answers"].as_array().cloned().unwrap_or_default().into_iter();
+            let mut next = |_: &str| match answers.next() {
+                Some(x) => Answer { ok: x["ok"].as_bool().unwrap_or(false), text: x["text"].as_str().unwrap_or("").to_string(), error: x["error"].as_str().unwrap_or("").to_string() },
+                None => Answer { ok: false, text: String::new(), error: "answers exhausted".to_string() },
+            };
+            let o = ladder::run(&queries, s("safe_title"), s("safe_artist"), &mut next);
+            if let Some(why) = o.declined {
+                return json!({"decline": why});
+            }
+            json!({"found": o.found, "selected_query": o.selected_query, "last_error": o.last_error, "raised": o.raised,
+                   "log": o.log, "requests": o.requests, "sleeps": o.sleeps})
+        }
         "script" => match s("name") {
             "search_diag" => json!({"lines": search_diag_script(s("safe_title"))}),
             "apply_key_tempo" => json!({"lines": apply_key_tempo_script(

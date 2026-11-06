@@ -179,7 +179,7 @@ pub enum Verdict {
 }
 
 /// Python `str.casefold`: per character, the generated table where it differs from lowercase, else the plain lowercase of that one character.
-fn casefold(s: &str) -> String {
+pub(crate) fn casefold(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         match crate::casefold_table::special(c) {
