@@ -25,3 +25,11 @@ It prints one line per item: **PASS**, **FAIL**, **NOT EXERCISED** (the show nev
 Things only the operator can answer (the tool prints them): dead air at song ends and which kind of song, blips at CDG song ends, fade-in timing, any seek that jumped to the end, anything wrong on the audience screen or ticker.
 
 If it was clean, record it: `python3 tools/gate_ledger.py add <log> --all --label "show <date> <mac>"`.
+
+## The hardware gates of the Python-free road (TV, KaraFun UI, Intel Mac): one extra test
+
+Before or after the show, on the Mac under test with the TV connected and KaraFun running (SingWS quit): `./check_python_free.sh /path/to/any-song.zip` (kit in `tools/intel_kit/`, how and why:
+`docs/design/stage-e-python-free-readiness.md`). It needs the packaged `SingWS Shell.app` in /Applications. `after_show.sh` (the kit's copy) adds the newest run to the zip, and
+`show_checklist.py` prints `py-free:` rows and a **Python-free road verdict**: PASS only when native process, the shell's Accessibility grant, KaraFun UI, the one-process host, a real song and the
+TV all pass on an x86_64 Mac. Once that verdict is PASS the hardware gates are closed and the road moves on to porting.
+

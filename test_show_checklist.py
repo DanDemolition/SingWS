@@ -1,5 +1,6 @@
 """tools/show_checklist.py: each check says PASS / FAIL / NOT EXERCISED / MANUAL from synthetic log lines."""
 import importlib.util
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -64,6 +65,61 @@ class Checks(unittest.TestCase):
         self.assertEqual(sc.check_memory([mem(i, 900 + i) for i in range(6)])[0], sc.PASS)
         self.assertEqual(sc.check_memory([mem(i, 5000) for i in range(6)])[0], sc.MANUAL)
         self.assertEqual(sc.check_memory([])[0], sc.NOTEX)
+
+
+class PythonFreeRoad(unittest.TestCase):
+    def doc(self, **status):
+        names = {"native process": "pass", "Accessibility (shell)": "pass", "KaraFun UI (shell)": "pass", "host spike (selfcheck)": "pass",
+                 "song through Rust picture + voice": "pass", "audience display (TV)": "pass"}
+        names.update(status)
+        return {"kind": "python_free_readiness", "facts": {"machine_arch": "x86_64"},
+                "checks": [{"name": n, "status": s, "detail": "d"} for n, s in names.items()] + [{"name": "machine", "status": "info", "detail": "i"}]}
+
+    def verdict(self, doc):
+        return [r for r in sc.check_readiness([doc]) if r[0] == "Python-free road verdict"][0]
+
+    def test_no_readiness_file_is_not_exercised(self):
+        rows = sc.check_readiness([])
+        self.assertEqual(rows[0][1], sc.NOTEX)
+
+    def test_everything_passing_on_intel_is_ready(self):
+        self.assertEqual(self.verdict(self.doc())[1], sc.PASS)
+
+    def test_a_failed_required_check_fails_the_verdict(self):
+        v = self.verdict(self.doc(**{"audience display (TV)": "fail"}))
+        self.assertEqual(v[1], sc.FAIL)
+        self.assertIn("audience display (TV)", v[2])
+
+    def test_a_warning_on_a_required_check_is_not_yet(self):
+        v = self.verdict(self.doc(**{"KaraFun UI (shell)": "warn"}))
+        self.assertEqual(v[1], sc.NOTEX)
+        self.assertIn("KaraFun UI (shell)", v[2])
+
+    def test_passing_on_apple_silicon_leaves_intel_unproven(self):
+        d = self.doc()
+        d["facts"]["machine_arch"] = "arm64"
+        v = self.verdict(d)
+        self.assertEqual(v[1], sc.NOTEX)
+        self.assertIn("Intel", v[2])
+
+    def test_info_rows_are_not_listed_and_each_check_keeps_its_status(self):
+        rows = sc.check_readiness([self.doc(**{"KaraFun UI (shell)": "warn"})])
+        names = [r[0] for r in rows]
+        self.assertNotIn("py-free: machine", names)
+        self.assertIn(("py-free: KaraFun UI (shell)", sc.NOTEX, "d"), rows)
+
+    def test_find_readiness_reads_a_folder_and_a_zip(self):
+        import tempfile, zipfile
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "readiness").mkdir()
+            (Path(d) / "readiness" / "readiness.json").write_text(json.dumps(self.doc()))
+            self.assertEqual(len(sc.find_readiness([d])), 1)
+            z = Path(d) / "show.zip"
+            with zipfile.ZipFile(z, "w") as zf:
+                zf.writestr("singws-show-x/readiness/readiness.json", json.dumps(self.doc()))
+                zf.writestr("singws-show-x/other.json", json.dumps({"kind": "something else"}))
+            self.assertEqual(len(sc.find_readiness([str(z)])), 1)
+            self.assertEqual(sc.find_readiness(["/nonexistent"]), [])
 
 
 if __name__ == "__main__":

@@ -180,6 +180,55 @@ def check_memory(lines):
     return status, f"{songs} songs, RSS {first} -> {last} MB (peak {peak} MB)" + ("  (over 4.5 GB: look at the native categories in show_report)" if last > 4500 else "")
 
 
+# --- the Python-free road: the readiness run of tools/intel_kit/check_python_free.sh (rust shell --readiness-run), bundled into the show zip by after_show.sh
+REQUIRED_FOR_READY = ("native process", "Accessibility (shell)", "KaraFun UI (shell)", "host spike (selfcheck)", "song through Rust picture + voice", "audience display (TV)")
+
+
+def find_readiness(inputs):
+    """Every readiness.json (kind python_free_readiness) in the inputs: folders, zips (after_show.sh puts it under readiness/) or the file itself. Oldest first."""
+    import zipfile
+    docs = []
+    for item in inputs:
+        p = Path(item).expanduser()
+        try:
+            if p.is_dir():
+                docs += [json.loads(q.read_text(encoding="utf-8")) for q in sorted(p.rglob("readiness.json"))]
+            elif p.suffix.lower() == ".zip":
+                with zipfile.ZipFile(p) as z:
+                    docs += [json.loads(z.read(n)) for n in z.namelist() if n.endswith("/readiness.json") or n == "readiness.json"]
+            elif p.name == "readiness.json":
+                docs.append(json.loads(p.read_text(encoding="utf-8")))
+        except Exception:  # noqa: BLE001
+            pass
+    return [d for d in docs if isinstance(d, dict) and d.get("kind") == "python_free_readiness"]
+
+
+def check_readiness(docs):
+    """Result rows for the Python-free road from the newest readiness run, ending with a verdict row."""
+    if not docs:
+        return [("Python-free road", NOTEX, "no readiness.json in the input: run tools/intel_kit/check_python_free.sh on the Mac (TV connected, KaraFun running) and send the show zip made by after_show.sh")]
+    doc = docs[-1]
+    rows = []
+    by_name = {}
+    for c in doc.get("checks", []):
+        status = {"pass": PASS, "fail": FAIL, "warn": NOTEX}.get(c.get("status"))
+        by_name[c.get("name")] = c.get("status")
+        if status:
+            rows.append((f"py-free: {c.get('name')}", status, str(c.get("detail", ""))))
+    facts = doc.get("facts", {})
+    machine = facts.get("machine_arch", "?")
+    missing = [n for n in REQUIRED_FOR_READY if by_name.get(n) != "pass"]
+    if any(by_name.get(n) == "fail" for n in REQUIRED_FOR_READY):
+        rows.append(("Python-free road verdict", FAIL, "a required check FAILED: " + ", ".join(n for n in REQUIRED_FOR_READY if by_name.get(n) == "fail")))
+    elif missing:
+        rows.append(("Python-free road verdict", NOTEX, "not yet proven on this run: " + ", ".join(missing)))
+    elif machine != "x86_64":
+        rows.append(("Python-free road verdict", NOTEX, f"every required check passed, but on a {machine} Mac: the Intel Mac is still unproven"))
+    else:
+        rows.append(("Python-free road verdict", PASS, "TV, KaraFun UI, the one-process host and a real song all passed on an Intel Mac: the hardware gates of the road are met"))
+    return rows
+
+
 OPERATOR_QUESTIONS = [
     "Dead air at song ends: how many songs, and was it KaraFun, CDG or MP4 (CDG/MP4 should be rare now)?",
     "Any blip, pop or jump in the last seconds of a CDG song (the end-of-song voice guard)?",
@@ -249,7 +298,7 @@ def main(argv=None):
                 settings = loaded if isinstance(loaded, dict) else None
             except (OSError, ValueError):
                 pass
-        results = build(lines, rows, settings)
+        results = build(lines, rows, settings) + check_readiness(find_readiness(args.inputs))
     if args.json:
         print(json.dumps([{"check": n, "status": s, "detail": d} for n, s, d in results], indent=1))
     else:
