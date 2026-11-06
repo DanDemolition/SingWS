@@ -87,6 +87,7 @@ native/singws_scan/*/singws-scan-cli
 native/singws_relaymsg/*/singws-relaymsg
 native/singws_settingsmig/*/singws-settingsmig
 native/singws_songend/*/singws-songend
+native/singws_karafun/*/singws-karafun
 
 # Built update-rules helper; produced by rust/build_update.sh
 native/singws_update/*/singws-update

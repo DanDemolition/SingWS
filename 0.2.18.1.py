@@ -4368,6 +4368,8 @@ DEFAULTS = {
     # which it starts the background music, and a separate low-priority process (the Rust song-end model, singws-songend) is driven through an idealised run of the same song; [SONGEND-SHADOW]
     # logs ONLY a difference (more than 1.5 s or another reason; song lengths and numbers only, never names). The app's own decision is always the one acted on.
     "songend_shadow": True,
+    # Stage E shadow: each time the app builds the KaraFun search AppleScript, a separate low-priority process (singws-karafun, Rust) builds the same one and a difference is logged (karafun_script_shadow.py).
+    "karafun_script_shadow": True,
     # Stage E shadow: every ~30 s the host relay messages this app just sent (playback_tick, state, queue, chat) are rebuilt by a separate low-priority process
     # (a Rust helper) from a snapshot of the same inputs, and [RELAY-MSG-SHADOW] logs ONLY a difference (never chat text, names or ids). The message the app built
     # is always the one sent; the relay schema, retries and connection are untouched.
@@ -22998,7 +23000,7 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
         # One line each so a quiet shadow can be told apart from one that is off or whose helper is missing (they log nothing when all agrees).
-        for _mod_name in ("logpack_shadow", "relay_msg_shadow", "scan_shadow", "net_slice_shadow", "queue_state_shadow", "update_shadow", "settings_migrate_shadow", "songend_shadow"):
+        for _mod_name in ("logpack_shadow", "relay_msg_shadow", "scan_shadow", "net_slice_shadow", "queue_state_shadow", "update_shadow", "settings_migrate_shadow", "songend_shadow", "karafun_script_shadow"):
             try:
                 # DEFAULTS are filled into self.settings later in __init__, so merge them here or a fresh profile would announce the wrong engine
                 __import__(_mod_name).announce({**DEFAULTS, **(self.settings if isinstance(self.settings, dict) else {})}, _diag)
@@ -59011,7 +59013,14 @@ class KaraokeApp(QWidget):
             'end tell',
             'end tell',
         ])
-        return lines + KARAFUN_DURATION_HANDLER_LINES
+        result = lines + KARAFUN_DURATION_HANDLER_LINES
+        try:  # Stage E shadow: the Rust builder makes the same script on a low-priority thread and a difference is logged (log-only; see karafun_script_shadow.py)
+            import karafun_script_shadow
+            karafun_script_shadow.start(getattr(self, "settings", None), _diag, py_lines=result, query=query, safe_title=safe_title, safe_artist=safe_artist,
+                                        require_exact_title=require_exact_title, resolve_only=resolve_only)
+        except Exception:
+            pass
+        return result
 
     def _automate_karafun_search_only(self, entry: dict) -> bool:
         """Search KaraFun from Add KaraFun without starting playback."""

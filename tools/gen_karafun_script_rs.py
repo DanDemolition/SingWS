@@ -110,7 +110,9 @@ def generate():
     searched = c.orelse
     assert len(searched) == 1 and ast.unparse(searched[0]) == "lines.append('return \"SEARCHED\"')", "SEARCHED branch changed"
     list_g = extend_list(st[6])
-    assert ast.unparse(st[7]) == "return lines + KARAFUN_DURATION_HANDLER_LINES", "return changed"
+    assert ast.unparse(st[7]) == "result = lines + KARAFUN_DURATION_HANDLER_LINES", "result assignment changed"
+    assert isinstance(st[8], ast.Try) and "karafun_script_shadow" in ast.unparse(st[8]), "shadow hook changed"
+    assert ast.unparse(st[9]) == "return result" and len(st) == 10, "return changed"
     return a, b, list_c, list_d, list_e, searched, list_g, duration
 
 

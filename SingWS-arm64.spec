@@ -68,6 +68,10 @@ if settingsmig_bin.is_file() and "arm64" in subprocess.getoutput(f"/usr/bin/lipo
 songend_bin = project_root / "native" / "singws_songend" / "arm64" / "singws-songend"
 if songend_bin.is_file() and "arm64" in subprocess.getoutput(f"/usr/bin/lipo -archs '{songend_bin}'"):
     binaries.append((str(songend_bin), "."))
+# Rust KaraFun search script builder (rust/build_karafun.sh). Optional: without it karafun_script_shadow is silently skipped.
+karafun_bin = project_root / "native" / "singws_karafun" / "arm64" / "singws-karafun"
+if karafun_bin.is_file() and "arm64" in subprocess.getoutput(f"/usr/bin/lipo -archs '{karafun_bin}'"):
+    binaries.append((str(karafun_bin), "."))
 
 # Rust update rules (rust/build_update.sh). Optional: without it update_shadow is silently skipped.
 update_bin = project_root / "native" / "singws_update" / "arm64" / "singws-update"
@@ -109,6 +113,7 @@ for helper in (
     "relay_msg_shadow.py",
     "settings_migrate_shadow.py",
     "songend_shadow.py",
+    "karafun_script_shadow.py",
     "net_slice_shadow.py",
     "queue_state_shadow.py",
     "update_shadow.py",
@@ -237,6 +242,7 @@ a = Analysis(
         'relay_msg_shadow',
         'settings_migrate_shadow',
         'songend_shadow',
+        'karafun_script_shadow',
         'net_slice_shadow',
         'queue_state_shadow',
         'update_shadow',
