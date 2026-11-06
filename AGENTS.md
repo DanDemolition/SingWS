@@ -395,8 +395,10 @@ silently to zero instead of raising. The shipped .app is unaffected; it bundles 
 **Measured 2026-11-05 (the full suite, 2568 tests, run in pieces; the venvs named above mostly no longer exist, this is what works now):**
 
 - `.venv-test-arm64-fresh` (Python 3.13, has PyQt6 6.9.1, `mpv`, `pyobjc`, `mutagen`, `pytest`) runs everything EXCEPT `test_dbw_parity`.
-  It needs a signed copy of its Qt platform plugins: `cp -R .venv-test-arm64-fresh/lib/python3.13/site-packages/PyQt6/Qt6/plugins/platforms $D;
-  codesign --force --sign - $D/*.dylib`, then `QT_QPA_PLATFORM=offscreen QT_QPA_PLATFORM_PLUGIN_PATH=$D`. Add `--ignore=test_dbw_parity.py`.
+  It needs a signed copy of its WHOLE Qt plugin tree (not only `platforms`: without the signed `imageformats` Qt has no JPEG encoder and `test_shell_chat_media` fails with
+  `(True, 'sent')` instead of `media_too_big`): `cp -R .venv-test-arm64-fresh/lib/python3.13/site-packages/PyQt6/Qt6/plugins $D;
+  find $D -name "*.dylib" -exec codesign --force --sign - {} \;`, then `QT_QPA_PLATFORM=offscreen QT_PLUGIN_PATH=$D QT_QPA_PLATFORM_PLUGIN_PATH=$D/platforms`.
+  Add `--ignore=test_dbw_parity.py`.
 - `test_dbw_parity` must run on a Python whose SQLite matches the one bundled in the Rust crates (3.50.x): the 3.13 venv links SQLite 3.53.4, which writes
   a REAL into a TEXT column differently (`0.30000000000000004` vs `0.3`), a false failure. Use the system 3.14 / `.venv`:
   `SINGWS_HOME=$(mktemp -d) .venv/bin/python -m unittest test_dbw_parity` (IDENTICAL).
