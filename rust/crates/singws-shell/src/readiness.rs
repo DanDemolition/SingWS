@@ -94,6 +94,46 @@ pub fn macho_archs(bytes: &[u8]) -> Vec<&'static str> {
     Vec::new()
 }
 
+/// Where the shell may find the media core: next to itself, in an installed SingWS.app (the Python app bundles the same `libmpv`), or named by `SINGWS_LIBMPV`.
+pub fn libmpv_candidates(exe: Option<&std::path::Path>, home: &str, env: Option<&str>) -> Vec<std::path::PathBuf> {
+    let name = "singws_libmpv.2.dylib";
+    let mut v: Vec<std::path::PathBuf> = Vec::new();
+    if let Some(e) = env.filter(|e| !e.is_empty()) {
+        v.push(e.into());
+    }
+    if let Some(d) = exe.and_then(|e| e.parent()) {
+        v.push(d.join(name));
+        v.push(d.join("Frameworks").join(name));
+        v.push(d.join("..").join("Frameworks").join(name));
+    }
+    v.push(std::path::Path::new("/Applications/SingWS.app/Contents/Frameworks").join(name));
+    v.push(std::path::Path::new(home).join("Applications/SingWS.app/Contents/Frameworks").join(name));
+    v
+}
+
+fn find_libmpv() -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok();
+    let home = std::env::var("HOME").unwrap_or_default();
+    let env = std::env::var("SINGWS_LIBMPV").ok();
+    libmpv_candidates(exe.as_deref(), &home, env.as_deref()).into_iter().find(|p| p.is_file())
+}
+
+fn libmpv(r: &mut Report) {
+    let machine = machine_arch();
+    match find_libmpv() {
+        Some(p) => {
+            let archs = macho_archs(&std::fs::read(&p).unwrap_or_default());
+            r.fact("libmpv", json!({"path": p.display().to_string(), "archs": archs}));
+            if archs.iter().any(|a| *a == machine) {
+                r.check("media core (libmpv)", "pass", format!("{} ({})", p.display(), archs.join("+")));
+            } else {
+                r.check("media core (libmpv)", "fail", format!("{} has no {machine} code", p.display()));
+            }
+        }
+        None => r.check("media core (libmpv)", "fail", "no libmpv next to the shell or in /Applications/SingWS.app: install SingWS 1.0.3.0 on this Mac first (the shell borrows its media core), or set SINGWS_LIBMPV"),
+    }
+}
+
 fn machine_arch() -> &'static str {
     // the CPU of the machine, not of this process: under Rosetta an x86_64 process still runs on arm64 hardware
     if out("sysctl", &["-n", "hw.optional.arm64"]).as_deref() == Some("1") {
@@ -323,6 +363,7 @@ fn collect() -> Report {
     displays(&mut r);
     helpers(&mut r);
     mac_identity(&mut r);
+    libmpv(&mut r);
     karafun(&mut r);
     r
 }
@@ -431,6 +472,10 @@ pub fn run_all(dir: &str, song: Option<&str>) -> i32 {
     let dir = std::path::PathBuf::from(dir);
     let _ = std::fs::create_dir_all(&dir);
     let mut r = collect();
+    // the children (selfcheck, play demo) inherit the environment: hand them the media core this probe found
+    if let Some(p) = find_libmpv() {
+        unsafe { std::env::set_var("SINGWS_LIBMPV", &p) };
+    }
     let displays = r.facts.get("gpus").and_then(|g| g.as_array()).map(|g| g.iter().map(|x| x["displays"].as_array().map(|a| a.len()).unwrap_or(0)).sum::<usize>()).unwrap_or(1);
     let mut steps = Map::new();
     match song.and_then(|z| unzip_song(z, &dir.join("song"))) {
@@ -558,6 +603,17 @@ mod tests {
         assert_eq!(macho_archs(&fat), vec!["x86_64", "arm64"]);
         assert!(macho_archs(b"#!/bin/sh\n").is_empty());
         assert!(macho_archs(&[]).is_empty());
+    }
+
+    #[test]
+    fn libmpv_is_looked_for_next_to_the_shell_and_in_an_installed_app() {
+        let exe = std::path::Path::new("/Applications/SingWS Shell.app/Contents/MacOS/SingWS Shell");
+        let c = libmpv_candidates(Some(exe), "/Users/x", Some("/custom/libmpv.dylib"));
+        assert_eq!(c[0], std::path::PathBuf::from("/custom/libmpv.dylib"), "an explicit SINGWS_LIBMPV wins");
+        assert!(c.iter().any(|p| p.ends_with("MacOS/../Frameworks/singws_libmpv.2.dylib")));
+        assert!(c.contains(&std::path::PathBuf::from("/Applications/SingWS.app/Contents/Frameworks/singws_libmpv.2.dylib")));
+        assert!(c.contains(&std::path::PathBuf::from("/Users/x/Applications/SingWS.app/Contents/Frameworks/singws_libmpv.2.dylib")));
+        assert_eq!(libmpv_candidates(None, "/h", None).len(), 2);
     }
 
     #[test]
