@@ -335,8 +335,10 @@ fn karafun(r: &mut Report) {
     }
     r.check("KaraFun process", "pass", format!("running as \"{}\"", running.out));
     let t = Instant::now();
+    // Fetch the list first, then count it, as the app's own scripts do: on macOS 27 the one-liner `count of (entire contents of w)` answers 0
+    // for every window while `set x to entire contents of w` returns the real list (139 elements for KaraFun, measured 2026-11-06).
     let windows = singws_mac::run_applescript(
-        "tell application \"System Events\"\ntell (first application process whose name contains \"KaraFun\")\nset n to count of windows\nif n is 0 then return \"0\"\nreturn (n as string) & \"|\" & (count of (entire contents of window 1)) as string\nend tell\nend tell",
+        "tell application \"System Events\"\ntell (first application process whose name contains \"KaraFun\")\nset n to count of windows\nif n is 0 then return \"0\"\nset elems to entire contents of window 1\nreturn (n as string) & \"|\" & (count of elems) as string\nend tell\nend tell",
         Duration::from_secs(40));
     let ms = t.elapsed().as_millis();
     if !windows.ok {
