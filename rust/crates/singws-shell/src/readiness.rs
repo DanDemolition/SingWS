@@ -249,6 +249,11 @@ fn describe_script_error(err: &str) -> String {
     }
 }
 
+/// A script that timed out is "not tested" (an unanswered macOS permission prompt looks exactly like this), any other error is a real failure.
+fn script_error_status(err: &str) -> &'static str {
+    if err == "timeout" { "warn" } else { "fail" }
+}
+
 fn karafun(r: &mut Report) {
     let app = ["/Applications/KaraFun.app", "~/Applications/KaraFun.app"].iter().map(|p| p.replace('~', &std::env::var("HOME").unwrap_or_default()))
         .find(|p| std::path::Path::new(p).exists());
@@ -264,9 +269,14 @@ fn karafun(r: &mut Report) {
     }
     // 1. can this process drive System Events at all
     let t = Instant::now();
-    let probe = singws_mac::run_applescript("tell application \"System Events\" to return (count of application processes)", Duration::from_secs(15));
+    // the FIRST Apple event of a new app identity makes macOS ask "allow this app to control System Events?": give the operator a minute to answer it
+    let probe = singws_mac::run_applescript("tell application \"System Events\" to return (count of application processes)", Duration::from_secs(60));
     if !probe.ok {
-        r.check("System Events (shell)", "fail", describe_script_error(&probe.err));
+        r.check("System Events (shell)", script_error_status(&probe.err), if probe.err == "timeout" {
+            "no answer within 60 s: if macOS asked whether this app may control System Events (Automation), click Allow and run this again".to_string()
+        } else {
+            describe_script_error(&probe.err)
+        });
         return;
     }
     r.check("System Events (shell)", "pass", format!("answered in {} ms ({} processes)", t.elapsed().as_millis(), probe.out));
@@ -548,6 +558,13 @@ mod tests {
         assert_eq!(macho_archs(&fat), vec!["x86_64", "arm64"]);
         assert!(macho_archs(b"#!/bin/sh\n").is_empty());
         assert!(macho_archs(&[]).is_empty());
+    }
+
+    #[test]
+    fn a_timeout_is_a_warning_and_any_other_script_error_a_failure() {
+        assert_eq!(script_error_status("timeout"), "warn");
+        assert_eq!(script_error_status("not authorized to send Apple events (-1743)"), "fail");
+        assert_eq!(script_error_status("... (-25211)"), "fail");
     }
 
     #[test]

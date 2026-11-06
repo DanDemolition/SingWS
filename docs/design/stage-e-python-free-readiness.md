@@ -30,6 +30,11 @@ borrow Terminal's grants and prove nothing. Launched as an app, every child proc
 
 The verdict row is **PASS only when** native process, Accessibility, KaraFun UI, host spike, song and TV all pass **on an x86_64 Mac**; the same on Apple Silicon says "Intel still unproven".
 
+## First run on a new Mac or a new app copy
+macOS asks once, per app identity, "allow SingWS Shell to control System Events?" (Automation) and, for screen screenshots, may ask for Screen Recording. The test waits 60 s for that first answer and, if
+nobody answered, reports `[warn] System Events (shell): no answer within 60 s ...` (not a failure): click Allow and run it again. The Accessibility grant (System Settings > Privacy & Security >
+Accessibility) must be given to **SingWS Shell** once, separately from the Python SingWS.
+
 ## What this does NOT prove (the honest limits)
 * KaraFun automation itself (searching, starting, the end monitor, the capture) is not ported to Rust yet; this proves the shell can REACH KaraFun's UI, the precondition for porting it.
 * The TV answer is the operator's eyes, backed by screenshots; nothing here measures smoothness or latency on the TV.
