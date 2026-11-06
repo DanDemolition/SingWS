@@ -3,12 +3,23 @@
 //! stdout: {"lines":[...]} | {"title":..} | {"literal":..}   (a batch answers with a list)
 use serde_json::{json, Value};
 use singws_karafun::pure::{self, Duration, Verdict};
-use singws_karafun::{applescript_literal, match_title, search_script};
+use singws_karafun::{apply_key_tempo_script, applescript_literal, double_click_script, match_title, search_diag_script, search_script, seek_script, static_script};
 use std::io::Read;
 
 fn answer(v: &Value) -> Value {
     let s = |k: &str| v[k].as_str().unwrap_or("");
     match v["op"].as_str().unwrap_or("search_script") {
+        "script" => match s("name") {
+            "search_diag" => json!({"lines": search_diag_script(s("safe_title"))}),
+            "apply_key_tempo" => json!({"lines": apply_key_tempo_script(
+                v["key_delta"].as_i64().unwrap_or(0), v["tempo_delta"].as_i64().unwrap_or(0), s("key_item"), s("tempo_item"))}),
+            "seek" => json!({"lines": seek_script(v["count"].as_i64().unwrap_or(0), s("item"))}),
+            "double_click" => json!({"lines": double_click_script(v["x"].as_i64().unwrap_or(0), v["y"].as_i64().unwrap_or(0))}),
+            name => match static_script(name) {
+                Some(lines) => json!({"lines": lines}),
+                None => json!({"error": "unknown script"}),
+            },
+        },
         "match_title" => json!({"title": match_title(s("title"))}),
         "literal" => json!({"literal": applescript_literal(s("value"))}),
         "duration" => match pure::normalize_duration_seconds(&v["value"]) {

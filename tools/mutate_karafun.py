@@ -82,7 +82,7 @@ def setup():
     (WORK / "src").mkdir(parents=True, exist_ok=True)
     (WORK / "Cargo.toml").write_text((REAL / "Cargo.toml").read_text() + "\n[workspace]\n")
     shutil.copy(ROOT / "rust/Cargo.lock", WORK / "Cargo.lock")
-    for name in ("main.rs", "script_lines.rs", "casefold_table.rs", "lib.rs", "pure.rs"):
+    for name in ("main.rs", "script_lines.rs", "casefold_table.rs", "builders.rs", "lib.rs", "pure.rs"):
         shutil.copy(REAL / "src" / name, WORK / "src" / name)
 
 

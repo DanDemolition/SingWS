@@ -11,7 +11,7 @@ from unittest import mock
 @lru_cache(maxsize=1)
 def methods():
     tree = ast.parse(Path('0.2.18.1.py').read_text())
-    names = {'_karafun_apply_key_tempo', '_karafun_read_key_tempo'}
+    names = {'_karafun_apply_key_tempo', '_karafun_read_key_tempo', '_karafun_apply_key_tempo_script', '_karafun_read_key_tempo_script'}
     nodes = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name in names]
     namespace = {'re': re, '_diag': lambda *a: None}
     exec(compile(ast.Module(body=nodes, type_ignores=[]), 'live-controls-test', 'exec'), namespace)
@@ -19,7 +19,9 @@ def methods():
 
 
 def host(reply):
-    return SimpleNamespace(_run_karafun_applescript_sync=mock.Mock(return_value=reply))
+    return SimpleNamespace(_run_karafun_applescript_sync=mock.Mock(return_value=reply),
+                           _karafun_apply_key_tempo_script=methods()['_karafun_apply_key_tempo_script'],
+                           _karafun_read_key_tempo_script=methods()['_karafun_read_key_tempo_script'])
 
 
 def script_text(h):

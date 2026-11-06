@@ -18,7 +18,7 @@ def build(clock):
     for node in tree.body:
         if isinstance(node, ast.ClassDef):
             for sub in node.body:
-                if isinstance(sub, ast.FunctionDef) and sub.name in {"_karafun_wait_until_ready", "_karafun_main_window_state"}:
+                if isinstance(sub, ast.FunctionDef) and sub.name in {"_karafun_wait_until_ready", "_karafun_main_window_state", "_karafun_main_window_state_script"}:
                     sub.decorator_list = []
                     body.append(sub)
     ns = {"time": clock, "_diag": lambda *a: None, "subprocess": subprocess}
@@ -103,7 +103,8 @@ class WiringTests(unittest.TestCase):
     def test_the_readiness_script_compiles(self):
         captured = {}
         ns = build(FakeClock())
-        h = SimpleNamespace(_run_karafun_applescript_sync=lambda lines, timeout=None: (captured.setdefault("src", "\n".join(lines)) and True, "READY", ""))
+        h = SimpleNamespace(_karafun_main_window_state_script=ns["_karafun_main_window_state_script"],
+                            _run_karafun_applescript_sync=lambda lines, timeout=None: (captured.setdefault("src", "\n".join(lines)) and True, "READY", ""))
         self.assertEqual(ns["_karafun_main_window_state"](h), "READY")
         result = subprocess.run(["osacompile", "-o", "/dev/null"], input=captured["src"], capture_output=True, text=True, timeout=60)
         self.assertEqual(result.returncode, 0, result.stderr)

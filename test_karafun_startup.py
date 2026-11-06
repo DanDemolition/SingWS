@@ -15,7 +15,7 @@ from karafun_fullscreen import renderer_raise_script, renderer_fullscreen_script
 def methods():
     tree = ast.parse(Path('0.2.18.1.py').read_text())
     names = {'_karafun_activate_result_for_playback', '_karafun_search_script',
-             '_handoff_show_screen_to_karafun'}
+             '_handoff_show_screen_to_karafun', '_karafun_double_click_script'}
     nodes = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name in names]
     # _karafun_search_script also uses two module-level helpers (title qualifiers, strict song-length test)
     nodes += [n for n in tree.body if (isinstance(n, ast.FunctionDef) and n.name == 'karafun_match_title')
@@ -35,6 +35,7 @@ class StartupTests(unittest.TestCase):
             _active_external_karafun={'entry': {'title': 'Song', 'artist': 'Artist'}},
             _karafun_entry_artist_title=lambda e: (e['artist'], e['title']),
             _karafun_search_script=mock.Mock(return_value=['resolve']),
+            _karafun_double_click_script=methods()['_karafun_double_click_script'],
             _run_karafun_applescript_sync=mock.Mock(return_value=reply),
             _macos_native_double_click=mock.Mock(return_value=True),
             settings={},

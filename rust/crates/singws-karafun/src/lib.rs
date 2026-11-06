@@ -3,6 +3,7 @@
 //! The ~230 fixed script lines live in `script_lines.rs`, GENERATED from the Python source by `tools/gen_karafun_script_rs.py` (never edited by
 //! hand; the tool's `--check` fails when it is stale). What is written by hand here is only the part that has logic: quoting a value as an
 //! AppleScript literal, reducing a queued title to what KaraFun lists, and putting the blocks together for the flags.
+mod builders;
 mod casefold_table;
 mod script_lines;
 pub mod pure;
@@ -75,6 +76,41 @@ pub fn match_title(title: &str) -> String {
     };
     let stripped = py_strip(&stripped);
     if stripped.is_empty() { text.to_string() } else { stripped.to_string() }
+}
+
+/// The fixed (argument-free) scripts, by name; None for an unknown name. Generated from the Python static builders.
+pub fn static_script(name: &str) -> Option<Vec<String>> {
+    Some(match name {
+        "preflight" => builders::preflight(),
+        "main_window_state" => builders::main_window_state(),
+        "press_play" => builders::press_play(),
+        "playback_menu_state" => builders::playback_menu_state(),
+        "raise_results_window" => builders::raise_results_window(),
+        "preview_probe" => builders::preview_probe(),
+        "read_key_tempo" => builders::read_key_tempo(),
+        "toggle_playback" => builders::toggle_playback(),
+        _ => return None,
+    })
+}
+
+/// `_karafun_search_diag_script(safe_title)`: the read-only description of KaraFun's window written to the log when a search finds no match.
+pub fn search_diag_script(safe_title: &str) -> Vec<String> {
+    builders::search_diag(&applescript_literal(&match_title(safe_title)))
+}
+
+/// `_karafun_apply_key_tempo_script`: click Key/Tempo menu items `abs(delta)` times (the item names are chosen by the caller from the sign of the delta).
+pub fn apply_key_tempo_script(key_delta: i64, tempo_delta: i64, key_item: &str, tempo_item: &str) -> Vec<String> {
+    builders::apply_key_tempo(key_delta, tempo_delta, key_item, tempo_item)
+}
+
+/// `_karafun_seek_script`: click Skip Forward/Back 10s `count` times.
+pub fn seek_script(count: i64, item: &str) -> Vec<String> {
+    builders::seek(count, item)
+}
+
+/// `_karafun_double_click_script`: double-click a result row at (x, y).
+pub fn double_click_script(x: i64, y: i64) -> Vec<String> {
+    builders::double_click(x, y)
 }
 
 /// `_karafun_search_script(query=, safe_title=, safe_artist=, require_exact_title=, resolve_only=)`: the AppleScript lines.

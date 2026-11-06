@@ -57048,15 +57048,19 @@ class KaraokeApp(QWidget):
             pass
         return message
 
+    @staticmethod
+    def _karafun_preflight_script():
+        return [
+            'tell application "System Events"',
+            'set matches to every application process whose name contains "KaraFun"',
+            'if (count of matches) is 0 then return "AUTHORIZED|0"',
+            'return "AUTHORIZED|" & (unix id of item 1 of matches as text)',
+            'end tell',
+        ]
+
     def _karafun_apple_events_preflight(self) -> tuple[bool, str]:
         ok, stdout, stderr = self._run_karafun_applescript_sync(
-            [
-                'tell application "System Events"',
-                'set matches to every application process whose name contains "KaraFun"',
-                'if (count of matches) is 0 then return "AUTHORIZED|0"',
-                'return "AUTHORIZED|" & (unix id of item 1 of matches as text)',
-                'end tell',
-            ],
+            self._karafun_preflight_script(),
             timeout=8,
         )
         if ok:
@@ -57137,9 +57141,9 @@ class KaraokeApp(QWidget):
         except Exception:
             return False
 
-    def _karafun_main_window_state(self) -> str:
-        """READY (a real KaraFun window exists), NO_WINDOW (still starting), NOT_RUNNING, or ERROR (cannot ask)."""
-        ok, out, _error = self._run_karafun_applescript_sync([
+    @staticmethod
+    def _karafun_main_window_state_script():
+        return [
             'tell application "System Events"',
             'set matches to every application process whose name contains "KaraFun"',
             'if (count of matches) is 0 then return "NOT_RUNNING"',
@@ -57154,7 +57158,11 @@ class KaraokeApp(QWidget):
             'return "NO_WINDOW"',
             'end tell',
             'end tell',
-        ], timeout=10)
+        ]
+
+    def _karafun_main_window_state(self) -> str:
+        """READY (a real KaraFun window exists), NO_WINDOW (still starting), NOT_RUNNING, or ERROR (cannot ask)."""
+        ok, out, _error = self._run_karafun_applescript_sync(self._karafun_main_window_state_script(), timeout=10)
         return str(out or "").strip() if ok else "ERROR"
 
     def _karafun_wait_until_ready(self, *, was_running: bool, session_is_current, timeout: float = KARAFUN_READY_TIMEOUT_S) -> None:
@@ -58208,9 +58216,9 @@ class KaraokeApp(QWidget):
             except Exception:
                 pass
 
-    def _karafun_press_play_control(self) -> tuple[bool, str]:
-        """Click KaraFun's main transport Play control. Returns (ok, error)."""
-        play_script = [
+    @staticmethod
+    def _karafun_press_play_script():
+        return [
             'tell application "System Events"',
             'tell application process "KaraFun"',
             'set frontmost to true',
@@ -58244,6 +58252,10 @@ class KaraokeApp(QWidget):
             'end tell',
             'end tell',
         ]
+
+    def _karafun_press_play_control(self) -> tuple[bool, str]:
+        """Click KaraFun's main transport Play control. Returns (ok, error)."""
+        play_script = self._karafun_press_play_script()
         ok, played, script_error = self._run_karafun_applescript_sync(play_script, timeout=10)
         if not ok:
             return False, str(script_error or "KaraFun play automation failed")
@@ -58258,25 +58270,29 @@ class KaraokeApp(QWidget):
             return False, "Could not click the KaraFun play control"
         return True, ""
 
+    @staticmethod
+    def _karafun_playback_menu_state_script():
+        return [
+            'tell application "System Events"',
+            'set matches to every application process whose name contains "KaraFun"',
+            'if (count of matches) is 0 then return "UNKNOWN"',
+            'tell item 1 of matches',
+            'try',
+            'set playbackToggleName to name of menu item 1 of menu 1 of menu bar item "Playback" of menu bar 1 as text',
+            'ignoring case',
+            'if playbackToggleName is "pause" then return "PLAYING"',
+            'if playbackToggleName is "play" then return "IDLE"',
+            'end ignoring',
+            'end try',
+            'return "UNKNOWN"',
+            'end tell',
+            'end tell',
+        ]
+
     def _karafun_playback_menu_state(self) -> str:
         """Return PLAYING, IDLE, or UNKNOWN from KaraFun's cheap menu state."""
         ok, result, _error = self._run_karafun_applescript_sync(
-            [
-                'tell application "System Events"',
-                'set matches to every application process whose name contains "KaraFun"',
-                'if (count of matches) is 0 then return "UNKNOWN"',
-                'tell item 1 of matches',
-                'try',
-                'set playbackToggleName to name of menu item 1 of menu 1 of menu bar item "Playback" of menu bar 1 as text',
-                'ignoring case',
-                'if playbackToggleName is "pause" then return "PLAYING"',
-                'if playbackToggleName is "play" then return "IDLE"',
-                'end ignoring',
-                'end try',
-                'return "UNKNOWN"',
-                'end tell',
-                'end tell',
-            ],
+            self._karafun_playback_menu_state_script(),
             timeout=4,
         )
         state = str(result or "").strip().upper() if ok else "UNKNOWN"
@@ -58289,9 +58305,9 @@ class KaraokeApp(QWidget):
         except Exception:
             return ""
 
-    def _karafun_raise_results_window(self):
-        """Bring KaraFun's results window (not just the app) above other windows."""
-        return self._run_karafun_applescript_sync([
+    @staticmethod
+    def _karafun_raise_results_window_script():
+        return [
             'tell application "System Events"',
             'tell (first application process whose name contains "KaraFun")',
             'set frontmost to true',
@@ -58305,7 +58321,11 @@ class KaraokeApp(QWidget):
             'end repeat',
             'end tell',
             'end tell',
-        ], timeout=4)
+        ]
+
+    def _karafun_raise_results_window(self):
+        """Bring KaraFun's results window (not just the app) above other windows."""
+        return self._run_karafun_applescript_sync(self._karafun_raise_results_window_script(), timeout=4)
 
     def _karafun_active_entry(self):
         active = getattr(self, "_active_external_karafun", None)
@@ -58322,15 +58342,9 @@ class KaraokeApp(QWidget):
         except Exception as exc:
             _diag(f"[KARAFUN] could not show key/tempo: {exc}")
 
-    def _karafun_read_key_tempo(self):
-        """Read (key, tempo_percent) from KaraFun's Personalize panel, or None.
-
-        The values are only exposed while the panel is open, so this opens it with
-        an accessibility press, reads the two sliders and closes it again. It does
-        not bring KaraFun forward. It takes about 5s and System Events serves
-        requests one at a time, so callers keep it infrequent.
-        """
-        ok, result, _error = self._run_karafun_applescript_sync([
+    @staticmethod
+    def _karafun_read_key_tempo_script():
+        return [
             'tell application "System Events"',
             'tell (first application process whose name contains "KaraFun")',
             'set mainWindow to missing value',
@@ -58395,7 +58409,17 @@ class KaraokeApp(QWidget):
             'return "KEY=" & keyV & " TEMPO=" & tempoV',
             'end tell',
             'end tell',
-        ], timeout=20)
+        ]
+
+    def _karafun_read_key_tempo(self):
+        """Read (key, tempo_percent) from KaraFun's Personalize panel, or None.
+
+        The values are only exposed while the panel is open, so this opens it with
+        an accessibility press, reads the two sliders and closes it again. It does
+        not bring KaraFun forward. It takes about 5s and System Events serves
+        requests one at a time, so callers keep it infrequent.
+        """
+        ok, result, _error = self._run_karafun_applescript_sync(self._karafun_read_key_tempo_script(), timeout=20)
         if not ok:
             return None
         match = re.search(r"KEY=([+-]?\d+)\s+TEMPO=([+-]?\d+)%", str(result or ""))
@@ -58403,21 +58427,9 @@ class KaraokeApp(QWidget):
             return None
         return int(match.group(1)), 100 + int(match.group(2))
 
-    def _karafun_apply_key_tempo(self, entry: dict, target_key: int, target_tempo: int):
-        """Click KaraFun's Key/Tempo menu items to move it to the target (worker thread).
-
-        One Key click is one semitone and one Tempo click is 1% (verified
-        2026-09-28). Returns the (key, tempo_percent) KaraFun ends up at.
-        """
-        cur_key = int(entry.get("karafun_key_current", 0) or 0)
-        cur_tempo = int(entry.get("karafun_tempo_current", 100) or 100)
-        key_delta = int(target_key) - cur_key
-        tempo_delta = int(target_tempo) - cur_tempo
-        if key_delta == 0 and tempo_delta == 0:
-            return cur_key, cur_tempo
-        key_item = "Key Up" if key_delta > 0 else "Key Down"
-        tempo_item = "Tempo Up" if tempo_delta > 0 else "Tempo Down"
-        ok, result, _error = self._run_karafun_applescript_sync([
+    @staticmethod
+    def _karafun_apply_key_tempo_script(key_delta, tempo_delta, key_item, tempo_item):
+        return [
             'tell application "System Events"',
             'tell application process "KaraFun"',
             'set keyDone to 0',
@@ -58439,7 +58451,23 @@ class KaraokeApp(QWidget):
             'return "ADJUSTED|" & keyDone & "|" & tempoDone',
             'end tell',
             'end tell',
-        ], timeout=10 + abs(key_delta) * 0.3 + abs(tempo_delta) * 0.2)
+        ]
+
+    def _karafun_apply_key_tempo(self, entry: dict, target_key: int, target_tempo: int):
+        """Click KaraFun's Key/Tempo menu items to move it to the target (worker thread).
+
+        One Key click is one semitone and one Tempo click is 1% (verified
+        2026-09-28). Returns the (key, tempo_percent) KaraFun ends up at.
+        """
+        cur_key = int(entry.get("karafun_key_current", 0) or 0)
+        cur_tempo = int(entry.get("karafun_tempo_current", 100) or 100)
+        key_delta = int(target_key) - cur_key
+        tempo_delta = int(target_tempo) - cur_tempo
+        if key_delta == 0 and tempo_delta == 0:
+            return cur_key, cur_tempo
+        key_item = "Key Up" if key_delta > 0 else "Key Down"
+        tempo_item = "Tempo Up" if tempo_delta > 0 else "Tempo Down"
+        ok, result, _error = self._run_karafun_applescript_sync(self._karafun_apply_key_tempo_script(key_delta, tempo_delta, key_item, tempo_item), timeout=10 + abs(key_delta) * 0.3 + abs(tempo_delta) * 0.2)
         match = re.match(r"ADJUSTED\|(\d+)\|(\d+)", str(result or "")) if ok else None
         if match:
             key_done, tempo_done = int(match.group(1)), int(match.group(2))
@@ -58501,6 +58529,24 @@ class KaraokeApp(QWidget):
 
         threading.Thread(target=_work, daemon=True, name="karafun-key-tempo").start()
 
+    @staticmethod
+    def _karafun_seek_script(count, item):
+        return [
+            'tell application "System Events"',
+            'tell application process "KaraFun"',
+            'set n to 0',
+            f'repeat {count} times',
+            'try',
+            f'click menu item "{item}" of menu 1 of menu bar item "Playback" of menu bar 1',
+            'set n to n + 1',
+            'end try',
+            'delay 0.12',
+            'end repeat',
+            'return "SEEKED|" & n',
+            'end tell',
+            'end tell',
+        ]
+
     def _karafun_seek_to(self, target_sec: float) -> bool:
         """Move KaraFun to about `target_sec` with Playback > Skip Forward/Back 10s.
 
@@ -58525,21 +58571,7 @@ class KaraokeApp(QWidget):
         def _work():
             done = 0
             try:
-                ok, result, _error = self._run_karafun_applescript_sync([
-                    'tell application "System Events"',
-                    'tell application process "KaraFun"',
-                    'set n to 0',
-                    f'repeat {count} times',
-                    'try',
-                    f'click menu item "{item}" of menu 1 of menu bar item "Playback" of menu bar 1',
-                    'set n to n + 1',
-                    'end try',
-                    'delay 0.12',
-                    'end repeat',
-                    'return "SEEKED|" & n',
-                    'end tell',
-                    'end tell',
-                ], timeout=10 + count * 0.4)
+                ok, result, _error = self._run_karafun_applescript_sync(self._karafun_seek_script(count, item), timeout=10 + count * 0.4)
                 match = re.match(r"SEEKED\|(\d+)", str(result or "")) if ok else None
                 done = int(match.group(1)) if match else 0
             except Exception as exc:
@@ -58579,6 +58611,20 @@ class KaraokeApp(QWidget):
         threading.Thread(target=_work, daemon=True, name="karafun-seek").start()
         return True
 
+    @staticmethod
+    def _karafun_toggle_playback_script():
+        return [
+            'tell application "System Events"',
+            'tell application process "KaraFun"',
+            'set playbackItem to menu item 1 of menu 1 of menu bar item "Playback" of menu bar 1',
+            'if not enabled of playbackItem then return "DISABLED"',
+            'set n to name of playbackItem as text',
+            'click playbackItem',
+            'return n',
+            'end tell',
+            'end tell',
+        ]
+
     def _toggle_karafun_playback(self):
         """Play/Pause button while a KaraFun song is active: toggle KaraFun itself."""
         entry = self._karafun_active_entry()
@@ -58586,17 +58632,7 @@ class KaraokeApp(QWidget):
             return
 
         def _work():
-            ok, result, _error = self._run_karafun_applescript_sync([
-                'tell application "System Events"',
-                'tell application process "KaraFun"',
-                'set playbackItem to menu item 1 of menu 1 of menu bar item "Playback" of menu bar 1',
-                'if not enabled of playbackItem then return "DISABLED"',
-                'set n to name of playbackItem as text',
-                'click playbackItem',
-                'return n',
-                'end tell',
-                'end tell',
-            ], timeout=6)
+            ok, result, _error = self._run_karafun_applescript_sync(self._karafun_toggle_playback_script(), timeout=6)
             clicked = str(result or "").strip().lower() if ok else ""
 
             def _apply():
@@ -58618,6 +58654,22 @@ class KaraokeApp(QWidget):
             self._run_on_ui_thread(_apply)
 
         threading.Thread(target=_work, daemon=True, name="karafun-play-pause").start()
+
+    @staticmethod
+    def _karafun_double_click_script(x, y):
+        return [
+            'tell application "System Events"',
+            'set matches to every application process whose name contains "KaraFun"',
+            'if (count of matches) is 0 then return "ERROR|KaraFun is not running"',
+            'tell item 1 of matches',
+            'set frontmost to true',
+            f'click at {{{x}, {y}}}',
+            'delay 0.12',
+            f'click at {{{x}, {y}}}',
+            'return "DOUBLE_CLICKED"',
+            'end tell',
+            'end tell',
+        ]
 
     def _karafun_activate_result_for_playback(self, activation_point, reuse_point: bool = False) -> tuple[bool, str]:
         """Resolve the matched row again after fullscreen movement, then start it.
@@ -58673,19 +58725,7 @@ class KaraokeApp(QWidget):
         # process-scoped clicks is the same path that reliably opens KaraFun's
         # Dual Renderer button and survives mixed display scale factors.
         click_ok, click_result, click_error = self._run_karafun_applescript_sync(
-            [
-                'tell application "System Events"',
-                'set matches to every application process whose name contains "KaraFun"',
-                'if (count of matches) is 0 then return "ERROR|KaraFun is not running"',
-                'tell item 1 of matches',
-                'set frontmost to true',
-                f'click at {{{x}, {y}}}',
-                'delay 0.12',
-                f'click at {{{x}, {y}}}',
-                'return "DOUBLE_CLICKED"',
-                'end tell',
-                'end tell',
-            ],
+            self._karafun_double_click_script(x, y),
             timeout=5,
         )
         if not click_ok or str(click_result or "").strip() != "DOUBLE_CLICKED":

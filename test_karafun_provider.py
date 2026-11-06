@@ -301,7 +301,7 @@ class KaraFunProviderTests(unittest.TestCase):
         # completion monitor can reuse it to recover a song that never started
         # (see KaraFunAutoStartRecoveryTests in test_recent_regressions).
         self.assertIn("self._karafun_press_play_control()", worker)
-        press = source[source.index("def _karafun_press_play_control"):]
+        press = source[source.index("def _karafun_press_play_script"):]  # the script now lives in the builder just above the method
         press = press[:press.index("def _karafun_search_script")]
         self.assertIn("set wp to position of mainWindow", press)
         self.assertIn("set ws to size of mainWindow", press)

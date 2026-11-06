@@ -23,7 +23,10 @@ ROOT = Path(__file__).resolve().parent.parent
 PY = {}  # the other real Python functions, filled by load_python()
 
 
-METHODS = ("_karafun_search_script", "_karafun_applescript_literal", "_karafun_fallback_remaining", "_karafun_adjustment_needs_attention",
+BUILDERS = ("_karafun_read_key_tempo_script", "_karafun_toggle_playback_script", "_karafun_apply_key_tempo_script", "_karafun_seek_script", "_karafun_double_click_script",
+            "_karafun_preflight_script", "_karafun_main_window_state_script", "_karafun_press_play_script", "_karafun_playback_menu_state_script",
+            "_karafun_raise_results_window_script", "_karafun_search_diag_script")
+METHODS = BUILDERS + ("_karafun_search_script", "_karafun_applescript_literal", "_karafun_fallback_remaining", "_karafun_adjustment_needs_attention",
            "_karafun_clean_search_part", "_karafun_entry_artist_title", "_karafun_search_queries_for_entry")
 
 
@@ -31,7 +34,7 @@ def load_python():
     tree = ast.parse((ROOT / "0.2.18.1.py").read_text(encoding="utf-8"))
     body, methods = [], {}
     for node in tree.body:
-        if isinstance(node, ast.FunctionDef) and node.name in ("karafun_match_title", "normalize_karafun_duration_seconds"):
+        if isinstance(node, ast.FunctionDef) and node.name in ("karafun_match_title", "normalize_karafun_duration_seconds", "karafun_preview_probe_script"):
             body.append(node)
         elif isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "KARAFUN_DURATION_HANDLER_LINES" for t in node.targets):
             body.append(node)
@@ -52,6 +55,14 @@ def load_python():
     for name in ("_karafun_clean_search_part", "_karafun_entry_artist_title", "_karafun_search_queries_for_entry"):
         setattr(me, name, (lambda f: (lambda *a, **k: f(me, *a, **k)))(ns[name]) if name != "_karafun_clean_search_part" else ns[name])
     me._karafun_clean_search_part = ns["_karafun_clean_search_part"]
+    PY["builders"] = {"preflight": ns["_karafun_preflight_script"], "main_window_state": ns["_karafun_main_window_state_script"], "press_play": ns["_karafun_press_play_script"],
+                      "playback_menu_state": ns["_karafun_playback_menu_state_script"], "raise_results_window": ns["_karafun_raise_results_window_script"],
+                      "preview_probe": ns["karafun_preview_probe_script"], "read_key_tempo": ns["_karafun_read_key_tempo_script"],
+                      "toggle_playback": ns["_karafun_toggle_playback_script"]}
+    PY["apply_key_tempo"] = ns["_karafun_apply_key_tempo_script"]
+    PY["seek"] = ns["_karafun_seek_script"]
+    PY["double_click"] = ns["_karafun_double_click_script"]
+    PY["search_diag"] = lambda title: ns["_karafun_search_diag_script"](me, title)
     PY.update(duration=ns["normalize_karafun_duration_seconds"], remaining=ns["_karafun_fallback_remaining"], needs=ns["_karafun_adjustment_needs_attention"],
               clean=ns["_karafun_clean_search_part"], entry=lambda e: ns["_karafun_entry_artist_title"](me, e), queries=lambda e: ns["_karafun_search_queries_for_entry"](me, e))
     return (ns["karafun_match_title"], literal,
@@ -201,6 +212,33 @@ def check_pure(binary, diffs, seeds):
         want = ref_classify(q["candidate"], q["safe_artist"], q["query"])
         if g != want:
             diffs.append(("classify", q, f"rust={g} python={want}"))
+    # the fixed scripts and the diagnosis script
+    for name, build in PY["builders"].items():
+        g = batch([{"op": "script", "name": name}])[0]
+        if g.get("lines") != build():
+            diffs.append(("script", name, "the Rust lines differ from the Python builder"))
+    titles = ["", "Memory", "Song (live)", 'He said "hi"', "Back\\slash", "Zo\u00eb [x]", "tab\there", "a\nb"] + PARTS[:20]
+    for ti, g in zip(titles, batch([{"op": "script", "name": "search_diag", "safe_title": s} for s in titles])):
+        if g.get("lines") != PY["search_diag"](ti):
+            diffs.append(("search_diag", ti, "the Rust lines differ from the Python builder"))
+    # the parametrised scripts: counts and coordinates are integers, the menu item names are text
+    for kd in (-30, -2, 0, 1, 12):
+        for td in (-120, -1, 0, 5, 60):
+            for ki in ("Key Up", "Key Down"):
+                for ti in ("Tempo Up", "Tempo Down"):
+                    req = {"op": "script", "name": "apply_key_tempo", "key_delta": kd, "tempo_delta": td, "key_item": ki, "tempo_item": ti}
+                    if batch([req])[0].get("lines") != PY["apply_key_tempo"](kd, td, ki, ti):
+                        diffs.append(("apply_key_tempo", req, "the Rust lines differ from the Python builder"))
+    for count in (0, 1, 7, 60):
+        for item in ("Skip Forward 10s", "Skip Back 10s"):
+            req = {"op": "script", "name": "seek", "count": count, "item": item}
+            if batch([req])[0].get("lines") != PY["seek"](count, item):
+                diffs.append(("seek", req, "the Rust lines differ from the Python builder"))
+    for x in (0, 1, 640, -50, 99999):
+        for y in (0, 320, -7, 12345):
+            req = {"op": "script", "name": "double_click", "x": x, "y": y}
+            if batch([req])[0].get("lines") != PY["double_click"](x, y):
+                diffs.append(("double_click", req, "the Rust lines differ from the Python builder"))
     return len(vals), len(reqs), len(parts), len(es)
 
 

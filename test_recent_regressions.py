@@ -2304,7 +2304,7 @@ class KaraFunAutoStartRecoveryTests(unittest.TestCase):
     def test_the_play_control_is_shared_not_inlined(self):
         """The monitor needs the same press the automation path uses."""
         self.assertTrue(hasattr(self.singws.KaraokeApp, "_karafun_press_play_control"))
-        press = inspect.getsource(self.singws.KaraokeApp._karafun_press_play_control)
+        press = inspect.getsource(self.singws.KaraokeApp._karafun_press_play_control) + inspect.getsource(self.singws.KaraokeApp._karafun_press_play_script)
         self.assertIn("_macos_native_mouse_click", press)
         self.assertIn('"PLAY|"', press)
         self.assertIn("_karafun_press_play_control()", self.automation)
@@ -2325,7 +2325,7 @@ class KaraFunAutoStartRecoveryTests(unittest.TestCase):
         self.assertTrue(hasattr(self.singws.KaraokeApp, "_karafun_playback_menu_state"))
         state_probe = inspect.getsource(
             self.singws.KaraokeApp._karafun_playback_menu_state
-        )
+        ) + inspect.getsource(self.singws.KaraokeApp._karafun_playback_menu_state_script)
         self.assertIn('menu bar item "Playback"', state_probe)
         self.assertIn('playbackToggleName is "pause"', state_probe)
         self.assertIn('playbackToggleName is "play"', state_probe)
