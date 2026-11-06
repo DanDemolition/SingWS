@@ -23,6 +23,7 @@ cat > "$A/Contents/Info.plist" <<'P'
 <key>CFBundleShortVersionString</key><string>0.1.0</string>
 <key>LSMinimumSystemVersion</key><string>12.3</string>
 <key>NSHighResolutionCapable</key><true/>
+<key>NSAppleEventsUsageDescription</key><string>SingWS Shell uses System Events to find, queue, and control songs in the KaraFun application.</string>
 </dict></plist>
 P
 # macdeployqt's SQL-plugin errors (missing ODBC/Postgres libs) are harmless; we drop those drivers.
