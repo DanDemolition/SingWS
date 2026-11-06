@@ -25,6 +25,23 @@ class KarafunScriptRustTests(unittest.TestCase):
         self.assertIn("IDENTICAL", proc.stdout)
 
 
+@unittest.skipUnless(BINARY.exists(), "singws-karafun is not built (cargo build --release -p singws-karafun)")
+class FlowParityTests(unittest.TestCase):
+    """The search ladder and the completion monitor: the real Python statements/method against the Rust ports on scripted answers."""
+
+    def run_tool(self, tool, seeds):
+        proc = subprocess.run([sys.executable, str(ROOT / "tools" / tool), "--seeds", str(seeds), "--binary", str(BINARY)], capture_output=True, text=True,
+                              env=dict(os.environ, SINGWS_HOME=os.environ.get("SINGWS_HOME", "")))
+        self.assertEqual(proc.returncode, 0, proc.stdout[-1500:] + proc.stderr[-500:])
+        self.assertIn("IDENTICAL", proc.stdout)
+
+    def test_the_search_ladder_matches_python(self):
+        self.run_tool("karafun_ladder_parity.py", 600)
+
+    def test_the_completion_monitor_matches_python(self):
+        self.run_tool("karafun_monitor_parity.py", 400)
+
+
 class TranscribedRuleGuard(unittest.TestCase):
     """The accept/reject rule for a search answer is inline in KaraokeApp._automate_karafun_search_and_play, so the parity tool compares the Rust port with a
     TRANSCRIBED copy. These lines must still be in the Python; if one changed, update tools/karafun_script_parity.py (ref_classify) and pure.rs together."""

@@ -3,6 +3,7 @@
 //! stdout: {"lines":[...]} | {"title":..} | {"literal":..}   (a batch answers with a list)
 use serde_json::{json, Value};
 use singws_karafun::ladder::{self, Answer};
+use singws_karafun::monitor::{self, Monitor, Poll};
 use singws_karafun::pure::{self, Duration, Verdict};
 use singws_karafun::{adjust_menu_script, apply_key_tempo_script, applescript_literal, click_point_script, double_click_script, handoff_script, match_title, search_diag_script,
                      search_script, seek_script, set_key_tempo_script, static_script};
@@ -12,6 +13,7 @@ fn answer(v: &Value) -> Value {
     let s = |k: &str| v[k].as_str().unwrap_or("");
     let i = |k: &str| v[k].as_i64().unwrap_or(0);
     match v["op"].as_str().unwrap_or("search_script") {
+        "monitor" => run_monitor(v),
         "ladder" => {
             let queries: Vec<String> = v["queries"].as_array().map(|a| a.iter().map(|q| q.as_str().unwrap_or("").to_string()).collect()).unwrap_or_default();
             let mut answers = v["answers"].as_array().cloned().unwrap_or_default().into_iter();
@@ -77,4 +79,84 @@ fn main() {
     } else {
         println!("{}", answer(&v));
     }
+}
+
+/// A whole scripted run of the completion monitor: every poll consumes one event, the clock advances by the probe time and the sleeps.
+fn run_monitor(v: &Value) -> Value {
+    let c = &v["cfg"];
+    let f = |k: &str| c[k].as_f64().unwrap_or(0.0);
+    let b = |k: &str| c[k].as_bool().unwrap_or(false);
+    let cfg = monitor::Config {
+        title: c["title"].as_str().unwrap_or("").to_string(),
+        duration: c["duration"].as_i64().unwrap_or(0),
+        duration_estimated: b("duration_estimated"),
+        playback_assumed: b("playback_assumed"),
+        handoff_timed_out_before_play: b("handoff_timed_out_before_play"),
+        controlled_start: b("controlled_start"),
+        capture_session: b("capture_session"),
+        recovery_delay: f("recovery_delay"),
+        handoff_recovery_delay: f("handoff_recovery_delay"),
+        alert_delay: f("alert_delay"),
+    };
+    let now0 = v["now"].as_f64().unwrap_or(100.0);
+    let started = v["started"].as_f64().unwrap_or(now0);
+    let (mut m, mut log) = match Monitor::new(cfg, now0, started, v["seek_offset"].as_f64().unwrap_or(0.0)) {
+        Ok(x) => x,
+        Err(why) => return json!({"decline": why}),
+    };
+    let display_times = v["display_times"].as_array().and_then(|a| Some((a.first()?.as_f64()?, a.get(1)?.as_f64()?)));
+    let press_ok = v["press_ok"].as_bool().unwrap_or(true);
+    let press_error = v["press_error"].as_str().unwrap_or("").to_string();
+    let mut now = now0;
+    let mut calls: Vec<String> = Vec::new();
+    let mut kt_reads = 0;
+    let mut polls = 0;
+    let events = v["events"].as_array().cloned().unwrap_or_default();
+    let mut handoff_left = v["handoff_polls"].as_u64().unwrap_or(0);
+    let mut i = 0;
+    loop {
+        if handoff_left > 0 {
+            // the loop waits (0.25 s) while the show-screen hand-off is running; no probe, no event consumed
+            handoff_left -= 1;
+            polls += 1;
+            let out = m.poll(&Poll { now_before: now, handoff_in_progress: true, ..Poll::default() });
+            now += out.sleep;
+            continue;
+        }
+        let ended = i >= events.len();
+        let (elapsed, raw) = if ended { (0.0, Value::Null) } else { (events[i]["elapsed"].as_f64().unwrap_or(0.0), events[i]["raw"].clone()) };
+        i += 1;
+        polls += 1;
+        let poll = Poll {
+            now_before: now,
+            handoff_in_progress: false,
+            probe_elapsed: elapsed,
+            ok: !raw.is_null(),
+            raw: raw.as_str().unwrap_or("").to_string(),
+            session_ended: ended,
+            status_is_manual: false,
+            display_times,
+            kt_running: false,
+            kt_dirty: false,
+            press_result: (press_ok, press_error.clone()),
+        };
+        let out = m.poll(&poll);
+        if let Some(why) = out.declined {
+            return json!({"decline": why});
+        }
+        log.extend(out.log);
+        calls.extend(out.calls);
+        if out.kt_read_started {
+            kt_reads += 1;
+        }
+        now += elapsed;
+        // a real run ends by itself when the events run out; this bound only stops a broken build from looping forever
+        if out.finished || polls > events.len() + 3 {
+            break;
+        }
+        now += out.sleep;
+    }
+    let e = &m.entry;
+    json!({"log": log, "calls": calls, "now": now, "polls": polls, "kt_reads": kt_reads,
+           "entry": {"display_started_at": e.display_started_at, "display_duration": e.display_duration, "last_playing_ts": e.last_playing_ts, "paused_at": e.paused_at}})
 }

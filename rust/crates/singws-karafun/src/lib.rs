@@ -7,6 +7,7 @@ mod builders;
 mod casefold_table;
 mod script_lines;
 pub mod ladder;
+pub mod monitor;
 pub mod pure;
 
 /// Python `str.isspace` for one character (what `str.strip()` and the regex `\s` use on text).

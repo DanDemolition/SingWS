@@ -29,6 +29,23 @@ import mutate_songend as ms  # noqa: E402  (code_spans, PATTERNS)
 
 # "L<line>:<old>-><new>" -> "equivalent: why" | "GAP: what the corpus lacks"
 SURVIVOR_NOTES: dict = {
+    # --- monitor.rs ---
+    "monitor.rs|let mut i = 0;|0->1": "equivalent in the monitor: lines are stripped and empty lines dropped afterwards, so an extra or missing empty line cannot change the result",
+    "monitor.rs|if c == '\\r' && i + 1 < b.len() && b[i + 1].1 == '\\n' {|==->!=": "equivalent in the monitor: same reason (empty lines dropped, lines stripped)",
+    "monitor.rs|if c == '\\r' && i + 1 < b.len() && b[i + 1].1 == '\\n' {|1->2": "equivalent in the monitor: same reason (empty lines dropped, lines stripped)",
+    "monitor.rs|next += 1;|+= ->-= ": "equivalent in the monitor: a leftover separator at the start of a line is removed by the strip",
+    "monitor.rs|i += 1;|1->2": "equivalent in the monitor: a skipped separator ends up inside the next line and is removed by the strip",
+    "monitor.rs|if start < s.len() {| < -> <= ": "equivalent in the monitor: an extra empty last line is dropped",
+    "monitor.rs|let started = if started <= 0.0 || started > now + 5.0 { now } else { |<=-><": "equivalent: a clock start of exactly 0.0 is falsy in the app (replaced by now) and never reaches this guard",
+    "monitor.rs|idle_stop_count: 0,|0->1": "equivalent: the first poll cannot reach the idle-after-playback branch, so the initial value is overwritten before it is read",
+    "monitor.rs|if total > 0 && 0 <= current && current <= total {|<=-><": "equivalent: a normalised clock is at least 1, so current >= 0 and current > 0 agree",
+    "monitor.rs|if total > 0 && 0 <= current && current <= total {| > -> >= ": "equivalent: a normalised clock is at least 1, so total > 0 and total >= 0 agree",
+    "monitor.rs|if total > 0 && 0 <= current && current <= total {|0->1": "equivalent: a total of 1 can never show progress (current <= total = 1 cannot exceed an earlier current >= 1)",
+    "monitor.rs|if total > 0 && 0 <= current && current <= total {|0->1": "equivalent: a normalised clock is at least 1, so current >= 0 and current >= 1 agree",
+    "monitor.rs|let best = next_candidates.get(&total).copied().unwrap_or(-1);|1->2": "equivalent: the default only feeds max() with a clock value of at least 1",
+    "monitor.rs|let clock_near_end = self.last_clock_remaining.map_or(false, |r| r <= |false->true": "equivalent: last_clock_remaining and last_clock_at are None together, so a default of true on one side is still gated by the other",
+    "monitor.rs|let clock_near_end = self.last_clock_remaining.map_or(false, |r| r <= |false->true": "equivalent: last_clock_remaining and last_clock_at are None together, so a default of true on one side is still gated by the other",
+    "monitor.rs|let remaining_kt = p.display_times.map_or(0.0, |(a, b)| b - a);|0.0->1.0": "equivalent: with no display times the remaining is 0 or 1, never above the 35 s threshold",
     # key: "<file>|<first 70 chars of the line>|<old>-><new>"
     "lib.rs|let mut out = String::with_capacity(value.len() + 2);|2->3": "equivalent: only a capacity hint of the output string",
     "lib.rs|let mut groups = 0;|0->1": "equivalent: with the counter starting at 1 the empty suffix at the very end matches, which cuts nothing (the text is stripped, so no earlier suffix is only whitespace)",
@@ -55,7 +72,7 @@ SURVIVOR_NOTES: dict = {
 }
 
 
-FILES = ("lib.rs", "pure.rs", "ladder.rs")
+FILES = ("lib.rs", "pure.rs", "ladder.rs", "monitor.rs")
 
 
 def generate(name, text):
@@ -89,7 +106,7 @@ def setup():
     (WORK / "src").mkdir(parents=True, exist_ok=True)
     (WORK / "Cargo.toml").write_text((REAL / "Cargo.toml").read_text() + "\n[workspace]\n")
     shutil.copy(ROOT / "rust/Cargo.lock", WORK / "Cargo.lock")
-    for name in ("main.rs", "script_lines.rs", "casefold_table.rs", "builders.rs", "lib.rs", "pure.rs", "ladder.rs"):
+    for name in ("main.rs", "script_lines.rs", "casefold_table.rs", "builders.rs", "lib.rs", "pure.rs", "ladder.rs", "monitor.rs"):
         shutil.copy(REAL / "src" / name, WORK / "src" / name)
 
 
@@ -108,6 +125,9 @@ def main():
     import karafun_ladder_parity as lp
     lp.run_rust = spy
     assert lp.main(["--seeds", str(SEEDS * 4), "--binary", str(release)]) == 0, "the ladder must equal the Python first"
+    import karafun_monitor_parity as mpar
+    mpar.run_rust = spy
+    assert mpar.main(["--seeds", str(SEEDS * 5), "--binary", str(release)]) == 0, "the monitor must equal the Python first"
     print(f"oracle ready: {sum(len(b) for b, _ in captured)} requests in {len(captured)} batches", flush=True)
     setup()
     originals = {n: (WORK / "src" / n).read_text() for n in FILES}
@@ -121,7 +141,10 @@ def main():
 
     def agrees():
         for payload, resp in payloads:
-            proc = subprocess.run([str(binary)], input=payload, capture_output=True, timeout=300)
+            try:
+                proc = subprocess.run([str(binary)], input=payload, capture_output=True, timeout=60)
+            except subprocess.TimeoutExpired:
+                return False  # a mutant that hangs is killed
             if proc.returncode != 0 or json.loads(proc.stdout) != resp:
                 return False
         return True
