@@ -64,6 +64,10 @@ if relaymsg_bin.is_file() and "arm64" in subprocess.getoutput(f"/usr/bin/lipo -a
 settingsmig_bin = project_root / "native" / "singws_settingsmig" / "arm64" / "singws-settingsmig"
 if settingsmig_bin.is_file() and "arm64" in subprocess.getoutput(f"/usr/bin/lipo -archs '{settingsmig_bin}'"):
     binaries.append((str(settingsmig_bin), "."))
+# Rust song-end hand-off model (rust/build_songend.sh). Optional: without it the opt-in songend_shadow is silently skipped.
+songend_bin = project_root / "native" / "singws_songend" / "arm64" / "singws-songend"
+if songend_bin.is_file() and "arm64" in subprocess.getoutput(f"/usr/bin/lipo -archs '{songend_bin}'"):
+    binaries.append((str(songend_bin), "."))
 
 # Rust update rules (rust/build_update.sh). Optional: without it update_shadow is silently skipped.
 update_bin = project_root / "native" / "singws_update" / "arm64" / "singws-update"
@@ -104,6 +108,7 @@ for helper in (
     "logpack_shadow.py",
     "relay_msg_shadow.py",
     "settings_migrate_shadow.py",
+    "songend_shadow.py",
     "net_slice_shadow.py",
     "queue_state_shadow.py",
     "update_shadow.py",
@@ -231,6 +236,7 @@ a = Analysis(
         'logpack_shadow',
         'relay_msg_shadow',
         'settings_migrate_shadow',
+        'songend_shadow',
         'net_slice_shadow',
         'queue_state_shadow',
         'update_shadow',

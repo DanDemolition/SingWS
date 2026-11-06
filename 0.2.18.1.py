@@ -4364,6 +4364,10 @@ DEFAULTS = {
     # settings as they were before them, and [SETTINGS-MIGRATE-SHADOW] logs ONLY a difference (key NAMES, never values; only migration-related keys are sent). Python's settings are
     # always the ones used and saved. DEFAULT ON; a missing helper is skipped silently.
     "settings_migrate_shadow": True,
+    # Stage E shadow, OPT-IN (default OFF, AGENTS rule 9: instrumentation near live playback stays off until asked for): at a native karaoke song's end the app notes the song position at
+    # which it starts the background music, and a separate low-priority process (the Rust song-end model, singws-songend) is driven through an idealised run of the same song; [SONGEND-SHADOW]
+    # logs ONLY a difference (more than 1.5 s or another reason; song lengths and numbers only, never names). The app's own decision is always the one acted on.
+    "songend_shadow": False,
     # Stage E shadow: every ~30 s the host relay messages this app just sent (playback_tick, state, queue, chat) are rebuilt by a separate low-priority process
     # (a Rust helper) from a snapshot of the same inputs, and [RELAY-MSG-SHADOW] logs ONLY a difference (never chat text, names or ids). The message the app built
     # is always the one sent; the relay schema, retries and connection are untouched.
@@ -22677,6 +22681,22 @@ class SoundboardStrip(QWidget):
 
 
 
+def _songend_shadow_note(app, kind, mode=None):
+    """Stage E song-end shadow (songend_shadow.py): OPT-IN (setting songend_shadow, default off), log-only, every failure swallowed. ``kind`` None = a song started (with ``mode``)."""
+    try:
+        if not app.settings.get("songend_shadow", False):
+            if kind is None:
+                app.__dict__.pop("_songend_shadow_rec", None)
+            return
+        import songend_shadow
+        if kind is None:
+            songend_shadow.note_song_start(app, mode)
+        else:
+            songend_shadow.note_music_start(app, kind, _diag)
+    except Exception:
+        pass
+
+
 def _queue_state_shadowed(fn):
     """Stage B shadow hook (see queue_state_shadow.py): snapshots before and after a reconcile when a check is due; log-only, every call swallowed, the
     reconcile's own result and exceptions pass through unchanged."""
@@ -22978,7 +22998,7 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
         # One line each so a quiet shadow can be told apart from one that is off or whose helper is missing (they log nothing when all agrees).
-        for _mod_name in ("logpack_shadow", "relay_msg_shadow", "scan_shadow", "net_slice_shadow", "queue_state_shadow", "update_shadow", "settings_migrate_shadow"):
+        for _mod_name in ("logpack_shadow", "relay_msg_shadow", "scan_shadow", "net_slice_shadow", "queue_state_shadow", "update_shadow", "settings_migrate_shadow", "songend_shadow"):
             try:
                 # DEFAULTS are filled into self.settings later in __init__, so merge them here or a fresh profile would announce the wrong engine
                 __import__(_mod_name).announce({**DEFAULTS, **(self.settings if isinstance(self.settings, dict) else {})}, _diag)
@@ -28494,6 +28514,7 @@ class KaraokeApp(QWidget):
         # builds and previously disabled verified tail trimming for every MP3+G.
         self._arm_audio_end_floor(audio_path, duration_seconds)
         self._arm_visual_end_floor(video_path, mode)
+        _songend_shadow_note(self, None, mode)
         self._update_karaoke_key_ui()
         _diag(
             f"[KARAOKE-ENGINE] engine=mpv mode={mode} "
@@ -43372,6 +43393,7 @@ class KaraokeApp(QWidget):
         self._bg_crossfade_prefired = True
         try:
             self._bg_resume_reason = "karaoke_verified_audio_tail"
+            _songend_shadow_note(self, "verified_end")
             self.bg_music.fade_in(None, 3000, allow_during_karaoke=True)
             _diag(
                 "[CROSSFADE] BG fade started at verified audio end; "
@@ -43715,6 +43737,7 @@ class KaraokeApp(QWidget):
                 self._bg_crossfade_prefired = True
                 try:
                     self._bg_resume_reason = "karaoke_end_overlap"
+                    _songend_shadow_note(self, "prestart")
                     self.bg_music.fade_in(None, 3000, allow_during_karaoke=True)
                     _diag(f"[CROSSFADE] BG pre-start fired ({time_remaining_ns / 1e9:.1f}s remaining)")
                 except Exception as e:
@@ -66270,6 +66293,7 @@ class KaraokeApp(QWidget):
         print(f"BG fade-in reason={resume_reason} duration={fade_in_ms}ms")
 
         # Start fade in with current slider volume
+        _songend_shadow_note(self, "handoff:" + str(resume_reason))
         self.bg_music.fade_in(target_volume, fade_in_ms, allow_during_karaoke=allow_overlap)
         started = bool(getattr(self.bg_music, "is_playing", False))
         if not started:
