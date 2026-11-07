@@ -6,6 +6,7 @@ use singws_karafun::ladder::{self, Answer};
 use singws_karafun::monitor::{self, Monitor, Poll};
 use singws_karafun::pure::{self, Duration, Verdict};
 use singws_karafun::readback::{self, Parsed};
+use singws_karafun::startflow;
 use singws_karafun::watchdog;
 use singws_karafun::{adjust_menu_script, apply_key_tempo_script, applescript_literal, click_point_script, double_click_script, handoff_script, match_title, search_diag_script,
                      search_script, seek_script, set_key_tempo_script, static_script};
@@ -24,6 +25,17 @@ fn answer(v: &Value) -> Value {
             Parsed::None => json!({"values": null}),
             Parsed::Decline => json!({"decline": "digits"}),
         },
+        "startflow" => {
+            let b = |k: &str| v[k].as_bool().unwrap_or(false);
+            let act = startflow::play_action(&startflow::PlayInput { fast_start: b("fast_start"), managed_handoff: b("managed_handoff"), managed_start_state: s("managed_start_state"),
+                explicit_play_sent: b("explicit_play_sent"), probe_ok: b("probe_ok"), probe_state: s("probe_state") });
+            json!({"action": format!("{:?}", act),
+                   "initial": startflow::initial_probe_state(b("fast_start"), b("managed_handoff"), s("managed_start_state"), s("probe_state")),
+                   "verified": startflow::verified_playing(b("probe_ok"), startflow::initial_probe_state(b("fast_start"), b("managed_handoff"), s("managed_start_state"), s("probe_state")), b("fast_start")),
+                   "attempts": startflow::max_probe_attempts(b("was_running")),
+                   "auto": startflow::auto_adjusted(b("probe_ok"), s("text"), i("key_steps"), i("tempo_steps")),
+                   "confirmed": startflow::adjustment_confirmed(i("key"), i("tempo"), s("text"))})
+        }
         "monitor" => run_monitor(v),
         "monitor_replay" => run_monitor_replay(v),
         "watchdog" => run_watchdog(v),

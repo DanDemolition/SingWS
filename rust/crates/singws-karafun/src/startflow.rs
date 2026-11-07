@@ -28,8 +28,10 @@ pub fn initial_probe_state<'a>(fast_start: bool, managed_handoff: bool, managed_
 }
 
 pub fn play_action(i: &PlayInput) -> PlayAction {
-    let playing = i.probe_ok && i.probe_state == "PLAYING";
-    let state_unknown = i.fast_start && i.managed_handoff && i.probe_state == "UNKNOWN";
+    // Python tests `initial_probe_state`, which for a fast start is the assumed state, not a probe answer.
+    let state = initial_probe_state(i.fast_start, i.managed_handoff, i.managed_start_state, i.probe_state);
+    let playing = i.probe_ok && state == "PLAYING";
+    let state_unknown = i.fast_start && i.managed_handoff && state == "UNKNOWN";
     if !playing && !state_unknown && !i.explicit_play_sent {
         PlayAction::Press
     } else if i.explicit_play_sent {
@@ -42,6 +44,7 @@ pub fn play_action(i: &PlayInput) -> PlayAction {
 }
 
 pub fn verified_playing(ok: bool, probe_state: &str, fast_start: bool) -> bool {
+    // callers pass the initial probe state; with fast_start the result is false regardless
     ok && probe_state == "PLAYING" && !fast_start
 }
 
@@ -75,7 +78,7 @@ mod tests {
         assert_eq!(play_action(&inp(false, false, "", false, true, "PLAYING")), PlayAction::SkipAlreadyPlaying);
         assert_eq!(play_action(&inp(false, false, "", true, true, "IDLE")), PlayAction::SkipExplicit);
         assert_eq!(play_action(&inp(true, true, "UNKNOWN", false, true, "UNKNOWN")), PlayAction::DeferToMonitor);
-        assert_eq!(play_action(&inp(true, false, "", false, true, "UNKNOWN")), PlayAction::Press);
+        assert_eq!(play_action(&inp(true, false, "", false, true, "UNKNOWN")), PlayAction::SkipAlreadyPlaying);
         assert_eq!(play_action(&inp(true, false, "", false, false, "PLAYING")), PlayAction::Press);
     }
     #[test]
