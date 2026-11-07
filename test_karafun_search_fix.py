@@ -197,3 +197,15 @@ def HOST_DIAG():
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FeatDotStrippedTests(unittest.TestCase):
+    """2026-11-06: the regexes had `feat\\\\.?` in a raw string (a literal backslash), so "feat." was never stripped."""
+
+    def test_feat_with_a_dot_is_stripped_in_all_three_forms(self):
+        import re
+        src = open(__file__.replace("test_karafun_search_fix.py", "0.2.18.1.py"), encoding="utf-8").read()
+        self.assertNotIn("feat\\\\.?", src)
+        self.assertNotIn("ft\\\\.?", src)
+        self.assertIn(r"feat\.?|ft\.?", src)
+        self.assertEqual(re.sub(r"\([^)]*(feat\.?|ft\.?)[^)]*\)", " ", "Hello (feat. X)", flags=re.I).strip(), "Hello")

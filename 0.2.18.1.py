@@ -58166,9 +58166,9 @@ class KaraokeApp(QWidget):
     @staticmethod
     def _karafun_clean_search_part(value: str) -> str:
         text = str(value or "")
-        text = re.sub(r"\([^)]*(karaoke|version|explicit|clean|remaster|live|feat\\.?|ft\\.?)[^)]*\)", " ", text, flags=re.I)
-        text = re.sub(r"\[[^]]*(karaoke|version|explicit|clean|remaster|live|feat\\.?|ft\\.?)[^]]*\]", " ", text, flags=re.I)
-        text = re.sub(r"\b(feat\\.?|ft\\.?|featuring)\b.*$", " ", text, flags=re.I)
+        text = re.sub(r"\([^)]*(karaoke|version|explicit|clean|remaster|live|feat\.?|ft\.?)[^)]*\)", " ", text, flags=re.I)
+        text = re.sub(r"\[[^]]*(karaoke|version|explicit|clean|remaster|live|feat\.?|ft\.?)[^]]*\]", " ", text, flags=re.I)
+        text = re.sub(r"\b(feat\.?|ft\.?|featuring)\b.*$", " ", text, flags=re.I)
         text = re.sub(r"\b(karaoke|instrumental|official|version|lyrics?|lyric video|hd|remaster(?:ed)?|clean|explicit)\b", " ", text, flags=re.I)
         text = text.replace("&", " and ")
         text = re.sub(r"[’'`]", "", text)

@@ -3,8 +3,8 @@
 //!  - `_karafun_fallback_remaining`, `_karafun_adjustment_needs_attention`
 //!  - `_karafun_clean_search_part`, `_karafun_entry_artist_title`, `_karafun_search_queries_for_entry`  (the query ladder, most specific first)
 //!  - the accept/reject rule for a search answer (inline in `_automate_karafun_search_and_play`; transcribed, guarded by a source test)
-//! Every regex is copied VERBATIM from the Python (including `feat\\.?`, which in a raw string is a literal backslash and an optional character:
-//! it does not match "feat." and that is today's behaviour, kept on purpose).
+//! Every regex is copied VERBATIM from the Python. (`feat\.?` used to be written `feat\\.?` in the Python raw string, a literal backslash, so "feat." was
+//! never stripped; fixed 2026-11-06 in both.)
 use crate::{py_space, py_strip};
 use regex::Regex;
 use serde_json::Value;
@@ -105,10 +105,10 @@ pub fn clean_search_part(value: &str) -> String {
     static C: OnceLock<Regex> = OnceLock::new();
     static D: OnceLock<Regex> = OnceLock::new();
     static E: OnceLock<Regex> = OnceLock::new();
-    let mut text = re(&A, r"(?i)\([^)]*(karaoke|version|explicit|clean|remaster|live|feat\\.?|ft\\.?)[^)]*\)").replace_all(value, " ").into_owned();
-    text = re(&B, r"(?i)\[[^\]]*(karaoke|version|explicit|clean|remaster|live|feat\\.?|ft\\.?)[^\]]*\]").replace_all(&text, " ").into_owned();
+    let mut text = re(&A, r"(?i)\([^)]*(karaoke|version|explicit|clean|remaster|live|feat\.?|ft\.?)[^)]*\)").replace_all(value, " ").into_owned();
+    text = re(&B, r"(?i)\[[^\]]*(karaoke|version|explicit|clean|remaster|live|feat\.?|ft\.?)[^\]]*\]").replace_all(&text, " ").into_owned();
     // Python `$` also matches just before a final newline; (?:\n?\z) covers both (the newline becomes a space and is collapsed below anyway)
-    text = re(&C, r"(?i)\b(feat\\.?|ft\\.?|featuring)\b.*(?:\n?\z)").replace_all(&text, " ").into_owned();
+    text = re(&C, r"(?i)\b(feat\.?|ft\.?|featuring)\b.*(?:\n?\z)").replace_all(&text, " ").into_owned();
     text = re(&D, r"(?i)\b(karaoke|instrumental|official|version|lyrics?|lyric video|hd|remaster(?:ed)?|clean|explicit)\b").replace_all(&text, " ").into_owned();
     text = text.replace('&', " and ");
     text = text.replace(['\u{2019}', '\'', '`'], "");
@@ -240,8 +240,8 @@ mod tests {
         assert_eq!(search_queries_for_entry("", "", "AC/DC - Back In Black", ""), vec!["AC DC Back In Black", "Back In Black AC DC", "Back In Black", "AC DC"]);
         assert_eq!(search_queries_for_entry("same", "SAME", "", ""), vec!["same SAME", "SAME"]);
         assert_eq!(clean_search_part("Song (Karaoke Version)"), "Song");
-        // Python quirk kept on purpose: `feat\\.?` in a raw string is a literal backslash, so "feat." is NOT stripped and the query keeps it
-        assert_eq!(clean_search_part("Hello (feat. X)"), "Hello feat X");
+        // "feat." is stripped (the old Python regex had a literal backslash and missed it)
+        assert_eq!(clean_search_part("Hello (feat. X)"), "Hello");
     }
 
     #[test]
