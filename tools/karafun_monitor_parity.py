@@ -42,7 +42,7 @@ class Replay:
         code, script_builder, clock_seconds = loaded
         self.now = 100.0
         self.events = iter(c["events"])
-        self.messages, self.workers, self.scripts = [], [], []
+        self.messages, self.workers, self.scripts, self.timers = [], [], [], []
         self.status_calls, self.kt_started = [], 0
         entry = {"title": c["title"], "duration": c["duration"], "duration_estimated": c["duration_estimated"], "karafun_playback_assumed": c["playback_assumed"],
                  "karafun_handoff_timed_out_before_play": c["handoff_timed_out_before_play"]}
@@ -79,7 +79,7 @@ class Replay:
             return types.SimpleNamespace(start=lambda: self.workers.append(target))
         ns = {"uuid": types.SimpleNamespace(uuid4=lambda: types.SimpleNamespace(hex="monitor-token")),
               "time": types.SimpleNamespace(monotonic=lambda: self.now, sleep=lambda s: setattr(self, "now", self.now + s)),
-              "threading": types.SimpleNamespace(Thread=thread, Timer=lambda s, cb: types.SimpleNamespace(start=lambda: None, cancel=lambda: None)),
+              "threading": types.SimpleNamespace(Thread=thread, Timer=lambda s, cb: (self.timers.append((s, cb)), types.SimpleNamespace(start=lambda: None, cancel=lambda: None, daemon=True))[1]),
               "_diag": self.messages.append, "karafun_confirmed_readback": lambda *a: None}
         exec(code, ns)
         ns["_start_karafun_completion_monitor"](self.host, self.entry)
@@ -139,8 +139,11 @@ def scripted():
     for cur in (256, 257, 258, 259):
         a, b = cur - 3, cur
         out.append(base(events=[(1, f"{a // 60}:{a % 60:02d}\n4:23"), (1, f"{b // 60}:{b % 60:02d}\n4:23"), (2, "STATE|IDLE"), (2, "STATE|IDLE")], duration=0))
-    # expected end: fallback_remaining of exactly 5 and 6 at an idle poll (elapsed since the start 257.x -> 6, 258.x -> 5)
-    for e in (245.0, 245.5, 245.99, 246.0, 246.5, 246.99, 247.0):
+    # expected end: fallback_remaining of exactly 5 and 6 at an idle poll. The song is confirmed at 111 s and its clock counts from there (since 2026-11-06),
+    # so 1 + e seconds have passed: trunc(1 + e) = 257 -> remaining 6, 258 -> remaining 5
+    for e in (255.5, 256.0, 256.5, 256.99, 257.0, 257.5, 257.99, 258.0):
+        out.append(base(events=[(5, "STATE|PLAYING"), (5, "STATE|PLAYING"), (e, "STATE|IDLE")]))
+    for e in (245.0, 246.0, 247.0):
         out.append(base(events=[(5, "STATE|PLAYING"), (5, "STATE|PLAYING"), (e, "STATE|IDLE")]))
     # age of exactly 8.0 at an explicit end of a capture session
     out.append(base(events=[(3, "STATE|PLAYING"), (2, "STATE|PLAYING"), (1, "STATE|ENDED")], capture_session=True))

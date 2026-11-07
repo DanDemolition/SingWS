@@ -75,8 +75,23 @@ pub fn is_ui_not_ready_error(message: &str) -> bool {
     text.contains("-1719") || text.contains("invalid index") || text.contains("can\u{2019}t get") || text.contains("can't get") || text.contains("is not defined")
 }
 
-/// What the app does with the answers. `runner` is called once per script the app would run, with a label ("search:<query>:<ui_retry>" or "diag").
+/// The script the ladder asks its runner to execute.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Request {
+    Search { query: String },
+    Diag,
+}
+
+/// `run` with a runner that only needs a label ("search" or "diag"): what the parity tools use.
 pub fn run(queries: &[String], safe_title: &str, safe_artist: &str, runner: &mut dyn FnMut(&str) -> Answer) -> Outcome {
+    run_with(queries, safe_title, safe_artist, &mut |r| runner(match r {
+        Request::Search { .. } => "search",
+        Request::Diag => "diag",
+    }))
+}
+
+/// What the app does with the answers. `runner` is called once per script the app would run, and told which one.
+pub fn run_with(queries: &[String], safe_title: &str, safe_artist: &str, runner: &mut dyn FnMut(&Request) -> Answer) -> Outcome {
     let mut o = Outcome::default();
     macro_rules! rep {
         ($s:expr) => {
@@ -106,7 +121,7 @@ pub fn run(queries: &[String], safe_title: &str, safe_artist: &str, runner: &mut
             }
             o.log.push(line);
             o.requests.push(format!("search:{}:{}:{}:{}", query, ui_retry, safe_title, artist_match));
-            let a = runner("search");
+            let a = runner(&Request::Search { query: query.clone() });
             ok = a.ok;
             candidate = a.text.clone();
             if ok {
@@ -149,7 +164,7 @@ pub fn run(queries: &[String], safe_title: &str, safe_artist: &str, runner: &mut
         if !diag_logged {
             diag_logged = true;
             o.requests.push(format!("diag:{}", safe_title));
-            let d = runner("diag");
+            let d = runner(&Request::Diag);
             let text = if d.ok { &d.text } else { &d.error };
             let shown = rep!(&head(text, 900));
             o.log.push(format!("[KARAFUN-AUTO] no_match diagnosis: {}", shown));

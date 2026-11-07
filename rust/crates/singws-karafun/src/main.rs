@@ -5,6 +5,8 @@ use serde_json::{json, Value};
 use singws_karafun::ladder::{self, Answer};
 use singws_karafun::monitor::{self, Monitor, Poll};
 use singws_karafun::pure::{self, Duration, Verdict};
+use singws_karafun::readback::{self, Parsed};
+use singws_karafun::watchdog;
 use singws_karafun::{adjust_menu_script, apply_key_tempo_script, applescript_literal, click_point_script, double_click_script, handoff_script, match_title, search_diag_script,
                      search_script, seek_script, set_key_tempo_script, static_script};
 use std::io::Read;
@@ -13,8 +15,18 @@ fn answer(v: &Value) -> Value {
     let s = |k: &str| v[k].as_str().unwrap_or("");
     let i = |k: &str| v[k].as_i64().unwrap_or(0);
     match v["op"].as_str().unwrap_or("search_script") {
+        "readback" => {
+            let pair = |k: &str| v[k].as_array().and_then(|a| Some((a.first()?.as_i64()?, a.get(1)?.as_i64()?)));
+            json!({"values": readback::confirmed_readback(pair("known"), pair("first"), pair("second")).map(|(a, b)| json!([a, b]))})
+        }
+        "parse_kt" => match readback::parse_key_tempo(s("text")) {
+            Parsed::Pair((a, b)) => json!({"values": [a, b]}),
+            Parsed::None => json!({"values": null}),
+            Parsed::Decline => json!({"decline": "digits"}),
+        },
         "monitor" => run_monitor(v),
         "monitor_replay" => run_monitor_replay(v),
+        "watchdog" => run_watchdog(v),
         "ladder" => {
             let queries: Vec<String> = v["queries"].as_array().map(|a| a.iter().map(|q| q.as_str().unwrap_or("").to_string()).collect()).unwrap_or_default();
             let mut answers = v["answers"].as_array().cloned().unwrap_or_default().into_iter();
@@ -82,8 +94,19 @@ fn main() {
     }
 }
 
+struct Driven {
+    m: Monitor,
+    log: Vec<String>,
+    calls: Vec<String>,
+    now: f64,
+    polls: usize,
+    kt_reads: usize,
+    started: f64,
+    fallback_duration: i64,
+}
+
 /// A whole scripted run of the completion monitor: every poll consumes one event, the clock advances by the probe time and the sleeps.
-fn run_monitor(v: &Value) -> Value {
+fn drive_monitor(v: &Value) -> Result<Driven, Value> {
     let c = &v["cfg"];
     let f = |k: &str| c[k].as_f64().unwrap_or(0.0);
     let b = |k: &str| c[k].as_bool().unwrap_or(false);
@@ -99,12 +122,14 @@ fn run_monitor(v: &Value) -> Value {
         handoff_recovery_delay: f("handoff_recovery_delay"),
         alert_delay: f("alert_delay"),
     };
+    let fallback_duration = if cfg.duration_estimated { 0 } else { cfg.duration.max(0) };
     let now0 = v["now"].as_f64().unwrap_or(100.0);
-    let started = v["started"].as_f64().unwrap_or(now0);
-    let (mut m, mut log) = match Monitor::new(cfg, now0, started, v["seek_offset"].as_f64().unwrap_or(0.0)) {
+    let started_in = v["started"].as_f64().unwrap_or(now0);
+    let (mut m, mut log) = match Monitor::new(cfg, now0, started_in, v["seek_offset"].as_f64().unwrap_or(0.0)) {
         Ok(x) => x,
-        Err(why) => return json!({"decline": why}),
+        Err(why) => return Err(json!({"decline": why})),
     };
+    let started = m.started;
     let display_times = v["display_times"].as_array().and_then(|a| Some((a.first()?.as_f64()?, a.get(1)?.as_f64()?)));
     let press_ok = v["press_ok"].as_bool().unwrap_or(true);
     let press_error = v["press_error"].as_str().unwrap_or("").to_string();
@@ -147,7 +172,7 @@ fn run_monitor(v: &Value) -> Value {
         };
         let out = m.poll(&poll);
         if let Some(why) = out.declined {
-            return json!({"decline": why});
+            return Err(json!({"decline": why}));
         }
         log.extend(out.log);
         calls.extend(out.calls);
@@ -162,9 +187,34 @@ fn run_monitor(v: &Value) -> Value {
         }
         now += out.sleep;
     }
-    let e = &m.entry;
-    json!({"log": log, "calls": calls, "now": now, "polls": polls, "kt_reads": kt_reads,
+    Ok(Driven { m, log, calls, now, polls, kt_reads, started, fallback_duration })
+}
+
+fn run_monitor(v: &Value) -> Value {
+    let d = match drive_monitor(v) {
+        Ok(d) => d,
+        Err(e) => return e,
+    };
+    let e = &d.m.entry;
+    json!({"log": d.log, "calls": d.calls, "now": d.now, "polls": d.polls, "kt_reads": d.kt_reads,
            "entry": {"display_started_at": e.display_started_at, "display_duration": e.display_duration, "last_playing_ts": e.last_playing_ts, "paused_at": e.paused_at}})
+}
+
+/// The duration watchdog after a scripted monitor run: the first timer's delay, what firing the timer at `fire_now` would do, and the re-armed delay.
+fn run_watchdog(v: &Value) -> Value {
+    let d = match drive_monitor(v) {
+        Ok(d) => d,
+        Err(e) => return e,
+    };
+    let fire_now = v["fire_now"].as_f64().unwrap_or(d.now);
+    let fire_seek = v["fire_seek_offset"].as_f64().unwrap_or(0.0);
+    let initial = watchdog::initial_delay(d.fallback_duration, v["now"].as_f64().unwrap_or(100.0), d.started);
+    let checked = match watchdog::check(fire_now, d.m.entry.last_playing_ts, d.m.playback_confirmed_at, d.fallback_duration, fire_seek) {
+        watchdog::Check::Extend(e) => json!({"extend": e}),
+        watchdog::Check::Warn { log } => json!({"warn": log, "status": watchdog::WARNING}),
+    };
+    let rearm = watchdog::rearm_delay(d.fallback_duration, fire_now, d.started, d.m.playback_confirmed_at, fire_seek);
+    json!({"initial_delay": initial, "check": checked, "rearm_delay": rearm})
 }
 
 /// Replay of a RECORDED run (the live shadow): every pass carries the inputs the real loop saw. Answers, per pass, what the machine would have done.

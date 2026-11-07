@@ -77,6 +77,7 @@ pub struct Monitor {
     fallback_duration: i64,
     seen_playback: bool,
     pub playback_confirmed_at: Option<f64>,
+    playback_clock_origin: Option<f64>,
     recovery_pressed: bool,
     playback_hint_seen: bool,
     playing_hint_count: i64,
@@ -127,6 +128,7 @@ impl Monitor {
             fallback_duration,
             seen_playback: false,
             playback_confirmed_at: None,
+            playback_clock_origin: None,
             recovery_pressed: false,
             playback_hint_seen: false,
             playing_hint_count: 0,
@@ -146,9 +148,10 @@ impl Monitor {
         if self.playback_confirmed_at.is_none() {
             self.playback_confirmed_at = Some(now);
             let delay = (now - self.started).max(0.0);
-            // QUIRK KEPT ON PURPOSE: in the Python, `_confirm_playback` assigns `playback_clock_origin` without `nonlocal`, so this value is a throw-away
-            // local: it only feeds the log line below and the fallback clock keeps counting from `started` (the "rebase" the comment promises never happens).
+            // the fallback end clock counts from here: from `started` when SingWS controlled the start, else from the confirmation (the launch overhead is not
+            // charged to the song). Until 2026-11-06 the Python lost this value (a missing `nonlocal`) and always counted from `started`.
             let origin = if self.cfg.controlled_start { self.started } else { now };
+            self.playback_clock_origin = Some(origin);
             let retained = origin == self.started;
             log.push(format!(
                 "[KARAFUN] playback confirmed; duration fallback rebased (launch overhead {:.1}s {})",
@@ -260,8 +263,8 @@ impl Monitor {
         let mut fallback_remaining: Option<i64> = None;
         let mut remaining_from_fallback = false;
         if self.fallback_duration > 0 {
-            // the outer `playback_clock_origin` is never set (see confirm_playback), so the origin is always `started`
-            fallback_remaining = Some(self.fallback_remaining(now - self.started));
+            let origin = self.playback_clock_origin.unwrap_or(self.started);
+            fallback_remaining = Some(self.fallback_remaining(now - origin));
         }
         if remaining.is_none() && fallback_remaining.is_some() {
             remaining = fallback_remaining;
@@ -383,16 +386,30 @@ mod tests {
     }
 
     #[test]
-    fn the_fallback_clock_counts_from_the_start_not_from_the_confirmation() {
-        // the Python quirk: the origin is never rebased, so a late confirmation does not move the expected end
+    fn the_fallback_clock_counts_from_the_confirmation_when_the_start_was_not_controlled() {
+        // 100 s song, started at 100, playback confirmed at 152: an idle reading at 207 is 107 s after the start but 55 s after the confirmation
         let mut c = cfg();
         c.duration = 100;
         let (mut m, _) = Monitor::new(c, 100.0, 100.0, 0.0).unwrap();
         poll(&mut m, 100.0, 50.0, "STATE|PLAYING");
+        poll(&mut m, 151.0, 1.0, "STATE|PLAYING"); // confirmed at 152
+        let o = poll(&mut m, 153.0, 54.0, "STATE|IDLE");
+        assert!(!o.finished, "the song is not over yet: {:?}", o.log);
+        // and when the rebased end really arrives (152 + 100 = 252), the same idle completes it
+        let o = poll(&mut m, 208.0, 45.0, "STATE|IDLE");
+        assert!(o.finished && o.calls == vec!["complete"]);
+    }
+
+    #[test]
+    fn a_controlled_start_keeps_counting_from_the_start() {
+        let mut c = cfg();
+        c.duration = 100;
+        c.controlled_start = true;
+        let (mut m, _) = Monitor::new(c, 100.0, 100.0, 0.0).unwrap();
+        poll(&mut m, 100.0, 50.0, "STATE|PLAYING");
         poll(&mut m, 151.0, 1.0, "STATE|PLAYING");
-        let o = poll(&mut m, 153.0, 1.0, "STATE|IDLE");
-        // elapsed since the START is 54 s: 100 - 54 = 46 s left, not 100 - 4
-        assert!(!o.finished);
+        let o = poll(&mut m, 153.0, 54.0, "STATE|IDLE"); // 107 s after the start: over
+        assert!(o.finished);
     }
 
     #[test]

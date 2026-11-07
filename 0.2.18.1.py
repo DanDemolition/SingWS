@@ -60403,7 +60403,7 @@ class KaraokeApp(QWidget):
             nonlocal last_clock_remaining, last_clock_at, last_kt_read
 
             def _confirm_playback():
-                nonlocal playback_confirmed_at, seen_playback
+                nonlocal playback_confirmed_at, seen_playback, playback_clock_origin   # the origin must be the OUTER variable: without it the fallback end clock never rebased
                 seen_playback = True
                 if playback_confirmed_at is None:
                     playback_confirmed_at = time.monotonic()

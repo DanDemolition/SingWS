@@ -166,6 +166,20 @@ class KaraFunMonitorSafetyTests(unittest.TestCase):
         self.assertEqual(len(r.scripts), 3)
         self.assertTrue(any("reason=karaFun_idle" in m for m in r.messages))
 
+    def test_the_expected_end_counts_from_the_confirmed_playback_not_from_the_launch(self):
+        """2026-11-06: `_confirm_playback` assigned playback_clock_origin without nonlocal, so the fallback end clock never rebased and the launch overhead
+        (about 45 s on 2026-08-16) was charged to the song again. The song is 100 s; KaraFun takes 56 s to start playing (confirmed at 156 s). An idle reading
+        at 207 s is 107 s after the start but only 51 s after the confirmation: the song is NOT over."""
+        r = MonitorReplay([(50, "STATE|PLAYING"), (5, "STATE|PLAYING"), (50, "STATE|IDLE")], duration=100).run()
+        r.host._finish_external_karafun_playback.assert_not_called()
+        self.assertTrue(any("playback confirmed" in m and "excluded" in m for m in r.messages))
+
+    def test_the_rebased_end_still_completes_when_it_really_arrives(self):
+        # confirmed at 156 s: the song ends 100 s later (256 s); an idle reading at ~257 s completes it
+        r = MonitorReplay([(50, "STATE|PLAYING"), (5, "STATE|PLAYING"), (95, "STATE|IDLE")], duration=100).run()
+        r.host._finish_external_karafun_playback.assert_called_once_with("complete", expected_active=r.active)
+        self.assertTrue(any("reason=karaFun_idle_expected_end" in m for m in r.messages))
+
     def test_controlled_start_does_not_shift_end_by_slow_probe_latency(self):
         r = MonitorReplay([(10, "STATE|PLAYING"), (5, "STATE|PLAYING"),
                            (248, "STATE|IDLE")], duration=245, controlled_start=True).run()

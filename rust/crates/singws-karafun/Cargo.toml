@@ -13,6 +13,17 @@ path = "src/lib.rs"
 name = "singws-karafun"
 path = "src/main.rs"
 
+# A live runner for the dev Mac: builds the scripts in Rust and runs them through singws-mac against the real KaraFun. Opt-in, so the helper the installers
+# bundle stays small: cargo build --release -p singws-karafun --features live --bin singws-karafun-live
+[[bin]]
+name = "singws-karafun-live"
+path = "src/live_main.rs"
+required-features = ["live"]
+
+[features]
+live = ["dep:singws-mac"]
+
 [dependencies]
+singws-mac = { path = "../singws-mac", optional = true }
 serde_json = { version = "1.0.151", features = ["float_roundtrip", "preserve_order"] }
 regex = { version = "1", default-features = false, features = ["std", "unicode", "perf"] }
