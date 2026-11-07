@@ -4370,6 +4370,8 @@ DEFAULTS = {
     "songend_shadow": True,
     # Stage E shadow: each time the app builds the KaraFun search AppleScript, a separate low-priority process (singws-karafun, Rust) builds the same one and a difference is logged (karafun_script_shadow.py).
     "karafun_script_shadow": True,
+    # Stage E shadow: the completion monitor records each run and replays it through the Rust monitor when it ends; a difference in the actions is logged (karafun_monitor_shadow.py).
+    "karafun_monitor_shadow": True,
     # Stage E shadow: every ~30 s the host relay messages this app just sent (playback_tick, state, queue, chat) are rebuilt by a separate low-priority process
     # (a Rust helper) from a snapshot of the same inputs, and [RELAY-MSG-SHADOW] logs ONLY a difference (never chat text, names or ids). The message the app built
     # is always the one sent; the relay schema, retries and connection are untouched.
@@ -23000,7 +23002,7 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
         # One line each so a quiet shadow can be told apart from one that is off or whose helper is missing (they log nothing when all agrees).
-        for _mod_name in ("logpack_shadow", "relay_msg_shadow", "scan_shadow", "net_slice_shadow", "queue_state_shadow", "update_shadow", "settings_migrate_shadow", "songend_shadow", "karafun_script_shadow"):
+        for _mod_name in ("logpack_shadow", "relay_msg_shadow", "scan_shadow", "net_slice_shadow", "queue_state_shadow", "update_shadow", "settings_migrate_shadow", "songend_shadow", "karafun_script_shadow", "karafun_monitor_shadow"):
             try:
                 # DEFAULTS are filled into self.settings later in __init__, so merge them here or a fresh profile would announce the wrong engine
                 __import__(_mod_name).announce({**DEFAULTS, **(self.settings if isinstance(self.settings, dict) else {})}, _diag)
@@ -60288,6 +60290,17 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
 
+        class _NoShadow:
+            def note_pass(self, *args, **kwargs):
+                pass
+            event = finish = note_pass
+        _shadow = _NoShadow()
+        try:  # Stage E shadow: this run is recorded and replayed through the Rust monitor when it ends; a difference is logged (log-only; karafun_monitor_shadow.py)
+            import karafun_monitor_shadow
+            _shadow = karafun_monitor_shadow.start(self, entry, _diag, clock=time.monotonic, started=started, now=now_mono)
+        except Exception:
+            pass
+
         # A stuck accessibility query is not evidence the song has ended.
         # Keep a separate reminder so the host can still use Complete, but
         # never let a wall-clock timeout advance the rotation by itself.
@@ -60511,6 +60524,7 @@ class KaraokeApp(QWidget):
                     if state_label != last_state:
                         _diag(f"[KARAFUN] monitor state {state_label} idle_stop_count={idle_stop_count}")
                         last_state = state_label
+                    _shadow.note_pass(self, entry, probe_started, ok, raw)
                 except Exception:
                     remaining = None
 
@@ -60556,6 +60570,7 @@ class KaraokeApp(QWidget):
                     except Exception as exc:
                         pressed = False
                         press_error = str(exc)
+                    _shadow.event("press", pressed, press_error)
                     if pressed:
                         _diag("[KARAFUN] recovery play press sent")
                     else:
@@ -60579,6 +60594,7 @@ class KaraokeApp(QWidget):
                     and str(entry.get("karafun_status") or "") != "manual"
                 ):
                     _diag(f"[KARAFUN] playback unverified after {age:.0f}s; alerting operator idle={int(idle_reported)}")
+                    _shadow.event("alert")
                     self._set_karafun_entry_status(
                         entry, "manual",
                         message=("KaraFun is not playing this song. Press play in KaraFun."
@@ -60673,6 +60689,7 @@ class KaraokeApp(QWidget):
                             except Exception:
                                 pass
                             self._finish_external_karafun_playback("complete", expected_active=active_session)
+                    _shadow.event("complete")
                     self._run_on_ui_thread(_complete_near_end)
                     return
                 # Show any key/tempo change made in KaraFun itself. Reading needs
@@ -60690,6 +60707,7 @@ class KaraokeApp(QWidget):
                             and now_kt - last_kt_read >= 60.0):
                         last_kt_read = now_kt
                         entry["karafun_kt_busy"] = True
+                        _shadow.event("kt")
 
                         def _read_kt():
                             try:
@@ -60723,7 +60741,13 @@ class KaraokeApp(QWidget):
                     _diag(f"[KARAFUN] key/tempo read scheduling failed: {exc}")
                 time.sleep(1.0)
 
-        threading.Thread(target=_monitor, daemon=True, name="karafun-completion-monitor").start()
+        def _monitor_and_shadow():
+            try:
+                _monitor()
+            finally:
+                _shadow.finish()
+
+        threading.Thread(target=_monitor_and_shadow, daemon=True, name="karafun-completion-monitor").start()
 
     def _fade_bg_for_external_karafun(self):
         try:

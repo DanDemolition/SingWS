@@ -76,7 +76,7 @@ class ShadowTests(unittest.TestCase):
     def test_the_app_builds_it_in_and_it_defaults_on(self):
         self.assertIn('"karafun_script_shadow": True', SOURCE)
         self.assertIn("karafun_script_shadow.start(", SOURCE)
-        self.assertIn('"songend_shadow", "karafun_script_shadow"):', SOURCE)
+        self.assertIn('"songend_shadow", "karafun_script_shadow", "karafun_monitor_shadow"):', SOURCE)
         for spec in ("SingWS-arm64.spec", "SingWS-x86_64.spec"):
             text = (ROOT / spec).read_text(encoding="utf-8")
             self.assertIn("karafun_script_shadow.py", text)

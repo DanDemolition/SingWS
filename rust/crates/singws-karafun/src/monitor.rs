@@ -31,7 +31,6 @@ pub struct Entry {
     pub display_duration: Option<i64>,
     pub last_playing_ts: Option<f64>,
     pub paused_at: Option<f64>,
-    pub kt_busy: bool,
     pub seek_offset: f64,
 }
 
@@ -52,6 +51,10 @@ pub struct Poll {
     pub display_times: Option<(f64, f64)>,
     pub kt_running: bool,
     pub kt_dirty: bool,
+    /// `entry["karafun_kt_busy"]` (the read thread resets it, so the caller owns it)
+    pub kt_busy: bool,
+    /// `entry["karafun_seek_offset_s"]` as it is now (seeks change it during the song)
+    pub seek_offset: f64,
     /// result of `_karafun_press_play_control()` if the loop asks for it: (pressed, error)
     pub press_result: (bool, String),
 }
@@ -162,6 +165,7 @@ impl Monitor {
     /// One pass of the loop.
     pub fn poll(&mut self, p: &Poll) -> Out {
         let mut o = Out::default();
+        self.entry.seek_offset = p.seek_offset;
         if p.handoff_in_progress {
             o.sleep = 0.25;
             return o;
@@ -317,9 +321,8 @@ impl Monitor {
         }
         // show a key/tempo change made inside KaraFun: decide whether to start the (slow) read
         let remaining_kt = p.display_times.map_or(0.0, |(a, b)| b - a);
-        if self.playback_confirmed_at.is_some() && !self.entry.kt_busy && !p.kt_dirty && !p.kt_running && remaining_kt > 35.0 && now - self.last_kt_read >= 60.0 {
+        if self.playback_confirmed_at.is_some() && !p.kt_busy && !p.kt_dirty && !p.kt_running && remaining_kt > 35.0 && now - self.last_kt_read >= 60.0 {
             self.last_kt_read = now;
-            self.entry.kt_busy = true;
             o.kt_read_started = true;
         }
         o.sleep = 1.0;

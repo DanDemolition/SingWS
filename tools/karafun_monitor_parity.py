@@ -71,6 +71,7 @@ class Replay:
             _karafun_fallback_remaining=lambda duration, elapsed, offset=0.0: int(duration) - int(elapsed) - int(float(offset or 0.0)),
             _set_karafun_entry_status=lambda e, status, message="", notify=False, level="info": self.status_calls.append(message),
             _karafun_display_times=lambda: tuple(c["display_times"]) if c["display_times"] else None,
+            settings=c.get("shadow_settings"),
             KARAFUN_PLAYBACK_RECOVERY_DELAY_S=12, KARAFUN_HANDOFF_TIMEOUT_RECOVERY_DELAY_S=6, KARAFUN_PLAYBACK_ALERT_DELAY_S=40)
         self.press = press
 

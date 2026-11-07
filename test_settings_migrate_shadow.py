@@ -185,7 +185,7 @@ class Wiring(unittest.TestCase):
         self.assertLess(src.index("end_silence_threshold_2_5_migrated\"] = True"), hook)
         self.assertLess(hook, src.index("for k, v in DEFAULTS.items():", hook))
         self.assertIn('"settings_migrate_shadow": True,', src)
-        self.assertIn('"settings_migrate_shadow", "songend_shadow", "karafun_script_shadow")', src)  # announced once per launch, in the shadows' announce loop
+        self.assertIn('"settings_migrate_shadow", "songend_shadow", "karafun_script_shadow", "karafun_monitor_shadow")', src)  # announced once per launch, in the shadows' announce loop
 
     def test_both_specs_bundle_the_module_and_the_optional_helper(self):
         for spec in ("SingWS-arm64.spec", "SingWS-x86_64.spec"):
