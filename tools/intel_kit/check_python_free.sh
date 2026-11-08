@@ -12,6 +12,13 @@ APP="${SINGWS_SHELL_APP:-/Applications/SingWS Shell.app}"
 SONG="${1:-}"
 [[ -d "$APP" ]] || { echo "SingWS Shell.app not found at: $APP"; echo "Copy SingWS Shell.app to /Applications (or set SINGWS_SHELL_APP) and run this again."; exit 2; }
 if pgrep -x "SingWS" >/dev/null 2>&1; then echo "SingWS is running: quit it first (this test opens its own windows)."; exit 2; fi
+# The song must be an MP3+G zip (one .cdg and one .mp3 inside): check it BEFORE the long run so a wrong path or an MP4 song is explained here, not as a bare "could not be unpacked".
+if [[ -n "$SONG" ]]; then
+  [[ -f "$SONG" ]] || { echo "Song zip not found: $SONG"; echo "Check the path (drag the file into the Terminal window to paste it, with its quotes) and run again."; exit 2; }
+  LIST=$(unzip -Z1 "$SONG" 2>/dev/null) || { echo "That file is not a readable zip: $SONG"; exit 2; }
+  echo "$LIST" | grep -qi '\.cdg$' || { echo "That zip has no .cdg file inside, so it is not an MP3+G karaoke song: $SONG"; echo "Pick a CDG song, for example one from KARAOKE LIBRARY/CC/."; exit 2; }
+  echo "$LIST" | grep -qi '\.mp3$' || { echo "That zip has no .mp3 file inside: $SONG"; exit 2; }
+fi
 OUT="${SINGWS_HOME:-$HOME/SingWS}/readiness/$(date +%Y%m%d-%H%M%S)"; mkdir -p "$OUT"
 echo "Shell: $APP"; lipo -archs "$APP/Contents/MacOS/SingWS Shell" 2>/dev/null | sed 's/^/Shell architectures: /'
 echo "Running (a song takes about as long as the song itself)... windows will open and close; answer the question when it appears."
