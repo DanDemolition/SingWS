@@ -222,6 +222,10 @@ def build_world(rec, preds):
         def _karafun_activate_result_for_playback(self, point, reuse_point=False):
             R.call("activate_result", list(point), reuse_point=reuse_point)
             v = R.ask("activate", lambda r: [r.random() < 0.85, r.choice(["", "result moved", "timeout"])])
+            if v[0] and bool(self.settings.get("karafun_native_double_click", False)):
+                # the real method's learned-native branch: the row was double-clicked natively
+                session["entry"]["karafun_native_retry_sent"] = True
+                session["entry"]["karafun_native_first"] = True
             return (bool(v[0]), v[1] or None)
 
         def _karafun_playback_menu_state(self):
@@ -372,6 +376,7 @@ def texts_for(script):
     return SCRIPT_TEXTS
 
 
+_OMIT = object()
 CLOCKS = [0.0, 221.0, 3.0, 0.5, 600.0, 1.0, 59.9, -1.0]
 SCRIPT_TEXTS = ["FOUND|404|202|3:41", "TITLE_ONLY|1|2|", "FIRST|1|2|3:00", "ERROR|No usable KaraFun search result", "SEARCHED", "", "FOUND|1", "FOUND|404.7|202.2|0:00", "x|y|z",
                 "QUEUED_PAUSED", "QUEUED", "READY", "PLAYING", "IDLE", "UNKNOWN", "ADJUSTED|2|0", "ADJUSTED|0|10", "ADJUSTED|true|true", "ADJUSTED|true|false", "ADJUSTED|false|false", "weird"]
@@ -420,8 +425,17 @@ def random_scenario(r):
     if r.random() < 0.15:
         entry["karafun_result_activation_point"] = r.choice([[404, 202], [10, 20]])
     artist, title = r.choice([("Sugarcult", "Memory"), ("", "Memory"), ("Zoë", "Don't Stop"), ("a", "b"), ("", ""), ("A", "Zoë (live)")])
-    return {"settings": {"karafun_auto_queue_enabled": r.random() < 0.97, "karafun_dual_renderer_capture": r.random() < 0.25, "karafun_manage_show_screen": r.random() < 0.75,
-                         "karafun_fast_start_enabled": r.random() < 0.6, "karafun_auto_key_tempo": r.random() < 0.85, "karafun_native_double_click": r.random() < 0.3},
+    def sv(default_true):
+        x = r.random()
+        if x < 0.1:
+            return _OMIT
+        if x < 0.18:
+            return r.choice([1, 0, "", "yes", None, [], {}, [1], {"a": 1}, 2.5])
+        return r.random() < (0.97 if default_true == "q" else 0.75 if default_true else 0.3)
+    settings = {"karafun_auto_queue_enabled": sv("q"), "karafun_dual_renderer_capture": sv(False), "karafun_manage_show_screen": sv(True), "karafun_fast_start_enabled": sv(True),
+                "karafun_auto_key_tempo": sv(True), "karafun_native_double_click": sv(False)}
+    settings = {k: v for k, v in settings.items() if v is not _OMIT}
+    return {"settings": settings,
             "entry": entry, "artist": artist, "title": title, "key": r.choice([0, 0, 2, -1, 3, -12, 24]), "tempo": r.choice([None, 100, 100, 90, 110, 75, 250]),
             "request_uid": r.choice(["uid-1", "uid-é"]), "queries": r.choice([["Memory Sugarcult", "Memory"], ["Memory"], [], ["it's"], ["Zoë", "Zoë x"]]),
             "end_session_at": r.choice([None] * 14 + list(range(1, 60))), "capture_session": r.choice([None, None, True, False]), "handoff_error": r.choice([None, None, None, "no show window"]),

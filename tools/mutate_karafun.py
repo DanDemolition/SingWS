@@ -29,6 +29,13 @@ import mutate_songend as ms  # noqa: E402  (code_spans, PATTERNS)
 
 # "L<line>:<old>-><new>" -> "equivalent: why" | "GAP: what the corpus lacks"
 SURVIVOR_NOTES: dict = {
+    'helpers.rs|let (native, restored) = (w.native, w.session_restored.unwrap_or(true)|true->false': 'equivalent: the helpers harness always sets the session flag, so the default is never read',
+    'worker.rs|let key = io.result["requested_key"].as_i64().unwrap_or(0);|0->1': 'equivalent: intake always returns these fields, so the default is never read',
+    'worker.rs|let tempo = io.result["requested_tempo"].as_i64().unwrap_or(100);|100->101': 'equivalent: intake always returns these fields, so the default is never read',
+    'worker.rs|let needs_adjustment = io.result["needs_adjustment"].as_bool().unwrap_|false->true': 'equivalent: intake always returns these fields, so the default is never read',
+    'worker.rs|return Answer { ok: false, text: String::new(), error: String::new(), |false->true': 'equivalent under the replay contract: the scripted world always answers with the right type, so this default is never read',
+    'worker.rs|let a = Answer { ok: v[0].as_bool().unwrap_or(false), text: v[1].as_st|false->true': 'equivalent under the replay contract: the scripted world always answers with the right type, so this default is never read',
+    'worker.rs|Answer { ok: v[0].as_bool().unwrap_or(false), text: v[1].as_str().unwr|false->true': 'equivalent under the replay contract: the scripted world always answers with the right type, so this default is never read',
     'helpers.rs|Some(Value::Number(n)) => n.as_f64().map_or(true, |f| f != 0.0),|!=->==': 'equivalent: truthiness is only tested on keys the app sets to booleans (or the activation point list), never on a number, text or mapping',
     'helpers.rs|Some(Value::Number(n)) => n.as_f64().map_or(true, |f| f != 0.0),|true->false': 'equivalent: truthiness is only tested on keys the app sets to booleans (or the activation point list), never on a number, text or mapping',
     'helpers.rs|Some(Value::Number(n)) => n.as_f64().map_or(true, |f| f != 0.0),|0.0->1.0': 'equivalent: truthiness is only tested on keys the app sets to booleans (or the activation point list), never on a number, text or mapping',

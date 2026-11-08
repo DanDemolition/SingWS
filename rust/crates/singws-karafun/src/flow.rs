@@ -198,6 +198,14 @@ fn closure_watch(w: &mut World, entry: &mut Map<String, Value>, point: (i64, i64
     closure(w, entry, "watch", "")
 }
 
+/// Whole-method mode: a successful activation with the learned native double-click on leaves the two flags the real activation sets.
+fn native_flags(w: &World, entry: &mut Map<String, Value>, ok: bool) {
+    if w.unified && ok && w.native {
+        entry.insert("karafun_native_retry_sent".into(), json!(true));
+        entry.insert("karafun_native_first".into(), json!(true));
+    }
+}
+
 pub(crate) fn flow(w: &mut World, sc: &Scenario, entry: &mut Map<String, Value>) -> Result<String, String> {
     w.require()?;
     w.diag(format!("[KARAFUN-AUTO] activating KaraFun result mode={} x={} y={}", sc.parts[0], sc.parts[1], sc.parts[2]));
@@ -270,6 +278,7 @@ pub(crate) fn flow(w: &mut World, sc: &Scenario, entry: &mut Map<String, Value>)
             let (raised, raise_result, raise_error) = w.session_script("ready-script", 5)?;
             if raised && py_strip(&raise_result) == "READY" {
                 let r = w.activate(point, false);
+                native_flags(w, entry, r.0);
                 activated = r.0;
                 activation_error = r.1.unwrap_or_else(|| "None".into());
             } else {
@@ -278,6 +287,7 @@ pub(crate) fn flow(w: &mut World, sc: &Scenario, entry: &mut Map<String, Value>)
             }
         } else {
             let r = w.activate(point, false);
+            native_flags(w, entry, r.0);
             activated = r.0;
             activation_error = r.1.unwrap_or_else(|| "None".into());
         }
@@ -315,6 +325,7 @@ pub(crate) fn flow(w: &mut World, sc: &Scenario, entry: &mut Map<String, Value>)
             closure(w, entry, "bgm", "before_result_activation")?;
         }
         let (activated, err) = w.activate(point, capture);
+        native_flags(w, entry, activated);
         if !activated {
             return Err(format!("Could not start selected KaraFun result: {}", err.unwrap_or_else(|| "None".into())));
         }
