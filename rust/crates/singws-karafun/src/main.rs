@@ -6,11 +6,20 @@ use singws_karafun::ladder::{self, Answer};
 use singws_karafun::monitor::{self, Monitor, Poll};
 use singws_karafun::pure::{self, Duration, Verdict};
 use singws_karafun::readback::{self, Parsed};
+use singws_karafun::geometry;
 use singws_karafun::startflow;
 use singws_karafun::watchdog;
 use singws_karafun::{adjust_menu_script, apply_key_tempo_script, applescript_literal, click_point_script, double_click_script, handoff_script, match_title, search_diag_script,
                      search_script, seek_script, set_key_tempo_script, static_script};
 use std::io::Read;
+
+fn rect(v: &Value) -> Option<geometry::Rect> {
+    let a = v.as_array()?;
+    if a.len() != 4 {
+        return None;
+    }
+    Some((a[0].as_f64()?, a[1].as_f64()?, a[2].as_f64()?, a[3].as_f64()?))
+}
 
 fn answer(v: &Value) -> Value {
     let s = |k: &str| v[k].as_str().unwrap_or("");
@@ -32,6 +41,17 @@ fn answer(v: &Value) -> Value {
                 watchdog::Check::Warn { log } => json!({"warn": log}),
             }
         }
+        "pane_rect" => match geometry::preview_pane_rect(s("text")) {
+            geometry::Pane::None => json!({"rect": null}),
+            geometry::Pane::Decline => json!({"decline": "number form"}),
+            geometry::Pane::Found { window, region } => json!({"rect": {"window": [window.0, window.1, window.2, window.3], "region": [region.0, region.1, region.2, region.3]}}),
+        },
+        "fill_region" => {
+            let r = rect(&v["region"]).unwrap_or((0.0, 0.0, 0.0, 0.0));
+            let a = geometry::fill_region(r, v["aspect"].as_f64().unwrap_or(16.0 / 9.0));
+            json!({"region": [a.0, a.1, a.2, a.3]})
+        }
+        "region_changed" => json!({"changed": geometry::region_changed(rect(&v["old"]), rect(&v["new"]), v["tolerance"].as_f64().unwrap_or(2.0))}),
         "flow" => run_flow(v),
         "startflow" => {
             let b = |k: &str| v[k].as_bool().unwrap_or(false);

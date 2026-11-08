@@ -10,6 +10,7 @@ pub mod ladder;
 pub mod monitor;
 pub mod pure;
 pub mod flow;
+pub mod geometry;
 pub mod readback;
 pub mod startflow;
 pub mod watchdog;
