@@ -13,6 +13,32 @@ use std::time::Duration;
 fn run(lines: &[String], secs: u64) -> Answer {
     // the app runs a search with an 18 s limit; SINGWS_LIVE_TIMEOUT overrides it when KaraFun is slow to answer
     let secs = std::env::var("SINGWS_LIVE_TIMEOUT").ok().and_then(|v| v.parse().ok()).unwrap_or(secs);
+    if std::env::var("SINGWS_LIVE_RUNNER").map_or(false, |v| v == "osascript") {
+        // The same lines through the `osascript` tool, as the Python app runs them. Found 2026-11-08: the in-process NSAppleScript runner (default) never finishes a search whose
+        // query has several words (`keystroke "Journey Dont Stop Believin"`) although `osascript` finishes it in ~6 s; single-word queries work in both.
+        let mut cmd = std::process::Command::new("osascript");
+        for l in lines {
+            cmd.arg("-e").arg(l);
+        }
+        let child = cmd.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn();
+        let Ok(mut child) = child else { return Answer { ok: false, text: String::new(), error: "osascript could not start".into() } };
+        let start = std::time::Instant::now();
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) if start.elapsed() < Duration::from_secs(secs) => std::thread::sleep(Duration::from_millis(100)),
+                _ => {
+                    let _ = child.kill();
+                    return Answer { ok: false, text: String::new(), error: "timeout".into() };
+                }
+            }
+        }
+        let out = child.wait_with_output().ok();
+        return match out {
+            Some(o) => Answer { ok: o.status.success(), text: String::from_utf8_lossy(&o.stdout).trim().to_string(), error: String::from_utf8_lossy(&o.stderr).trim().to_string() },
+            None => Answer { ok: false, text: String::new(), error: "osascript failed".into() },
+        };
+    }
     let r = run_applescript(&lines.join("\n"), Duration::from_secs(secs));
     Answer { ok: r.ok, text: r.out.trim().to_string(), error: r.err }
 }
@@ -50,7 +76,7 @@ fn main() {
             for l in &o.log {
                 println!("{l}");
             }
-            println!("found={:?} selected_query={:?} raised={:?}", o.found, o.selected_query, o.raised);
+            println!("found={:?} selected_query={:?} raised={:?} declined={:?}", o.found, o.selected_query, o.raised, o.declined);
         }
         _ => eprintln!("usage: singws-karafun-live probe | search <query> <title> <artist> | ladder <artist> <title>"),
     }

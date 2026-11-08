@@ -27,7 +27,7 @@ pub struct Outcome {
     pub declined: Option<String>,
 }
 
-/// Python `repr()` of a str for the characters this port models (ASCII, Latin-1); None for anything else.
+/// Python `repr()` of a str for the characters this port models (ASCII, Latin-1, Latin Extended-A, general punctuation); None for anything else.
 pub fn py_repr(s: &str) -> Option<String> {
     let quote = if s.contains('\'') && !s.contains('"') { '"' } else { '\'' };
     let mut out = String::with_capacity(s.len() + 2);
@@ -46,6 +46,9 @@ pub fn py_repr(s: &str) -> Option<String> {
             c if (c as u32) < 0x7f => out.push(c),
             c if (0xa1..=0xff).contains(&(c as u32)) && c as u32 != 0xad => out.push(c),
             c if (0x80..=0xa0).contains(&(c as u32)) || c as u32 == 0xad => out.push_str(&format!("\\x{:02x}", c as u32)),
+            // Ranges that are long-assigned and entirely printable in Python (checked with str.isprintable): Latin Extended-A, the general punctuation block
+            // (curly quotes, dashes, the ellipsis: KaraFun's own error texts use them) and its per-mille..reference-mark part.
+            c if (0x100..=0x17f).contains(&(c as u32)) || (0x2010..=0x2027).contains(&(c as u32)) || (0x2030..=0x205e).contains(&(c as u32)) => out.push(c),
             _ => return None,
         }
     }
@@ -235,5 +238,6 @@ mod tests {
         assert_eq!(py_repr("a'b\"c").unwrap(), "'a\\'b\"c'");
         assert_eq!(py_repr("tab\there\n").unwrap(), "'tab\\there\\n'");
         assert_eq!(py_repr("\u{3042}"), None);
+        assert_eq!(py_repr("can\u{2019}t \u{201c}x\u{201d} \u{2026}").unwrap(), "'can\u{2019}t \u{201c}x\u{201d} \u{2026}'");
     }
 }
