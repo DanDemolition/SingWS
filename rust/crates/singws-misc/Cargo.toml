@@ -1,0 +1,17 @@
+[package]
+name = "singws-misc"
+version = "0.1.0"
+edition = "2021"
+description = "Small pure rules of the app that need no crate of their own, each checked against the app's own Python: LocationFixCollector. Proof only: Python still runs them."
+publish = false
+
+[lib]
+name = "singws_misc"
+path = "src/lib.rs"
+
+[[bin]]
+name = "singws-misc"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = { version = "1.0.151", features = ["float_roundtrip", "preserve_order"] }
