@@ -566,7 +566,7 @@ class Launch(unittest.TestCase):
         self.assertIn("payload = self._session_location_payload_impl(allow_auto_detect)", src)
         self.assertIn("resp = (shadow_post or requests).post(", src)
         self.assertIn("response = (shadow_post or requests).post(", src)
-        self.assertIn('for _mod_name in ("logpack_shadow", "relay_msg_shadow", "scan_shadow", "net_slice_shadow", "queue_state_shadow", "update_shadow", "settings_migrate_shadow", "songend_shadow", "karafun_script_shadow", "karafun_monitor_shadow"):', src)
+        self.assertIn('for _mod_name in ("logpack_shadow", "relay_msg_shadow", "scan_shadow", "net_slice_shadow", "queue_state_shadow", "update_shadow", "settings_migrate_shadow", "songend_shadow", "karafun_script_shadow", "karafun_monitor_shadow", "karafun_flow_shadow"):', src)
         self.assertIn("_NET_SLICE_SHADOW_ON = net_slice_shadow.enabled(self.settings)", src)
         for spec in ("SingWS-arm64.spec", "SingWS-x86_64.spec"):
             text = (ROOT / spec).read_text(encoding="utf-8")
