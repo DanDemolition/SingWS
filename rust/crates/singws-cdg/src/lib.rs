@@ -15,6 +15,7 @@
 //! `floor(t * 300)` (see [`CdgPlayer::render_at`]).
 
 pub mod window_rules;
+pub mod visual;
 pub mod idle_overlay;
 pub mod track_display;
 

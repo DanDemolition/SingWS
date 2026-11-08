@@ -22,6 +22,10 @@ name = "singws-track-display-cli"
 path = "src/track_display_cli.rs"
 
 [[bin]]
+name = "singws-cdg-visual-cli"
+path = "src/visual_cli.rs"
+
+[[bin]]
 name = "singws-idle-overlay-cli"
 path = "src/idle_overlay_cli.rs"
 
