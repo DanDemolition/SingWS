@@ -94,6 +94,7 @@ SURVIVOR_NOTES: dict = {
     "pure.rs|_ => 0.0,|0.0->1.0": "not modelled: a string seek offset (Python float() would parse it); the app only passes numbers or None",
     "pure.rs|let mut in_space = false;|false->true": "equivalent: the whitespace collapse runs after the regex that already turned every non-alphanumeric run into one space, and the result is stripped",
     "pure.rs|in_space = true;|true->false": "equivalent: same reason, no run of spaces can reach the collapse",
+    # --- geometry.rs (2026-11-08) ---
 }
 
 

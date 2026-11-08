@@ -119,7 +119,8 @@ fn find_libmpv() -> Option<std::path::PathBuf> {
 }
 
 fn libmpv(r: &mut Report) {
-    let machine = machine_arch();
+    // what must match is the architecture of THIS process (it dlopens the file): under Rosetta an x86_64 shell needs the x86_64 slice even on arm64 hardware
+    let machine = if cfg!(target_arch = "aarch64") { "arm64" } else { "x86_64" };
     match find_libmpv() {
         Some(p) => {
             let archs = macho_archs(&std::fs::read(&p).unwrap_or_default());
@@ -461,7 +462,8 @@ fn ask(question: &str, buttons: [&str; 3]) -> Option<String> {
         return None; // unattended runs (tests, scripts): never put a dialog on a screen
     }
     let script = format!("display dialog \"{}\" buttons {{\"{}\", \"{}\", \"{}\"}} default button \"{}\" giving up after 120", question.replace('"', "'"), buttons[0], buttons[1], buttons[2], buttons[2]);
-    let r = singws_mac::run_applescript(&script, Duration::from_secs(130));
+    // osascript, not the in-process runner: NSAppleScript shows no dialog from a worker thread, so the question never appeared
+    let r = singws_mac::run_osascript(&script, Duration::from_secs(130));
     if !r.ok || r.out.contains("gave up:true") {
         return None;
     }

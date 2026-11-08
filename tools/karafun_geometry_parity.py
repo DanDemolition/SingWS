@@ -112,6 +112,57 @@ def rects(r):
     return [f(), f(), r.choice([r.uniform(0, 3000), r.randint(0, 3000), 0, 1566.0, 480.0]), r.choice([r.uniform(0, 1100), r.randint(0, 1100), 0, 580.0, 270])]
 
 
+def boundary_cases():
+    """Exact-boundary layouts and hand-made forms (found by mutation: every threshold in pane_rect / fill_region needs a value ON it and just either side)."""
+    out_probe, out_fill = [], []
+    r = random.Random(12345)
+    for _ in range(3000):
+        top = r.choice([0, 10])
+        sx = r.choice([300.0, 300.5, 799.0, 799.5, 800.0, 400.0, 650.0])
+        sw = r.choice([0, 0.5, 1, 6, 6.5, 3])
+        sh = r.choice([299, 299.5, 300, 301, 700])
+        left = sx + max(1.0, sw)
+        lines = ["WINDOW|0|0|1000|1000", f"E|AXSplitter||d|{sx}|{top}|{sw}|{sh}"]
+        if r.random() < 0.85:
+            py = top + r.choice([60, 60.5, 61, 88, 90, 150])
+            px = left + r.choice([-2.5, -2, -1, 0, 5])
+            lines.append(f"E|AXPopUpButton|q|d|{px}|{py}|120|24")
+            if r.random() < 0.3:
+                lines.append(f"E|AXPopUpButton|q|d|{px}|{py}|120|24")
+        for _ in range(r.choice([0, 1, 1, 2])):
+            role = r.choice(["AXImage", "AXStaticText", "AXButton", "AXSlider", "AXGroup"])
+            oy = top + r.choice([60, 60.5, 61, 80, 150, 148, 149, 150.5, 151])
+            ox = left + r.choice([-2.5, -2, -1.5, 0, 10])
+            lines.append(f"E|{role}|n|d|{ox}|{oy}|20|10")
+            if r.random() < 0.3:
+                lines.append(f"E|{role}|n|d|{ox}|{oy}|20|10")
+        out_probe.append("\n".join(lines))
+    base = "WINDOW|0|0|1000|1000\nE|AXSplitter||d|{sx}|0|2|700\nE|AXPopUpButton|q|d|{px}|{py}|120|24"
+    for sx in (799.0, 798.5, 799.5, 797.0, 798.0, 797.5):
+        for py in (88.0, 88.5, 87.5, 89, 68, 60.5, 61):
+            out_probe.append(base.format(sx=sx, px=sx + 4, py=py))
+    out_probe += [
+        "WINDOW|0|0|1000|1000\nE|AXSplitter||d|400|0|2|700\nE|AXPopUpButton|q|d|410|300|1|1\nE|AXButton|n|d|410|inf|1|1",
+        "WINDOW|0|0|1000|1000\nE|AXSplitter||d|400|0|2|700\nE|AXPopUpButton|q|d|410|300|1|1\nE|AXButton|n|d|410|-inf|1|1",
+        "WINDOW|0|0|1000|1000\nE|AXSplitter||d|400|0|2|700\nE|AXPopUpButton|q|d|410|300|1|1\nE|AXButton|n|d|410|nan|1|1",
+        "WINDOW|0|0|1000|1000\nE|AXSplitter||d|400|0|2|700\nE|AXPopUpButton|q|d|410|3_00|1|1",
+        "WINDOW|0|0|1000|1000\nE|AXSplitter||d|400|0|2|700\nE|AXPopUpButton|q|d|410|\uff13\uff10\uff10|1|1",
+        "WINDOW|0|0|1_000|1000\nE|AXSplitter||d|400|0|2|700\nE|AXPopUpButton|q|d|410|300|1|1",
+        "WINDOW|0|0|1000|1000\nE|AXSplitter|d|400|0|2|700\nE|AXPopUpButton|q|d|410|300|1|1",
+        "WINDOW|0|0|1000|1000\nE|AXSplitter|d|400|0|2|700\nE|AXPopUpButton|d|410|300|1|1",
+        "WINDOW|0|0|1000|1000\nE|AXSplitter|d|400|0|2|700\nE|AXPopUpButton|q|x|d|410|300|1|1\nE|AXSplitter|x|y|d|400|0|2|700",
+    ]
+    for h, a in ((5, 2.0), (9, 16.0 / 9.0), (100, 16.0 / 9.0)):
+        for dw in (-1.5, -1.0, -0.5, 0, 0.1, 0.5, 1.0, 1.5, 2.0, 0.3, 0.8, 5, 20, 60, 100):
+            ha = h * a
+            out_fill.append(([3.0, 4.0, ha + 1.0 + dw, float(h)], a))
+            out_fill.append(([3.0, 4.0, ha * 1.08 + dw, float(h)], a))
+    for reg in ([0, 0, 5, 0.5], [0, 0, 5, 1], [0, 0, 5, 0.9], [0, 0, 0, 10], [0, 0, 10, 0], [0, 0, 0.5, 0.5], [0, 0, 1, 1], [0, 0, 0.9, 0.5], [0, 0, 0.5, 0.9], [0, 0, 1, 0.5], [0, 0, 0.5, 1]):
+        out_fill.append((reg, 2.0))
+        out_fill.append((reg, 16.0 / 9.0))
+    return out_probe, out_fill
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--seeds", type=int, default=4000)
@@ -135,6 +186,13 @@ def main(argv=None):
         tol = r.choice([2.0, 2.0, 0.5, 5.0])
         reqs.append({"op": "region_changed", "old": old, "new": new, "tolerance": tol})
         cases.append(("region_changed", (old, new, tol)))
+    bp, bf = boundary_cases()
+    for t in bp:
+        reqs.append({"op": "pane_rect", "text": t})
+        cases.append(("pane_rect", t))
+    for reg, asp in bf:
+        reqs.append({"op": "fill_region", "region": reg, "aspect": asp})
+        cases.append(("fill_region", (reg, asp)))
     got = run_rust(args.binary, reqs)
     diffs, declined, counts = [], 0, {"pane_found": 0, "pane_none": 0, "fill_cropped": 0, "changed_true": 0}
     for (kind, arg), g in zip(cases, got):
