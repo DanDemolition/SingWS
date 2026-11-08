@@ -56,6 +56,7 @@ fn answer(v: &Value) -> Value {
         "flow" => run_flow(v),
         "prelude" => run_prelude(v),
         "setup" => run_setup(v),
+        "finish" => run_finish(v),
         "startflow" => {
             let b = |k: &str| v[k].as_bool().unwrap_or(false);
             let act = startflow::play_action(&startflow::PlayInput { fast_start: b("fast_start"), managed_handoff: b("managed_handoff"), managed_start_state: s("managed_start_state"),
@@ -302,6 +303,31 @@ fn run_setup(v: &Value) -> Value {
     let answers: Vec<Value> = v["answers"].as_array().cloned().unwrap_or_default();
     let out = run(&scenario, &answers);
     json!({"result": out.result, "entry": Value::Object(out.entry), "world": out.world})
+}
+
+fn run_finish(v: &Value) -> Value {
+    use singws_karafun::finish::{run, Scenario};
+    let sc = &v["scenario"];
+    let s = |k: &str| sc[k].as_str().unwrap_or("").to_string();
+    let b = |k: &str| sc[k].as_bool().unwrap_or(false);
+    let scenario = Scenario {
+        ok: sc["result"]["ok"].as_bool().unwrap_or(false),
+        message: sc["result"]["message"].as_str().unwrap_or("").to_string(),
+        current: b("current"),
+        handoff_error: sc["handoff_error"].as_str().map(|x| x.to_string()),
+        needs_attention: b("needs_attention"),
+        apple_err: b("apple_err"),
+        ax_err: b("ax_err"),
+        capture_session: b("capture_session"),
+        adjustment_signature: s("adjustment_signature"),
+        request_uid: s("request_uid"),
+        requested_key: sc["requested_key"].as_i64().unwrap_or(0),
+        requested_tempo: sc["requested_tempo"].as_i64().unwrap_or(100),
+        title: s("title"),
+        entry: sc["entry"].as_object().cloned().unwrap_or_default(),
+    };
+    let out = run(&scenario);
+    json!({"entry": Value::Object(out.entry), "calls": out.calls, "log": out.log, "declined": out.declined})
 }
 
 fn run_watchdog(v: &Value) -> Value {
