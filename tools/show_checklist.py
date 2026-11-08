@@ -263,6 +263,19 @@ def render(results):
     return "\n".join(out)
 
 
+def choose_group(info, wanted=None):
+    """``info``: (name, group, songs). The group asked for, else the NEWEST one that is a real show (at least half the songs of the biggest): a zip can hold several nights, and a
+    short settings session after a show must not win either. (Before 2026-11-08 the biggest group won, which picked last night's show out of a zip holding two.)
+    Returns (chosen or None, names of the others)."""
+    if wanted:
+        chosen = next((x for x in info if x[0] == wanted), None)
+    else:
+        biggest = max(x[2] for x in info)
+        shows = [x for x in info if x[2] * 2 >= biggest and x[2] > 0] or info
+        chosen = max(shows, key=lambda x: (x[0], x[2]))
+    return chosen, [f"{x[0]} ({x[2]} songs)" for x in info if x is not chosen]
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("inputs", nargs="+")
@@ -280,7 +293,9 @@ def main(argv=None):
         for name, g in groups.items():
             ll = rep.last_launch(g.text().splitlines())
             info.append((name, g, sum(rep.song_kinds(ll).values())))
-        chosen = next((x for x in info if x[0] == args.group), None) if args.group else max(info, key=lambda x: x[2])
+        chosen, skipped = choose_group(info, args.group)
+        if chosen is not None and skipped:
+            print(f"NOTE: the input holds more than one log group; reading {chosen[0]} ({chosen[2]} songs). Also present: {', '.join(skipped)} (pick one with --group NAME).", file=sys.stderr)
         if chosen is None:
             print(f"no group named {args.group}", file=sys.stderr)
             return 2

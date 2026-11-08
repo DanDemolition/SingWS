@@ -122,5 +122,22 @@ class PythonFreeRoad(unittest.TestCase):
             self.assertEqual(sc.find_readiness(["/nonexistent"]), [])
 
 
+class ChooseGroup(unittest.TestCase):
+    def test_the_newest_real_show_wins_over_a_bigger_older_one(self):
+        info = [("singws_2026-11-06.log", object(), 54), ("singws_2026-11-07.log", object(), 52)]
+        chosen, others = sc.choose_group(info)
+        self.assertEqual(chosen[0], "singws_2026-11-07.log")
+        self.assertEqual(others, ["singws_2026-11-06.log (54 songs)"])
+
+    def test_a_short_session_after_a_show_does_not_win(self):
+        info = [("singws_2026-11-06.log", object(), 50), ("singws_2026-11-07.log", object(), 3)]
+        self.assertEqual(sc.choose_group(info)[0][0], "singws_2026-11-06.log")
+
+    def test_an_explicit_group_is_honoured_and_a_missing_one_is_none(self):
+        info = [("a.log", object(), 5), ("b.log", object(), 50)]
+        self.assertEqual(sc.choose_group(info, "a.log")[0][0], "a.log")
+        self.assertIsNone(sc.choose_group(info, "zzz")[0])
+
+
 if __name__ == "__main__":
     unittest.main()
