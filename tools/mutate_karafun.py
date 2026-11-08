@@ -29,6 +29,14 @@ import mutate_songend as ms  # noqa: E402  (code_spans, PATTERNS)
 
 # "L<line>:<old>-><new>" -> "equivalent: why" | "GAP: what the corpus lacks"
 SURVIVOR_NOTES: dict = {
+    'helpers.rs|Some(Value::Number(n)) => n.as_f64().map_or(true, |f| f != 0.0),|!=->==': 'equivalent: truthiness is only tested on keys the app sets to booleans (or the activation point list), never on a number, text or mapping',
+    'helpers.rs|Some(Value::Number(n)) => n.as_f64().map_or(true, |f| f != 0.0),|true->false': 'equivalent: truthiness is only tested on keys the app sets to booleans (or the activation point list), never on a number, text or mapping',
+    'helpers.rs|Some(Value::Number(n)) => n.as_f64().map_or(true, |f| f != 0.0),|0.0->1.0': 'equivalent: truthiness is only tested on keys the app sets to booleans (or the activation point list), never on a number, text or mapping',
+    'helpers.rs|Some(Value::String(s)) => !s.is_empty(),|!->': 'equivalent: truthiness is only tested on keys the app sets to booleans (or the activation point list), never on a number, text or mapping',
+    'helpers.rs|Some(Value::Object(o)) => !o.is_empty(),|!->': 'equivalent: truthiness is only tested on keys the app sets to booleans (or the activation point list), never on a number, text or mapping',
+    'helpers.rs|self.w.ask("session_current").as_bool().unwrap_or(false)|false->true': 'equivalent under the replay contract: the scripted world always answers with the right type, so this default is never read',
+    'helpers.rs|let (x, y) = self.point_ints().unwrap_or((0, 0));|0->1': 'equivalent: the activation point is always the 2-number list the app stored, so the fallback (0, 0) is never used',
+    'helpers.rs|let mut w = World { answers, pos: 0, calls: vec![], log: vec![], sleep|0->1': 'equivalent: the start value of the fake clock is not observable; only differences and sleeps matter',
     'prelude.rs|if secs != 0.0 && secs > 0.0 {| > -> >= ': 'equivalent: secs is already known to be non-zero there, so > 0.0 and >= 0.0 agree',
     'prelude.rs|if w.ask("apply_duration").as_bool().unwrap_or(false) {|false->true': 'equivalent under the replay contract: the scripted world always answers with the right type, so this default is never read',
     'setup.rs|(v[0].as_bool().unwrap_or(false), v[1].as_str().unwrap_or("").to_strin|false->true': 'equivalent under the replay contract: the scripted world always answers with the right type, so this default is never read',
@@ -150,7 +158,7 @@ SURVIVOR_NOTES: dict = {
     'methods.rs|(Ok(a), Ok(b)) if a.is_finite() && b.is_finite() => (a, b),|&&->||': 'equivalent: every timeout in the scenarios is finite, so both operands are always finite',
     'methods.rs|let looks_nonascii = parts[1].chars().chain(parts[2].chars()).any(|c| |==->!=': 'equivalent for correctness: this guard only decides to DECLINE (decline more = fewer cases compared, never a wrong answer); the declined count in the parity report shows the effect',
     'methods.rs|let looks_nonascii = parts[1].chars().chain(parts[2].chars()).any(|c| |!->': 'equivalent for correctness: this guard only decides to DECLINE (decline more = fewer cases compared, never a wrong answer); the declined count in the parity report shows the effect',
-    "methods.rs|if t.chars().any(|c| !c.is_ascii()) || t.contains('_') {|||->&&": 'GAP: decline guard for a non-ASCII digit without an underscore; no scenario puts such text at this parse point yet',
+    "methods.rs|if t.chars().any(|c| !c.is_ascii()) || t.contains('_') {|||->&&": 'equivalent: Rust f64 parsing never accepts a non-ASCII digit, so the text falls into the failure branch, whose looks_nonascii check declines exactly as the guard would',
 }
 
 

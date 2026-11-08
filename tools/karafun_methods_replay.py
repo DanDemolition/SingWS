@@ -55,7 +55,7 @@ class Rec:
         self.calls.append([name, list(args), {k: kw[k] for k in sorted(kw)}])
 
 
-OSA_TEXTS = ["ALREADY_PLAYING", "MENU_PLAY", "PLAY_NEXT|404.7|202", "PLAY|10|20", "PLAY|1.5|2.5|3", "ERROR|no control", "", "x|y", "FOUND|404|202|3:41", "FOUND|1|2", "FOUND|7.9|8.1|3:00", "FOUND||",
+OSA_TEXTS = ["FOUND|\uff14\uff10\uff14|202|3:41", "FOUND|404|\uff12\uff10\uff12|3:41", "FOUND|\u0663|\u0664", "ALREADY_PLAYING", "MENU_PLAY", "PLAY_NEXT|404.7|202", "PLAY|10|20", "PLAY|1.5|2.5|3", "ERROR|no control", "", "x|y", "FOUND|404|202|3:41", "FOUND|1|2", "FOUND|7.9|8.1|3:00", "FOUND||",
              "DOUBLE_CLICKED", "double_clicked", " DOUBLE_CLICKED ", "PLAYING", "idle", "Idle", "weird", "ERROR|a|b", "NOT_FOUND",
              "ADJUSTED|2|3", "ADJUSTED|0|0", "ADJUSTED|1|1|x", "ADJUSTED|5|", "ADJUSTED|a|1", "ADJUSTED|12|7", "adjusted|1|1", "SEEKED|3", "SEEKED|0", "SEEKED|12", "SEEKED|", "seeked|1",
              "SEEKED|7|extra", "SEEKED|60", " SEEKED|4",
@@ -251,7 +251,7 @@ def scenario_for(method, r):
                 "target_key": r.choice([0, 2, -2, 5, -7, 12, 1, -1, 3, -4]), "target_tempo": r.choice([100, 90, 110, 75, 125, 100, 101, 99, 91, 89])}
     entry = {"artist": r.choice(["Sugarcult", "", "Zoë"]), "title": r.choice(["Memory", "Memory", "", "it's"])}
     active = r.choice([{"entry": entry}] * 7 + [None, {"entry": None}, {"x": 1}, "not a dict"])
-    return {"active": active, "reuse_point": r.random() < 0.4, "point": r.choice([None, [404, 202], [10, 20], [0, 0]]),
+    return {"active": active, "reuse_point": r.random() < 0.4, "point": r.choice([None, None, None, [404, 202], [10, 20], [0, 0]]),
             "settings": {"karafun_native_double_click": r.random() < 0.4}, "change_session_on_resolve": r.random() < 0.1}
 
 
