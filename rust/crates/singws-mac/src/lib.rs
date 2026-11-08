@@ -129,6 +129,75 @@ pub fn run_applescript(source: &str, timeout: Duration) -> ScriptResult {
     }
     #[cfg(target_os = "macos")]
     {
+        // Default since 2026-11-08: the `osascript` tool, exactly how the Python app runs its scripts. The in-process NSAppleScript below NEVER finished a KaraFun search whose
+        // query had several words (`keystroke "Journey Dont Stop Believin"`) although `osascript` finishes it in ~6 s (found by the live ladder comparison); it also cannot be
+        // interrupted, while a timed-out `osascript` is killed. SINGWS_APPLESCRIPT_RUNNER=inprocess selects the old runner.
+        if std::env::var("SINGWS_APPLESCRIPT_RUNNER").map_or(true, |v| v != "inprocess") {
+            return run_osascript(source, timeout);
+        }
+    }
+    run_applescript_in_process(source, timeout)
+}
+
+/// The script through `osascript -` (script on stdin), killed when it outlasts `timeout`. On macOS only; elsewhere "unsupported".
+pub fn run_osascript(source: &str, timeout: Duration) -> ScriptResult {
+    #[cfg(target_os = "macos")]
+    {
+        use std::io::{Read, Write};
+        use std::process::{Command, Stdio};
+        use std::time::Instant;
+        let spawned = Command::new("/usr/bin/osascript").arg("-").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn();
+        let Ok(mut child) = spawned else { return ScriptResult { ok: false, out: String::new(), err: "osascript could not start".into() } };
+        if let Some(mut stdin) = child.stdin.take() {
+            let src = source.as_bytes().to_vec();
+            std::thread::spawn(move || {
+                let _ = stdin.write_all(&src);
+            });
+        }
+        // read the pipes on their own threads so a chatty script cannot fill them and stall
+        let read = |pipe: Option<Box<dyn Read + Send>>| {
+            std::thread::spawn(move || {
+                let mut buf = Vec::new();
+                if let Some(mut p) = pipe {
+                    let _ = p.read_to_end(&mut buf);
+                }
+                String::from_utf8_lossy(&buf).into_owned()
+            })
+        };
+        let out_t = read(child.stdout.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
+        let err_t = read(child.stderr.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
+        let start = Instant::now();
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(st)) => break Some(st),
+                Ok(None) if start.elapsed() < timeout => std::thread::sleep(Duration::from_millis(20)),
+                _ => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break None;
+                }
+            }
+        };
+        let (out, err) = (out_t.join().unwrap_or_default(), err_t.join().unwrap_or_default());
+        return match status {
+            None => ScriptResult { ok: false, out: String::new(), err: "timeout".into() },
+            Some(st) => ScriptResult { ok: st.success(), out: if st.success() { out.trim().to_string() } else { String::new() }, err: err.trim().to_string() },
+        };
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (source, timeout);
+        ScriptResult { ok: false, out: String::new(), err: "unsupported".into() }
+    }
+}
+
+/// The original runner: NSAppleScript inside this process (see `run_applescript` for why it is no longer the default).
+pub fn run_applescript_in_process(source: &str, timeout: Duration) -> ScriptResult {
+    if source.trim().is_empty() {
+        return ScriptResult { ok: false, out: String::new(), err: "empty_script".into() };
+    }
+    #[cfg(target_os = "macos")]
+    {
         let source = match CString::new(source) {
             Ok(c) => c,
             Err(_) => return ScriptResult { ok: false, out: String::new(), err: "script contains a NUL byte".into() },
