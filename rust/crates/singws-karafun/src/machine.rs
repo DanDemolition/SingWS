@@ -110,7 +110,7 @@ pub fn ensure_audio_output(explicit: &Value, follow: Option<&Value>, safe_local:
         return Err("a non-ASCII output name (casefold/isalnum not modelled)".to_string());
     }
     let key: String = target.to_lowercase().chars().filter(|c| c.is_ascii_alphanumeric()).collect();
-    if ["airplay", "apple tv", "bravia", "television", "display"].iter().any(|w| key.contains(w)) {
+    if ["airplay", "appletv", "bravia", "television", "display"].iter().any(|w| key.contains(w)) {
         let Some(r) = py_repr(&target) else { return Err("a character whose Python repr is not modelled".to_string()) };
         return Ok((false, format!("KaraFun audio output {r} looks like a display/AirPlay route. Choose headphones or a USB interface."), log));
     }

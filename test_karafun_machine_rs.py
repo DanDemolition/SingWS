@@ -28,11 +28,12 @@ class RealMethods(unittest.TestCase):
         for name in ("AirPlay: Living Room", "Sony BRAVIA", "Display Audio"):
             self.assertFalse(mp.run_python(ns, log, {"kind": "audio", "explicit": name, "safe_local": None})["result"][0], name)
 
-    def test_the_apple_tv_word_in_the_guard_can_never_match_a_name_with_its_spaces_removed(self):
-        """FINDING 2026-11-08, kept as is (changing a deliberate guard on inference is forbidden): the guard lists "apple tv" but compares against a name whose spaces were
-        removed ("appletv"), so a route called "Apple TV" is trusted. "airplay", "bravia", "television" and "display" do match."""
+    def test_a_route_called_apple_tv_is_refused_like_the_other_display_routes(self):
+        """Fixed 2026-11-08: the guard compared "apple tv" (with a space) against a name whose spaces were removed, so it never matched."""
         ns, log = mp.load()
-        self.assertTrue(mp.run_python(ns, log, {"kind": "audio", "explicit": "Apple TV", "safe_local": None})["result"][0])
+        for name in ("Apple TV", "apple tv", "AppleTV", "Living Room Apple TV"):
+            self.assertFalse(mp.run_python(ns, log, {"kind": "audio", "explicit": name, "safe_local": None})["result"][0], name)
+        self.assertTrue(mp.run_python(ns, log, {"kind": "audio", "explicit": "USB Audio", "safe_local": None})["result"][0])
 
 
 @unittest.skipUnless(BIN.is_file(), "needs the built singws-karafun helper")

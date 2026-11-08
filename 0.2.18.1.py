@@ -57121,7 +57121,7 @@ class KaraokeApp(QWidget):
             )
             return True, "KaraFun saved output"
         target_key = self._normalized_audio_output_name(target)
-        if any(word in target_key for word in ("airplay", "apple tv", "bravia", "television", "display")):
+        if any(word in target_key for word in ("airplay", "appletv", "bravia", "television", "display")):
             return False, f"KaraFun audio output {target!r} looks like a display/AirPlay route. Choose headphones or a USB interface."
         _diag(
             f"[KARAFUN-AUDIO] trusting saved KaraFun route; expected local output={target!r} "

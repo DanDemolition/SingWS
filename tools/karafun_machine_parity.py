@@ -128,7 +128,7 @@ DURATIONS = [None, True, False, 0, -5, 1, 90, 90.4, 90.5, 91.5, 263, 86400, 8640
              "24:00:00", "٣", "1:٣0", "3:41", [], {}, "1:5"]
 SOURCES = ["karafun_result", "karafun_result ", " karafun_result", "manual", "Manual override", "", None, "verified_metadata", "catalog", "x" * 5]
 TITLES = ["Memory", "", None, "it's", "Zoë", 'say "hi"']
-OUTPUT_NAMES = ["", "  ", "External Headphones", "USB Audio", "Apple TV", "AirPlay: Living Room", "Sony BRAVIA", "Television", "Display Audio", "MacBook Pro Speakers", "dis play", " Display ", None, "Zoë", "AIR-PLAY"]
+OUTPUT_NAMES = ["", "  ", "External Headphones", "USB Audio", "Apple TV", "AppleTV", "Den apple tv", "AirPlay: Living Room", "Sony BRAVIA", "Television", "Display Audio", "MacBook Pro Speakers", "dis play", " Display ", None, "Zoë", "AIR-PLAY"]
 
 
 TEXTS = ["", "x", "ok|1", " padded ", "Zoë", "it's", 'say "hi"', "line1\nline2", "e" * 300]
