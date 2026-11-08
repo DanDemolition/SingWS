@@ -119,6 +119,104 @@ pub fn ensure_audio_output(explicit: &Value, follow: Option<&Value>, safe_local:
     Ok((true, target, log))
 }
 
+
+fn s_of(v: &Value, k: &str) -> String {
+    v.get(k).and_then(Value::as_str).unwrap_or("").to_string()
+}
+
+/// `str(x or "").strip()` for a primitive's output text.
+fn clean(v: Option<&Value>) -> String {
+    py_strip(v.and_then(Value::as_str).unwrap_or("")).to_string()
+}
+
+/// `_open_karafun_for_entry`: the scripted primitives are `app_path` (None = not installed) and `run` ({"exc": text} or {"rc", "stdout", "stderr"}).
+pub fn open_for_entry(sc: &Value) -> Result<Value, String> {
+    let entry = &sc["entry"];
+    let provider_url = clean(entry.get("provider_url"));
+    let local_ref = clean(entry.get("local_reference_path"));
+    let target = if provider_url.is_empty() { local_ref.clone() } else { provider_url };
+    let auto = truthy(sc["settings"].get("karafun_auto_queue_enabled"));
+    let mut calls: Vec<Value> = vec![];
+    let mut log: Vec<String> = vec![];
+    let failed = |e: String, calls: Vec<Value>, mut log: Vec<String>| -> Value {
+        log.push(format!("[KARAFUN] open failed: {e}"));
+        json!({"result": false, "error": e, "calls": calls, "log": log})
+    };
+    let app_path = match sc.get("app_path").and_then(Value::as_str) {
+        Some(p) => p.to_string(),
+        None => return Ok(failed("KaraFun.app was not found in /Applications or ~/Applications. Install KaraFun, open it once, then retry.".to_string(), calls, log)),
+    };
+    let mut args = vec![json!("/usr/bin/open"), json!(app_path)];
+    if !local_ref.is_empty() {
+        args = vec![json!("/usr/bin/open"), json!("-a"), json!(app_path), json!(local_ref)];
+    }
+    calls.push(json!(["run", args, {"timeout": 10}]));
+    let run = &sc["run"];
+    if let Some(exc) = run.get("exc").and_then(Value::as_str) {
+        return Ok(failed(exc.to_string(), calls, log));
+    }
+    if run["rc"].as_i64().unwrap_or(0) != 0 {
+        let stderr = run.get("stderr").and_then(Value::as_str).unwrap_or("");
+        let stdout = run.get("stdout").and_then(Value::as_str).unwrap_or("");
+        let text = if !stderr.is_empty() { stderr } else if !stdout.is_empty() { stdout } else { "macOS could not launch KaraFun" };
+        return Ok(failed(py_strip(text).to_string(), calls, log));
+    }
+    if !target.is_empty() && local_ref.is_empty() && !auto {
+        calls.push(json!(["open_url", [target], {}]));
+    }
+    let Some(r) = py_repr(&app_path) else { return Err("a character whose Python repr is not modelled".to_string()) };
+    log.push(format!("[KARAFUN] launched app={r} arch={} automatic={}", s_of(sc, "arch"), auto as i32));
+    Ok(json!({"result": true, "error": "", "calls": calls, "log": log}))
+}
+
+/// `_run_karafun_applescript_sync(lines, timeout=...)` over scripted primitives: `nsa` (NSAppleScript) and `osa` (the osascript fallback).
+pub fn applescript_sync(sc: &Value) -> Result<Value, String> {
+    let lines: Vec<String> = sc["lines"].as_array().map(|a| a.iter().map(|x| x.as_str().unwrap_or("").to_string()).collect()).unwrap_or_default();
+    let mut calls: Vec<Value> = vec![];
+    let mut log: Vec<String> = vec![];
+    let done = |r: (bool, String, String), calls: Vec<Value>, log: Vec<String>| json!({"result": [r.0, r.1, r.2], "calls": calls, "log": log});
+    if py_strip(&lines.join("\n")).is_empty() {
+        return Ok(done((false, String::new(), "empty_script".to_string()), calls, log));
+    }
+    let arch = s_of(sc, "arch");
+    let nsa = &sc["nsa"];
+    if let Some(unavailable) = nsa.get("unavailable").and_then(Value::as_str) {
+        log.push(format!("[KARAFUN] NSAppleScript fallback to osascript: {unavailable}"));
+    } else if let Some(err) = nsa.get("error").and_then(Value::as_str) {
+        let Some(exe) = py_repr(&s_of(sc, "executable")) else { return Err("a character whose Python repr is not modelled".to_string()) };
+        let Some(er) = py_repr(err) else { return Err("a character whose Python repr is not modelled".to_string()) };
+        log.push(format!("[KARAFUN-SCRIPT] failed arch={arch} frozen={} executable={exe} error={er}", sc["frozen"].as_bool().unwrap_or(false) as i32));
+        return Ok(done((false, String::new(), err.to_string()), calls, log));
+    } else if nsa.get("string_raises").and_then(Value::as_bool).unwrap_or(false) {
+        return Ok(done((true, String::new(), String::new()), calls, log));
+    } else {
+        let text = match nsa.get("string") {
+            Some(Value::String(s)) => py_strip(s).to_string(),
+            _ => String::new(),
+        };
+        return Ok(done((true, text, String::new()), calls, log));
+    }
+    let mut args: Vec<Value> = vec![json!("osascript")];
+    for l in &lines {
+        args.push(json!("-e"));
+        args.push(json!(l));
+    }
+    calls.push(json!(["run", args, {"timeout": sc["timeout"]}]));
+    let osa = &sc["osa"];
+    if let Some(exc) = osa.get("exc").and_then(Value::as_str) {
+        return Ok(done((false, String::new(), exc.to_string()), calls, log));
+    }
+    let stdout = clean(osa.get("stdout"));
+    let stderr = clean(osa.get("stderr"));
+    let rc = osa["rc"].as_i64().unwrap_or(0);
+    if rc != 0 {
+        let Some(er) = py_repr(&stderr) else { return Err("a character whose Python repr is not modelled".to_string()) };
+        log.push(format!("[KARAFUN-SCRIPT] osascript failed arch={arch} returncode={rc} error={er}"));
+        return Ok(done((false, stdout, stderr), calls, log));
+    }
+    Ok(done((true, stdout, stderr), calls, log))
+}
+
 pub fn run(sc: &Value) -> Value {
     let kind = sc["kind"].as_str().unwrap_or("");
     let declined = |why: String| json!({"declined": why});
@@ -141,6 +239,8 @@ pub fn run(sc: &Value) -> Value {
             Ok((ok, text, log)) => json!({"result": [ok, text], "log": log}),
             Err(why) => declined(why),
         },
+        "open" => open_for_entry(sc).unwrap_or_else(declined),
+        "applescript" => applescript_sync(sc).unwrap_or_else(declined),
         _ => declined(format!("unknown kind {kind}")),
     }
 }

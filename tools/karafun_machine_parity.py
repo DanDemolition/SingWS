@@ -18,7 +18,7 @@ import types
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-WANTED_METHODS = ("_apply_verified_duration", "_karafun_apple_events_preflight", "_karafun_target_audio_output_name", "_ensure_karafun_audio_output", "_normalized_audio_output_name")
+WANTED_METHODS = ("_open_karafun_for_entry", "_run_karafun_applescript_sync", "_karafun_script_source", "_apply_verified_duration", "_karafun_apple_events_preflight", "_karafun_target_audio_output_name", "_ensure_karafun_audio_output", "_normalized_audio_output_name")
 
 
 def run_rust(binary, reqs):
@@ -45,9 +45,64 @@ def load():
     return ns, log
 
 
+class _Completed:
+    def __init__(self, rc, stdout, stderr):
+        self.returncode, self.stdout, self.stderr = rc, stdout, stderr
+
+
+def _prims(ns, sc, calls):
+    """The machine primitives the two methods reach for, scripted from the scenario (installed in the method's globals and in sys.modules)."""
+    def run(args, **kw):
+        calls.append(["run", list(args), {"timeout": kw.get("timeout")}])
+        spec = sc["run"] if sc["kind"] == "open" else sc["osa"]
+        if "exc" in spec:
+            raise RuntimeError(spec["exc"])
+        return _Completed(spec["rc"], spec["stdout"], spec["stderr"])
+
+    class _Script:
+        def executeAndReturnError_(self, _):
+            n = sc["nsa"]
+            if "error" in n:
+                return None, n["error"]
+
+            class R:
+                def stringValue(self_inner):
+                    if n.get("string_raises"):
+                        raise RuntimeError("no string")
+                    return n["string"]
+            return (R() if n.get("string") is not None or n.get("string_raises") else None), None
+
+    class NSAppleScript:
+        @staticmethod
+        def alloc():
+            if "unavailable" in sc["nsa"]:
+                raise RuntimeError(sc["nsa"]["unavailable"])
+            return types.SimpleNamespace(initWithSource_=lambda source: _Script())
+
+    appkit = types.ModuleType("AppKit")
+    appkit.NSAppleScript = NSAppleScript
+    sys.modules["AppKit"] = appkit
+    ns["subprocess"] = types.SimpleNamespace(run=run)
+    ns["platform"] = types.SimpleNamespace(machine=lambda: sc.get("arch", "arm64"))
+    ns["sys"] = types.SimpleNamespace(platform="darwin", frozen=sc.get("frozen", False), executable=sc.get("executable", "/x/python"))
+    ns["QDesktopServices"] = types.SimpleNamespace(openUrl=lambda url: calls.append(["open_url", [url], {}]))
+    ns["QUrl"] = lambda t: t
+
+
 def run_python(ns, log, sc):
     log.clear()
     kind = sc["kind"]
+    if kind in ("open", "applescript"):
+        calls = []
+        _prims(ns, sc, calls)
+        me = types.SimpleNamespace(settings=sc.get("settings", {}))
+        me._karafun_script_source = ns["_karafun_script_source"]
+        if kind == "open":
+            me._karafun_application_path = lambda: (None if sc["app_path"] is None else sc["app_path"])
+            res = ns["_open_karafun_for_entry"](me, sc["entry"])
+            return {"result": res, "error": me._last_karafun_launch_error, "calls": calls, "log": list(log)}
+        res = ns["_run_karafun_applescript_sync"](me, sc["lines"], timeout=sc["timeout"])
+        return {"result": list(res), "calls": calls, "log": list(log)}
     if kind == "apply_duration":
         entry = json.loads(json.dumps(sc["entry"]))
         out = ns["_apply_verified_duration"](entry, sc["value"], source=sc["source"])
@@ -76,7 +131,26 @@ TITLES = ["Memory", "", None, "it's", "Zoë", 'say "hi"']
 OUTPUT_NAMES = ["", "  ", "External Headphones", "USB Audio", "Apple TV", "AirPlay: Living Room", "Sony BRAVIA", "Television", "Display Audio", "MacBook Pro Speakers", "dis play", " Display ", None, "Zoë", "AIR-PLAY"]
 
 
+TEXTS = ["", "x", "ok|1", " padded ", "Zoë", "it's", 'say "hi"', "line1\nline2", "e" * 300]
+
+
 def scenario(r):
+    if r.random() < 0.3:
+        if r.random() < 0.5:
+            entry = {}
+            for k in ("provider_url", "local_reference_path"):
+                if r.random() < 0.5:
+                    entry[k] = r.choice(["", "  ", "https://x/y", "/tmp/a b.kfun", " spaced ", None])
+            return {"kind": "open", "entry": entry, "settings": {"karafun_auto_queue_enabled": r.choice([True, False, 1, 0, None, "x"])} if r.random() < 0.9 else {},
+                    "app_path": r.choice([None, "/Applications/KaraFun.app", "/Users/x/Applications/KaraFun 2.app", "/Applications/Kara'Fun.app"]),
+                    "run": r.choice([{"exc": "timed out"}, {"rc": 0, "stdout": "", "stderr": ""}, {"rc": 1, "stdout": "out", "stderr": "err"}, {"rc": 1, "stdout": "out only", "stderr": ""},
+                                     {"rc": 1, "stdout": "", "stderr": ""}, {"rc": 2, "stdout": "  ", "stderr": "  padded err  "}]), "arch": r.choice(["arm64", "x86_64"])}
+        lines = r.choice([[], [""], ["  "], ["tell app"], ["a", "b", "c"], ["it's", 'say "hi"'], ["Zoë"]])
+        nsa = r.choice([{"unavailable": "No module named AppKit"}, {"error": "boom -1743"}, {"error": "Zoë"}, {"string": "OK|12"}, {"string": "  padded  "}, {"string": None},
+                        {"string": "x", "string_raises": True}, {"string": ""}])
+        return {"kind": "applescript", "lines": lines, "timeout": r.choice([None, 4, 8, 18.5]), "arch": r.choice(["arm64", "x86_64"]), "frozen": r.random() < 0.5,
+                "executable": r.choice(["/Applications/SingWS.app/Contents/MacOS/SingWS", "/usr/bin/python3", "/x/it's/py"]), "nsa": nsa,
+                "osa": r.choice([{"exc": "osascript missing"}, {"rc": 0, "stdout": " out \n", "stderr": " warn "}, {"rc": 1, "stdout": "o", "stderr": "bad -1743"}, {"rc": 1, "stdout": "", "stderr": ""}])}
     kind = r.choice(["apply_duration"] * 5 + ["preflight"] * 2 + ["audio"] * 3)
     if kind == "apply_duration":
         entry = {}
