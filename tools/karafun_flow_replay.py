@@ -112,7 +112,7 @@ def build_world(rec):
 
         @property
         def _karafun_handoff_in_progress(self):
-            return R.ask("in_progress", lambda r: r.random() < 0.6)
+            return R.ask("in_progress", lambda r: True if sc.get("stuck_handoff") else r.random() < 0.6)
 
         @property
         def _karafun_handoff_complete(self):
@@ -167,7 +167,7 @@ def build_world(rec):
         R.call("session_script", script, timeout=timeout)
         v = R.ask("session_script", lambda r: [r.random() < 0.8, r.choice(["READY", "PLAYING", "IDLE", "UNKNOWN", "ERROR|KaraFun control window not found", "ADJUSTED|true|true",
                                                                              "ADJUSTED|true|false", "ADJUSTED|false|true", "ADJUSTED|false|false", "", "weird"]),
-                                              r.choice(["", "timeout", "AX error"])])
+                                              r.choice(["", "timeout", "AX error", "e" * 200, "x" * 180, "y" * 181])])
         return (bool(v[0]), v[1], v[2])
 
     class Clock:
@@ -244,13 +244,13 @@ def random_scenario(r):
     if r.random() < 0.25:
         entry["karafun_adjustment_applied"] = sig if r.random() < 0.6 else "other"
     if r.random() < 0.15:
-        entry["karafun_playback_clock_started_at"] = r.choice([0.0, 50.0, 120.5])
+        entry["karafun_playback_clock_started_at"] = r.choice([0.0, 1.0, 50.0, 120.5])
     return {"settings": {"karafun_dual_renderer_capture": capture, "karafun_manage_show_screen": r.random() < 0.7, "karafun_fast_start_enabled": r.random() < 0.7},
             "parts": [r.choice(["FOUND", "TITLE_ONLY", "FIRST"]), r.choice(["404", "404.7", "0", "-5", "1200"]), r.choice(["202", "202.2", "0", "88"]), r.choice(["3:41", ""])],
             "queued_for_adjustment": r.random() < 0.2, "needs_adjustment": r.random() < 0.4, "adjustment_signature": sig,
             "requested_key": r.choice([0, 0, 2, -1, 3]), "requested_tempo": r.choice([100, 100, 90, 110, 75]), "karafun_was_running": r.random() < 0.5,
             "selected_query": r.choice(["Memory Sugarcult", "it's", "Zoë"]), "title": r.choice(["Memory", "Don't Stop", "Zoë (live)"]), "entry": entry,
-            "end_session_at": r.choice([None] * 8 + [1, 2, 3, 5, 9, 14])}
+            "end_session_at": r.choice([None] * 8 + [1, 2, 3, 5, 9, 14]), "stuck_handoff": r.random() < 0.05}
 
 
 def main(argv=None):

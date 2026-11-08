@@ -29,6 +29,25 @@ import mutate_songend as ms  # noqa: E402  (code_spans, PATTERNS)
 
 # "L<line>:<old>-><new>" -> "equivalent: why" | "GAP: what the corpus lacks"
 SURVIVOR_NOTES: dict = {
+    # --- flow.rs (2026-11-08) ---
+    'flow.rs|let ok = v[0].as_bool().unwrap_or(false);|false->true': 'equivalent under the replay contract: the scripted world always answers with the right type, so this default is never read',
+    'flow.rs|self.ask("mouse_click").as_bool().unwrap_or(false)|false->true': 'equivalent under the replay contract: the scripted world always answers with the right type, so this default is never read',
+    'flow.rs|(v[0].as_bool().unwrap_or(false), v[1].as_str().unwrap_or("").to_strin|false->true': 'equivalent under the replay contract: the scripted world always answers with the right type, so this default is never read',
+    'flow.rs|self.ask("in_progress").as_bool().unwrap_or(false)|false->true': 'equivalent under the replay contract: the scripted world always answers with the right type, so this default is never read',
+    'flow.rs|Some(Value::Number(n)) => n.as_f64().map_or(true, |f| f != 0.0),|true->false': 'equivalent: a JSON number always converts to f64, so the default is unreachable',
+    'flow.rs|Some(Value::Number(n)) => n.as_f64().map_or(true, |f| f != 0.0),|0.0->1.0': 'equivalent: the flow only tests numeric entry values it set itself to a clock reading (100 s or more on the fake clock), never 0 or 1',
+    'flow.rs|Some(Value::String(s)) => !s.is_empty(),|!->': 'equivalent: the flow only tests booleans and numbers for truthiness',
+    'flow.rs|Some(Value::Array(a)) => !a.is_empty(),|!->': 'equivalent: the flow only tests booleans and numbers for truthiness',
+    'flow.rs|Some(Value::Object(o)) => !o.is_empty(),|!->': 'equivalent: the flow only tests booleans and numbers for truthiness',
+    'flow.rs|let ok = w.ask("event_wait").as_bool().unwrap_or(false);|false->true': 'equivalent under the replay contract: the scripted world always answers with the right type, so this default is never read',
+    'flow.rs|while w.in_progress() && w.t < deadline {| < -> <= ': "equivalent: needs the accumulated clock to equal the deadline exactly; 0.1 is not exactly representable so it steps over it (the 0.25 s loop's twin IS killed)",
+    'flow.rs|let ready = w.ask("handoff_complete").as_bool().unwrap_or(false);|false->true': 'equivalent under the replay contract: the scripted world always answers with the right type, so this default is never read',
+    'flow.rs|let (raised, raise_result, raise_error) = w.session_script("ready-scri|5->6': 'equivalent under the replay contract: the capture sub-branch of the managed path is unreachable while the capture setting does not change during the flow (the managed path requires capture off); a live-branch twin with the same text is killed',
+    'flow.rs|if raised && py_strip(&raise_result) == "READY" {|&&->||': 'equivalent under the replay contract: the capture sub-branch of the managed path is unreachable while the capture setting does not change during the flow (the managed path requires capture off); a live-branch twin with the same text is killed',
+    'flow.rs|if raised && py_strip(&raise_result) == "READY" {|==->!=': 'equivalent under the replay contract: the capture sub-branch of the managed path is unreachable while the capture setting does not change during the flow (the managed path requires capture off); a live-branch twin with the same text is killed',
+    'flow.rs|let r = w.activate(point, false);|false->true': 'equivalent under the replay contract: the capture sub-branch of the managed path is unreachable while the capture setting does not change during the flow (the managed path requires capture off); a live-branch twin with the same text is killed',
+    'flow.rs|activated = false;|false->true': 'equivalent under the replay contract: the capture sub-branch of the managed path is unreachable while the capture setting does not change during the flow (the managed path requires capture off); a live-branch twin with the same text is killed',
+    'flow.rs|native_double_click_retried = true;|true->false': 'equivalent: the flag only matters on attempt 0, and from attempt 1 on `probe_attempt == 0` is already false',
     # --- readback.rs ---
     'readback.rs|return Err(chars.get(ds).map_or(false, |c| !c.is_ascii() && c.is_numer|&&->||': 'equivalent: parse_key_tempo declines any text holding a non-ASCII numeric character before this test can matter, so the inner check never decides',
     'readback.rs|return Err(chars.get(ds).map_or(false, |c| !c.is_ascii() && c.is_numer|!->': 'equivalent: parse_key_tempo declines any text holding a non-ASCII numeric character before this test can matter, so the inner check never decides',
