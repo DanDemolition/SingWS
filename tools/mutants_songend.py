@@ -32,6 +32,14 @@ NOTES = {
     "L1001:false->true": "equivalent under the replay contract: snapshot() in tools/songend_scenarios.py always emits this key with the right type, so the default is never read",
     "L1107:false->true": "equivalent under the replay contract: snapshot() in tools/songend_scenarios.py always emits this key with the right type, so the default is never read",
     "L1147:false->true": "equivalent under the replay contract: snapshot() in tools/songend_scenarios.py always emits this key with the right type, so the default is never read",
+    # --- 2026-11-08: survivors that tiny-value / two-song scenarios could not kill because there is no observable difference (reasons read from the Rust and the Python)
+    "L433: > -> >= ": "equivalent: with rec_dur == 0.0 the tail is 0.0, below the 0.3 threshold, so the branch applies nothing either way",
+    "L474:0.0->1.0": "equivalent: apply_audio_end_floor re-tests `trailing <= 0.0` before it uses runs_to_end, so widening the test here to <= 1.0 changes nothing",
+    "L483: > -> >= ": "equivalent: every caller passes a duration above 0 (the scan path returns early on <= 0, the record path needs rec_dur > 0, the cache path needs true_dur > 0)",
+    "L486: > -> >= ": "equivalent: every caller passes a duration above 0 (see L483)",
+    "L486:0.0->1.0": "equivalent: runs_to_end is true only when trailing <= 0 (scan path) and false on the cache and record paths, so trailing never lies in (0, 1] with it set",
+    "L595:<=-><": "equivalent: with audio_s == 0.0 the next comparison (audio_ns <= dur_ns) returns the media duration anyway",
+    "L621:0->1": "equivalent: it needs a media duration of exactly 1 ns, and the model's clock is whole milliseconds",
     "L1165:true->false": "equivalent under the replay contract: snapshot() in tools/songend_scenarios.py always emits this key with the right type, so the default is never read",
 }
 

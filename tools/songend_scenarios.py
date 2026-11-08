@@ -788,6 +788,31 @@ def scripted():
     out.append(scen("cleanup_resume_recovery_fails", [start(0, "cdg", 60.0, {}, duration_hint=60.0), at(5, "set", bg_audible=False, recover_ok=False), at(58, "eos")], 90, karaoke_bgm_crossfade_enabled=False))
     out.append(scen("cleanup_stale_bg_playing", [start(0, "cdg", 60.0, {}, duration_hint=60.0), at(5, "set", bg_playing=True, bg_audible=False), at(58, "eos")], 90, karaoke_bgm_crossfade_enabled=False))
     out.append(scen("cleanup_bg_already_audible", [start(0, "cdg", 60.0, {}, duration_hint=60.0), at(5, "set", bg_playing=True), at(58, "eos")], 90, karaoke_bgm_crossfade_enabled=False))
+    # --- tiny and zero values (2026-11-08, from the song-end mutation survivors): boundaries that need a value in (0, 1] or exactly 0, not an exact clock tie
+    out.append(scen("tiny_media_duration_scan_trailing", [start(0, "cdg", 0.5, {"scan_trailing": 0.2}, duration_hint=0.5)], 4))
+    out.append(scen("zero_media_duration_scan_trailing", [start(0, "cdg", 0.0, {"scan_trailing": 0.2}, duration_hint=0.0)], 4))
+    out.append(scen("tiny_scan_probe", [start(0, "cdg", 200.0, {"scan_probe": 0.5, "scan_trailing": 0.2}, duration_hint=200.0)], 6))
+    out.append(scen("zero_scan_probe", [start(0, "cdg", 200.0, {"scan_probe": 0.0, "scan_trailing": 0.2}, duration_hint=200.0)], 6))
+    out.append(scen("scan_trailing_small_but_audible_end_flag", [start(0, "cdg", 200.0, {"scan_probe": 200.0, "scan_trailing": 0.2, "scan_audible_end": True}, duration_hint=200.0)], 215))
+    out.append(scen("tiny_scan_runs_to_end", [start(0, "cdg", 0.5, {"scan_probe": 0.5, "scan_trailing": 0.0, "scan_audible_end": True}, duration_hint=0.5)], 4))
+    out.append(scen("tiny_scan_runs_to_end_long_media", [start(0, "cdg", 200.0, {"scan_probe": 0.5, "scan_trailing": 0.0, "scan_audible_end": True}, duration_hint=200.0)], 6))
+    out.append(scen("cached_visual_end_zero", [start(0, "cdg", 200.0, {"cached": {LIB: {"duration": 200.0, "audio_end": 193.0}, "/t/x.cdg": {"visual_end": 0.0, "visual_confidence": 0.9}}},
+                                              library_path=LIB, duration_hint=200.0)], 215))
+    out.append(scen("cached_visual_end_tiny", [start(0, "cdg", 200.0, {"cached": {LIB: {"duration": 200.0, "audio_end": 193.0}, "/t/x.cdg": {"visual_end": 0.5, "visual_confidence": 0.9}}},
+                                              library_path=LIB, duration_hint=200.0)], 215))
+    out.append(scen("cached_visual_confidence_exact", [start(0, "cdg", 200.0, {"cached": {LIB: {"duration": 200.0, "audio_end": 193.0}, "/t/x.cdg": {"visual_end": 195.0, "visual_confidence": 0.85}}},
+                                                       library_path=LIB, duration_hint=200.0)], 215))
+    out.append(scen("tiny_record_duration", [start(0, "cdg", 200.0, {"cached": {LIB: {"duration": 0.5, "audio_end": 0.1}}, "scan_probe": 200.0, "scan_trailing": 6.0}, library_path=LIB, duration_hint=200.0)], 215))
+    out.append(scen("zero_record_duration", [start(0, "cdg", 200.0, {"cached": {LIB: {"duration": 0.0, "audio_end": 0.0}}, "scan_probe": 200.0, "scan_trailing": 6.0}, library_path=LIB, duration_hint=200.0)], 215))
+    # a second song on the SAME audio path finds the first song's scan in `_audio_true_duration`, so the cached-trailing branch (c > 0 and true duration > 0) is reachable
+    first = start(0, "cdg", 200.0, {"scan_probe": 200.0, "scan_trailing": 6.0}, duration_hint=200.0)
+    for c in (0.0, 0.5, 6.0):
+        out.append(scen(f"second_song_cached_trailing_{c}", [first, start(40, "cdg", 200.0, {"trailing_cached": {"/t/x.mp3": c}, "scan_probe": 200.0, "scan_trailing": 6.0}, duration_hint=200.0)], 260))
+    first_tiny = start(0, "cdg", 200.0, {"scan_probe": 0.5, "scan_trailing": 0.2}, duration_hint=200.0)   # leaves a true duration of 0.5 s for the path
+    out.append(scen("second_song_cached_trailing_tiny_true_duration", [first_tiny, start(40, "cdg", 200.0, {"trailing_cached": {"/t/x.mp3": 0.4}, "scan_probe": 200.0, "scan_trailing": 6.0}, duration_hint=200.0)], 260))
+    out.append(scen("second_song_cached_trailing_without_true_duration", [start(0, "cdg", 200.0, {"trailing_cached": {"/t/x.mp3": 6.0}, "scan_probe": 200.0, "scan_trailing": 6.0}, duration_hint=200.0)], 215))
+    out.append(scen("audio_slightly_longer_than_media", [start(0, "cdg", 0.3, {"scan_probe": 0.5, "scan_trailing": 0.2}, duration_hint=0.3)], 4))
+    out.append(scen("tiny_media_no_scan", [start(0, "cdg", 0.5, {}, duration_hint=0.5)], 4))
     # --- KaraFun
     out.append(scen("karafun_complete", [at(0, "karafun_complete")], 10))
     out.append(scen("karafun_complete_fade_in_refused", [at(0, "set", fade_in_works=False), at(0.1, "karafun_complete")], 10))
