@@ -62,7 +62,7 @@ class SchemaTests(unittest.TestCase):
         keys = sorted(harness().m.KaraokeApp._SHELL_SETTINGS_SCHEMA)
         self.assertEqual(keys, sorted(["ticker_custom_enabled", "ticker_custom_message", "loudness_scan_holds_for_playback", "karaoke_auto_advance", "bg_end_silence_trim_enabled",
                                        "karaoke_bgm_crossfade_enabled", "end_silence_trim_threshold_sec", "ui_record_confirm", "karafun_include_online_search",
-                                       "rotation_estimate_include_all_songs", "rotation_padding_sec", "bg_to_karaoke_gap_sec"]))
+                                       "rotation_estimate_include_all_songs", "rotation_padding_sec", "bg_to_karaoke_gap_sec", "karaoke_normalize_enabled", "daw_singer_screen_preview_enabled"]))
         for k in keys:
             for bad in ("key", "pin", "token", "password", "secret", "url", "user", "path", "color", "device", "output", "repo", "update"):
                 self.assertNotIn(bad, k)
@@ -154,6 +154,34 @@ class TransitionGapTests(unittest.TestCase):
         self.assertIn("self._transition_gap_sec = gap", src)
         spec = harness().m.KaraokeApp._SHELL_SETTINGS_SCHEMA["bg_to_karaoke_gap_sec"]
         self.assertEqual((spec["min"], spec["max"]), (-3.0, 3.0))
+
+
+class Group4HookTests(unittest.TestCase):
+    """Group 4: each key runs the one apply hook the Settings dialog's handler runs, and nothing else."""
+
+    def test_normalize_runs_the_loudness_gate_like_the_dialog(self):
+        h = harness(settings={"karaoke_normalize_enabled": False})
+        h.app._sync_loudness_worker_gate = lambda reason="": h.record("gate", reason)
+        self.assertEqual(run(h, {"key": "karaoke_normalize_enabled", "value": True}, "n1"), (True, "setting_changed"))
+        self.assertIs(h.app.settings["karaoke_normalize_enabled"], True)
+        self.assertIn(("gate", "karaoke_normalize_toggled"), [tuple(c[:2]) for c in h.calls])
+        self.assertEqual(run(h, {"key": "karaoke_normalize_enabled", "value": True}, "n2"), (True, "no_change"))
+
+    def test_daw_preview_retunes_the_snapshot_timer_like_the_dialog(self):
+        h = harness(settings={"daw_singer_screen_preview_enabled": True})
+        h.app._retune_daw_snapshot_timer = lambda reason="": h.record("retune", reason)
+        self.assertEqual(run(h, {"key": "daw_singer_screen_preview_enabled", "value": False}, "d1"), (True, "setting_changed"))
+        self.assertIn(("retune", "settings_toggle"), [tuple(c[:2]) for c in h.calls])
+
+    def test_a_failing_hook_never_fails_the_command(self):
+        h = harness(settings={"karaoke_normalize_enabled": False})
+        h.app._sync_loudness_worker_gate = lambda reason="": (_ for _ in ()).throw(RuntimeError("boom"))
+        self.assertEqual(run(h, {"key": "karaoke_normalize_enabled", "value": True}, "n3"), (True, "setting_changed"))
+
+    def test_the_hooks_are_the_dialogs_own_calls(self):
+        src = (Path(__file__).parent / "0.2.18.1.py").read_text()
+        self.assertIn('self._sync_loudness_worker_gate("karaoke_normalize_toggled")', src)
+        self.assertIn('self._retune_daw_snapshot_timer("settings_toggle")', src)
 
 
 class ApplyTests(unittest.TestCase):

@@ -44,7 +44,7 @@
   {
    "args": {
     "key": "ticker_custom_message",
-    "value": "Caf\u00e9 \u6771\u4eac \ud83c\udf89"
+    "value": "Café 東京 🎉"
    },
    "ok": true,
    "code": null
@@ -100,7 +100,7 @@
   {
    "args": {
     "key": "ticker_custom_message",
-    "value": "c1\u0085x"
+    "value": "c1x"
    },
    "ok": false,
    "code": "bad_value"
@@ -1200,6 +1200,70 @@
    },
    "ok": false,
    "code": "unknown_setting"
+  },
+  {
+   "args": {
+    "key": "karaoke_normalize_enabled",
+    "value": true
+   },
+   "ok": true,
+   "code": null
+  },
+  {
+   "args": {
+    "key": "karaoke_normalize_enabled",
+    "value": false
+   },
+   "ok": true,
+   "code": null
+  },
+  {
+   "args": {
+    "key": "karaoke_normalize_enabled",
+    "value": "true"
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "karaoke_normalize_enabled",
+    "value": 1
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "daw_singer_screen_preview_enabled",
+    "value": true
+   },
+   "ok": true,
+   "code": null
+  },
+  {
+   "args": {
+    "key": "daw_singer_screen_preview_enabled",
+    "value": false
+   },
+   "ok": true,
+   "code": null
+  },
+  {
+   "args": {
+    "key": "daw_singer_screen_preview_enabled",
+    "value": "true"
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "daw_singer_screen_preview_enabled",
+    "value": 1
+   },
+   "ok": false,
+   "code": "bad_value"
   }
  ]
 }

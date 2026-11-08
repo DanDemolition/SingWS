@@ -11,6 +11,12 @@ SRC = ROOT / "0.2.18.1.py"
 PY = os.environ.get("SINGWS_PY") or "/Users/daniel/Documents/SingWS/.venv/bin/python"
 ENV = dict(os.environ, QT_QPA_PLATFORM="offscreen")
 M = [
+    ('            if key == "karaoke_normalize_enabled":\n                self._sync_loudness_worker_gate("karaoke_normalize_toggled")', '            if key == "karaoke_normalize_enabled":\n                pass', None),
+    ('            if key == "karaoke_normalize_enabled":\n                self._sync_loudness_worker_gate("karaoke_normalize_toggled")', '            if key == "karaoke_normalize_enabled":\n                self._sync_loudness_worker_gate("settings")', None),
+    ('            if key == "karaoke_normalize_enabled":\n                self._sync_loudness_worker_gate', '            if key == "daw_singer_screen_preview_enabled":\n                self._sync_loudness_worker_gate', None),
+    ('                self._retune_daw_snapshot_timer("settings_toggle")\n        except Exception:\n            pass\n        return True, "setting_changed"', '                pass\n        except Exception:\n            pass\n        return True, "setting_changed"', None),
+    ('                self._retune_daw_snapshot_timer("settings_toggle")\n        except Exception:\n            pass\n        return True, "setting_changed"', '                self._retune_daw_snapshot_timer("")\n        except Exception:\n            pass\n        return True, "setting_changed"', None),
+    ('        "daw_singer_screen_preview_enabled": {"type": "bool"},\n    }', '        "daw_singer_screen_preview_enabled": {"type": "text", "max_chars": 5},\n    }', None),
     ('        if not isinstance(key, str) or key not in self._SHELL_SETTINGS_SCHEMA:\n            return False, "unknown_setting"', '        if not isinstance(key, str):\n            return False, "unknown_setting"', None),
     ('        if not isinstance(key, str) or key not in self._SHELL_SETTINGS_SCHEMA:\n            return False, "unknown_setting"', '        if key not in self._SHELL_SETTINGS_SCHEMA:\n            return False, "unknown_setting"', "an unhashable key raises inside the executor's try and is refused as failed:"),
     ('        if not self._shell_setting_value_ok(key, value):\n            return False, "bad_value"', '        if False:\n            return False, "bad_value"', None),

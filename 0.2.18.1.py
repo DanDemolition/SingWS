@@ -50694,6 +50694,9 @@ class KaraokeApp(QWidget):
         "rotation_padding_sec": {"type": "int", "min": 0, "max": 600},
         # group 3: seconds between the music fade-out and the karaoke start (negative = overlap). The dialog stores the value and sets the live attribute _transition_gap_sec, read at the next song start
         "bg_to_karaoke_gap_sec": {"type": "float", "min": -3.0, "max": 3.0},
+        # group 4: the dialog's handlers store the value, save and call ONE apply hook, which shell_settings_set calls too (_sync_loudness_worker_gate / _retune_daw_snapshot_timer)
+        "karaoke_normalize_enabled": {"type": "bool"},
+        "daw_singer_screen_preview_enabled": {"type": "bool"},
     }
     _SHELL_SETTINGS_QUEUE_REFRESH = frozenset({"rotation_estimate_include_all_songs", "rotation_padding_sec"})
 
@@ -50748,6 +50751,13 @@ class KaraokeApp(QWidget):
         try:
             if key in self._SHELL_SETTINGS_QUEUE_REFRESH:
                 self.update_queue_display()
+        except Exception:
+            pass
+        try:
+            if key == "karaoke_normalize_enabled":
+                self._sync_loudness_worker_gate("karaoke_normalize_toggled")
+            elif key == "daw_singer_screen_preview_enabled":
+                self._retune_daw_snapshot_timer("settings_toggle")
         except Exception:
             pass
         return True, "setting_changed"

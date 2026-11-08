@@ -51,6 +51,8 @@ pub const SETTINGS_SCHEMA: &[(&str, SettingKind)] = &[
     ("rotation_estimate_include_all_songs", SettingKind::Bool),
     ("rotation_padding_sec", SettingKind::Int { min: 0, max: 600 }),
     ("bg_to_karaoke_gap_sec", SettingKind::Float { min: -3.0, max: 3.0 }),
+    ("karaoke_normalize_enabled", SettingKind::Bool),
+    ("daw_singer_screen_preview_enabled", SettingKind::Bool),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq)]
