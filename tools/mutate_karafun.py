@@ -29,6 +29,12 @@ import mutate_songend as ms  # noqa: E402  (code_spans, PATTERNS)
 
 # "L<line>:<old>-><new>" -> "equivalent: why" | "GAP: what the corpus lacks"
 SURVIVOR_NOTES: dict = {
+    # --- readback.rs ---
+    'readback.rs|return Err(chars.get(ds).map_or(false, |c| !c.is_ascii() && c.is_numer|&&->||': 'equivalent: parse_key_tempo declines any text holding a non-ASCII numeric character before this test can matter, so the inner check never decides',
+    'readback.rs|return Err(chars.get(ds).map_or(false, |c| !c.is_ascii() && c.is_numer|!->': 'equivalent: parse_key_tempo declines any text holding a non-ASCII numeric character before this test can matter, so the inner check never decides',
+    'readback.rs|let n: i64 = chars[ds..i].iter().collect::<String>().parse().unwrap_or|0->1': 'equivalent: at most 18 ASCII digits always parse as i64, so the unwrap_or default is never used',
+    'readback.rs|if chars[s..].len() < key.len() || chars[s..s + key.len()] != key[..] | < -> <= ': 'equivalent: a KEY= at the very end is skipped here or fails to find digits right after (both continue)',
+    'readback.rs|if i == ws || chars.len() < i + tempo.len() || chars[i..i + tempo.len(| < -> <= ': 'equivalent: a text that ends exactly where TEMPO= would start either skips here or finds no digits after it (both continue)',
     # --- monitor.rs ---
     "monitor.rs|let mut i = 0;|0->1": "equivalent in the monitor: lines are stripped and empty lines dropped afterwards, so an extra or missing empty line cannot change the result",
     "monitor.rs|if c == '\\r' && i + 1 < b.len() && b[i + 1].1 == '\\n' {|==->!=": "equivalent in the monitor: same reason (empty lines dropped, lines stripped)",
@@ -145,19 +151,28 @@ def main():
     def build():
         return subprocess.run(["cargo", "build"], capture_output=True, text=True, env=ENV, cwd=WORK)
 
-    def agrees():
+    def agrees(report=False):
         for payload, resp in payloads:
             try:
                 proc = subprocess.run([str(binary)], input=payload, capture_output=True, timeout=60)
             except subprocess.TimeoutExpired:
                 return False  # a mutant that hangs is killed
             if proc.returncode != 0 or json.loads(proc.stdout) != resp:
+                if report:
+                    got = json.loads(proc.stdout) if proc.returncode == 0 else None
+                    reqs = json.loads(payload)["batch"]
+                    for q, a, b in zip(reqs, resp, got or []):
+                        if a != b:
+                            print("BASELINE DIFFERENCE:", json.dumps(q)[:300], "expected", json.dumps(a)[:200], "got", json.dumps(b)[:200], flush=True)
+                            break
+                    else:
+                        print("BASELINE: exit", proc.returncode, flush=True)
                 return False
         return True
 
     base = build()
     assert base.returncode == 0, base.stderr[-600:]
-    assert agrees(), "the unmutated crate must agree with its own baseline"
+    assert agrees(True), "the unmutated crate must agree with its own baseline"
     survivors, noncompiling, killed = [], [], 0
     try:
         for n, (name, ln, s, e, new, snippet) in enumerate(muts, 1):

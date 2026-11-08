@@ -234,9 +234,16 @@ def check_pure(binary, diffs, seeds):
     texts = ["KEY=+2 TEMPO=-5%", "KEY=0\tTEMPO=0%", "KEY= TEMPO=5%", "junk KEY=1 TEMPO=2% KEY=3 TEMPO=4%", "KEY=1TEMPO=2%", "KEY=-12 TEMPO=+100%", "key=1 tempo=2%", "KEY=1 TEMPO=2",
              "KEY=1  \n TEMPO=2%", "", "KEY=1 TEMPO=%", "KEY=+ TEMPO=2%", "KEY=007 TEMPO=0005%", "KEY=1 TEMPO=2%%", "xKEY=1 TEMPO=2%", "KEY=1\u00a0TEMPO=2%", "KEY=1\u2003TEMPO=-2%",
              "KEY=1 TEMPO=2% KEY=", "KEY=1 KEY=2 TEMPO=3%", "KEY=1 TEMPO=2% ", "KEY=99999999999999999999 TEMPO=1%", "KEY=\u0663 TEMPO=2%", "KEY=1 TEMPO=\u0662%", "KEY=--1 TEMPO=2%",
-             "KEY=1\x0bTEMPO=2%", "KEY=1\x1fTEMPO=2%", "KEY=1 TEMPO=+-2%", "KEY=1 TEMPO= 2%"]
+             "KEY=1\x0bTEMPO=2%", "KEY=1\x1fTEMPO=2%", "KEY=1 TEMPO=+-2%", "KEY=1 TEMPO= 2%",
+             # boundaries found by mutation (2026-11-07): texts that END inside the pattern, a sign at the end, 18 and 19 digit values, mixed ASCII/Unicode digits, a wrong literal
+             "KEY=", "xKEY=", "KEY=+", "KEY=-", "KEY=1", "KEY=1 ", "KEY=1 T", "KEY=1 TEMP", "KEY=1 TEMPO", "KEY=1 TEMPO=", "KEY=1 TEMPO=+", "KEY=1 TEMPO=2",
+             "KEY=1 XXXXXX2%", "KEY=1 TEMPA=2%", "KEY=1 TEMPO=2% KEY=", "KEY=123456789012345678 TEMPO=1%", "KEY=1 TEMPO=123456789012345678%", "KEY=9999999999999999999 TEMPO=1%",
+             "KEY=1 TEMPO=9999999999999999999%", "KEY=1234567890123456789 TEMPO=1%", "KEY=1\u0663 TEMPO=2%", "KEY=1 TEMPO=2\u0663%", "\u0663KEY=1 TEMPO=2%", "KEY=1 TEMPO=2%\u0663"]
+    must_answer = ["KEY=123456789012345678 TEMPO=1%", "KEY=1 TEMPO=123456789012345678%", "KEY=1 TEMPO=2%"]   # exactly 18 digits is still answered, never declined
     for tx, g in zip(texts, batch([{"op": "parse_kt", "text": s} for s in texts])):
         if "decline" in g:
+            if tx in must_answer:
+                diffs.append(("parse_kt", tx, "Rust declined a text it must answer"))
             continue
         want = PY["parse_kt"](tx)
         got = tuple(g["values"]) if g["values"] else None
