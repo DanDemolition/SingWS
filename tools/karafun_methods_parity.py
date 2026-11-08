@@ -48,9 +48,9 @@ def main(argv=None):
         if g.get("declined"):
             declined += 1
             continue
-        want = {"out": norm(py["out"]), "calls": norm(py["calls"]), "log": py["log"], "sleeps": norm(py["sleeps"]), "final_clock": py["final_clock"], "entry": py["entry"],
+        want = {"out": norm(py["out"]), "flags": py["flags"], "calls": norm(py["calls"]), "log": py["log"], "sleeps": norm(py["sleeps"]), "final_clock": py["final_clock"], "entry": py["entry"],
                 "consumed": py["consumed"]}
-        mine = {"out": g["out"], "calls": g["calls"], "log": g["log"], "sleeps": g["sleeps"], "final_clock": g["final_clock"], "entry": g["entry"], "consumed": g["consumed"]}
+        mine = {"out": g["out"], "flags": g["flags"], "calls": g["calls"], "log": g["log"], "sleeps": g["sleeps"], "final_clock": g["final_clock"], "entry": g["entry"], "consumed": g["consumed"]}
         if g.get("order_error"):
             mine["order_error"] = g["order_error"]
         d = per.setdefault(method, [0, 0])

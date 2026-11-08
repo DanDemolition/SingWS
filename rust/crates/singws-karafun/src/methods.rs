@@ -242,9 +242,158 @@ pub fn activate_result_for_playback(w: &mut World, inp: &ActivateInput) -> (bool
     (true, String::new(), Value::Object(entry))
 }
 
+
+fn py_round(x: f64) -> i64 {
+    // Python round(): half to even
+    if (x - x.trunc()).abs() == 0.5 { (2.0 * (x / 2.0).round()) as i64 } else { x.round() as i64 }
+}
+
+fn py_truthy(v: Option<&Value>) -> bool {
+    match v {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(b)) => *b,
+        Some(Value::Number(n)) => n.as_f64().map_or(true, |f| f != 0.0),
+        Some(Value::String(s)) => !s.is_empty(),
+        Some(Value::Array(a)) => !a.is_empty(),
+        Some(Value::Object(o)) => !o.is_empty(),
+    }
+}
+
+/// `\d+` at `from` in `s` (ASCII digits only): the digits and the index after them; None when there is none.
+fn digits_at(s: &str, from: usize) -> Option<(&str, usize)> {
+    let b = s.as_bytes();
+    let mut i = from;
+    while i < b.len() && b[i].is_ascii_digit() {
+        i += 1;
+    }
+    if i == from { None } else { Some((&s[from..i], i)) }
+}
+
+impl<'a> World<'a> {
+    fn osa_f(&mut self, script: Value, timeout: f64) -> (bool, String, String) {
+        self.call("osa", vec![script], json!({"timeout": timeout}));
+        let v = self.ask("osa");
+        (v[0].as_bool().unwrap_or(false), v[1].as_str().unwrap_or("").to_string(), v[2].as_str().unwrap_or("").to_string())
+    }
+}
+
+/// `_karafun_apply_key_tempo(entry, target_key, target_tempo)` -> (key, tempo)
+pub fn apply_key_tempo(w: &mut World, entry: &mut Map<String, Value>, target_key: i64, target_tempo: i64) -> (i64, i64) {
+    let get_int = |entry: &Map<String, Value>, key: &str, default: i64| -> i64 {
+        match entry.get(key) {
+            Some(v) if py_truthy(Some(v)) => v.as_i64().unwrap_or(default),
+            _ => default,
+        }
+    };
+    let mut cur_key = get_int(entry, "karafun_key_current", 0);
+    let mut cur_tempo = get_int(entry, "karafun_tempo_current", 100);
+    let key_delta = target_key - cur_key;
+    let tempo_delta = target_tempo - cur_tempo;
+    if key_delta == 0 && tempo_delta == 0 {
+        return (cur_key, cur_tempo);
+    }
+    let key_item = if key_delta > 0 { "Key Up" } else { "Key Down" };
+    let tempo_item = if tempo_delta > 0 { "Tempo Up" } else { "Tempo Down" };
+    let timeout = 10.0 + (key_delta.abs() as f64) * 0.3 + (tempo_delta.abs() as f64) * 0.2;
+    let (ok, result, _e) = w.osa_f(json!(format!("kt:{key_delta}:{tempo_delta}:{key_item}:{tempo_item}")), timeout);
+    if result.chars().any(|c| !c.is_ascii() && c.is_numeric()) {
+        w.declined = Some("a non-ASCII digit in the answer".into());
+    }
+    if ok {
+        if let Some(rest) = result.strip_prefix("ADJUSTED|") {
+            if let Some((a, i)) = digits_at(rest, 0) {
+                if rest[i..].starts_with('|') {
+                    if let Some((b, _)) = digits_at(rest, i + 1) {
+                        if a.len() > 18 || b.len() > 18 {
+                            w.declined = Some("more than 18 digits".into());
+                        } else {
+                            let (kd, td) = (a.parse::<i64>().unwrap_or(0), b.parse::<i64>().unwrap_or(0));
+                            cur_key += if key_delta > 0 { kd } else { -kd };
+                            cur_tempo += if tempo_delta > 0 { td } else { -td };
+                        }
+                    }
+                }
+            }
+        }
+    }
+    entry.insert("karafun_key_current".into(), json!(cur_key));
+    entry.insert("karafun_tempo_current".into(), json!(cur_tempo));
+    w.diag(format!("[KARAFUN-AUTO] live key/tempo target={target_key:+}/{target_tempo}% now={cur_key:+}/{cur_tempo}%"));
+    (cur_key, cur_tempo)
+}
+
+pub struct SeekInput {
+    pub no_entry: bool,
+    pub entry_changes: bool,
+    pub times: Option<(f64, f64)>,
+    pub target: f64,
+    pub seek_running: bool,
+    pub rearm_token: Option<String>,
+}
+
+/// `_karafun_seek_to(target_sec)` -> (started, seek_running afterwards)
+pub fn seek_to(w: &mut World, inp: &SeekInput, entry: &mut Map<String, Value>) -> (bool, bool) {
+    w.call("active_entry", vec![], json!({}));
+    w.call("display_times", vec![], json!({}));
+    if inp.no_entry || inp.times.is_none() || inp.seek_running {
+        return (false, inp.seek_running);
+    }
+    let (elapsed, duration) = inp.times.unwrap();
+    let capped = if duration - 8.0 < inp.target { duration - 8.0 } else { inp.target };
+    let target = if capped > 0.0 { capped } else { 0.0 };
+    let steps = py_round((target - elapsed) / 10.0).clamp(-60, 60);
+    if steps == 0 {
+        return (false, inp.seek_running);
+    }
+    let item = if steps > 0 { "Skip Forward 10s" } else { "Skip Back 10s" };
+    let count = steps.abs();
+    w.call("thread", vec![], json!({"thread_name": "karafun-seek"}));
+    let (ok, result, _e) = w.osa_f(json!(format!("seek:{count}:{item}")), 10.0 + (count as f64) * 0.4);
+    if result.chars().any(|c| !c.is_ascii() && c.is_numeric()) {
+        w.declined = Some("a non-ASCII digit in the answer".into());
+    }
+    let mut done: i64 = 0;
+    if ok {
+        if let Some(rest) = result.strip_prefix("SEEKED|") {
+            if let Some((d, _)) = digits_at(rest, 0) {
+                if d.len() > 18 {
+                    w.declined = Some("more than 18 digits".into());
+                } else {
+                    done = d.parse::<i64>().unwrap_or(0);
+                }
+            }
+        }
+    }
+    w.call("ui_thread", vec![], json!({}));
+    // _apply
+    w.call("active_entry", vec![], json!({}));
+    if inp.entry_changes {
+        return (true, false);
+    }
+    let moved = (done as f64) * 10.0 * (if steps > 0 { 1.0 } else { -1.0 });
+    if done != 0 {
+        let base = if py_truthy(entry.get("karafun_seek_offset_s")) { entry["karafun_seek_offset_s"].as_f64().unwrap_or(0.0) } else { 0.0 };
+        entry.insert("karafun_seek_offset_s".into(), json!(base + moved));
+        if let Some(tok) = &inp.rearm_token {
+            if entry.get("karafun_completion_monitor").and_then(|v| v.as_str()) == Some(tok.as_str()) {
+                w.call("rearm", vec![], json!({}));
+            }
+        }
+    }
+    if py_truthy(entry.get("karafun_display_started_at")) && done != 0 {
+        let started = entry["karafun_display_started_at"].as_f64().unwrap_or(0.0);
+        let reference = if py_truthy(entry.get("karafun_paused_at")) { entry["karafun_paused_at"].as_f64().unwrap_or(0.0) } else { w.t };
+        let shifted = started - moved;
+        entry.insert("karafun_display_started_at".into(), json!(if reference < shifted { reference } else { shifted }));
+    }
+    w.diag(format!("[KARAFUN] seek from={elapsed:.0}s to={target:.0}s clicks={done}/{count} moved={moved:+.0}s"));
+    (true, false)
+}
+
 pub fn run(method: &str, sc: &Value, answers: &[Value]) -> Value {
     let mut w = World { answers, pos: 0, calls: vec![], log: vec![], sleeps: vec![], t: 100.0, order_error: None, declined: None };
     let mut out = Outcome { raised: None, value: Value::Null, entry: Value::Null };
+    let mut flags = json!({});
     match method {
         "_karafun_wait_until_ready" => {
             let timeout = sc["timeout"].as_f64().unwrap_or(60.0);
@@ -257,6 +406,27 @@ pub fn run(method: &str, sc: &Value, answers: &[Value]) -> Value {
             out.value = json!([ok, e]);
         }
         "_karafun_playback_menu_state" => out.value = json!(playback_menu_state(&mut w)),
+        "_karafun_seek_to" => {
+            let mut entry = sc["entry"].as_object().cloned().unwrap_or_default();
+            let inp = SeekInput {
+                no_entry: sc["no_entry"].as_bool().unwrap_or(false),
+                entry_changes: sc["entry_changes"].as_bool().unwrap_or(false),
+                times: sc["times"].as_array().and_then(|a| Some((a.first()?.as_f64()?, a.get(1)?.as_f64()?))),
+                target: sc["target"].as_f64().unwrap_or(0.0),
+                seek_running: sc["seek_running"].as_bool().unwrap_or(false),
+                rearm_token: sc["rearm_token"].as_str().map(str::to_string),
+            };
+            let (started, running) = seek_to(&mut w, &inp, &mut entry);
+            out.value = json!(started);
+            out.entry = Value::Object(entry);
+            flags = json!({"seek_running": running});
+        }
+        "_karafun_apply_key_tempo" => {
+            let mut entry = sc["entry"].as_object().cloned().unwrap_or_default();
+            let (k, t) = apply_key_tempo(&mut w, &mut entry, sc["target_key"].as_i64().unwrap_or(0), sc["target_tempo"].as_i64().unwrap_or(100));
+            out.value = json!([k, t]);
+            out.entry = Value::Object(entry);
+        }
         _ => {
             let point = sc["point"].as_array().and_then(|a| Some((a.first()?.as_i64()?, a.get(1)?.as_i64()?)));
             let inp = ActivateInput {
@@ -271,6 +441,6 @@ pub fn run(method: &str, sc: &Value, answers: &[Value]) -> Value {
             out.entry = entry;
         }
     }
-    json!({"out": {"raised": out.raised, "value": out.value}, "calls": w.calls, "log": w.log, "sleeps": w.sleeps, "final_clock": w.t, "entry": out.entry,
+    json!({"out": {"raised": out.raised, "value": out.value}, "flags": flags, "calls": w.calls, "log": w.log, "sleeps": w.sleeps, "final_clock": w.t, "entry": out.entry,
            "consumed": w.pos, "order_error": w.order_error, "declined": w.declined})
 }

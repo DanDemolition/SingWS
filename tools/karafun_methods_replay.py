@@ -11,7 +11,8 @@ import types
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-METHODS = ("_karafun_wait_until_ready", "_karafun_press_play_control", "_karafun_playback_menu_state", "_karafun_activate_result_for_playback")
+METHODS = ("_karafun_wait_until_ready", "_karafun_press_play_control", "_karafun_playback_menu_state", "_karafun_activate_result_for_playback", "_karafun_seek_to",
+           "_karafun_apply_key_tempo")
 CONSTS = ("KARAFUN_READY_TIMEOUT_S", "KARAFUN_COLD_SETTLE_S")
 
 
@@ -55,7 +56,9 @@ class Rec:
 
 
 OSA_TEXTS = ["ALREADY_PLAYING", "MENU_PLAY", "PLAY_NEXT|404.7|202", "PLAY|10|20", "PLAY|1.5|2.5|3", "ERROR|no control", "", "x|y", "FOUND|404|202|3:41", "FOUND|1|2", "FOUND|7.9|8.1|3:00", "FOUND||",
-             "DOUBLE_CLICKED", "double_clicked", " DOUBLE_CLICKED ", "PLAYING", "idle", "Idle", "weird", "ERROR|a|b", "NOT_FOUND"]
+             "DOUBLE_CLICKED", "double_clicked", " DOUBLE_CLICKED ", "PLAYING", "idle", "Idle", "weird", "ERROR|a|b", "NOT_FOUND",
+             "ADJUSTED|2|3", "ADJUSTED|0|0", "ADJUSTED|1|1|x", "ADJUSTED|5|", "ADJUSTED|a|1", "ADJUSTED|12|7", "adjusted|1|1", "SEEKED|3", "SEEKED|0", "SEEKED|12", "SEEKED|", "seeked|1",
+             "SEEKED|7|extra", "SEEKED|60", " SEEKED|4"]
 OSA_ERRS = ["", "script failed", "timeout", "AX -1719", "boom"]
 
 
@@ -76,7 +79,17 @@ def build(rec, consts, ns_extra):
     def diag(msg):
         R.log.append(msg)
 
-    g = {"time": Clock, "_diag": diag, "KARAFUN_READY_TIMEOUT_S": consts["KARAFUN_READY_TIMEOUT_S"], "KARAFUN_COLD_SETTLE_S": consts["KARAFUN_COLD_SETTLE_S"], "RuntimeError": RuntimeError}
+    class Thread:
+        def __init__(self, target=None, daemon=None, name=None):
+            self._t = target
+            self._n = name
+
+        def start(self):
+            R.call("thread", thread_name=self._n)
+            self._t()
+
+    import re as _re
+    g = {"re": _re, "threading": types.SimpleNamespace(Thread=Thread), "time": Clock, "_diag": diag, "KARAFUN_READY_TIMEOUT_S": consts["KARAFUN_READY_TIMEOUT_S"], "KARAFUN_COLD_SETTLE_S": consts["KARAFUN_COLD_SETTLE_S"], "RuntimeError": RuntimeError}
     g.update(ns_extra)
     return g, R
 
@@ -90,6 +103,9 @@ def make_app(cls, rec):
 
         def __init__(self):
             self._active_external_karafun = sc.get("active")
+            if "rearm_token" in sc:
+                self._karafun_duration_rearm = (sc["rearm_token"], lambda: R.call("rearm"))
+            self._karafun_seek_running = bool(sc.get("seek_running", False))
 
         def _karafun_press_play_script(self):
             return "press-play-script"
@@ -125,6 +141,35 @@ def make_app(cls, rec):
             R.call("native_double_click", x, y)
             return R.ask("double_click", lambda r: r.random() < 0.7)
 
+        _karafun_seek_running = False
+
+        def _karafun_active_entry(self):
+            R.active_calls = getattr(R, "active_calls", 0) + 1
+            R.call("active_entry")
+            if sc.get("no_entry"):
+                return None
+            if R.active_calls >= 2 and sc.get("entry_changes"):
+                return {}
+            return sc["entry"]
+
+        def _karafun_display_times(self):
+            R.call("display_times")
+            t = sc.get("times")
+            return None if t is None else tuple(t)
+
+        def _karafun_seek_script(self, count, item):
+            return f"seek:{count}:{item}"
+
+        def _karafun_apply_key_tempo_script(self, key_delta, tempo_delta, key_item, tempo_item):
+            return f"kt:{key_delta}:{tempo_delta}:{key_item}:{tempo_item}"
+
+        def _run_on_ui_thread(self, fn):
+            R.call("ui_thread")
+            fn()
+
+        def _transport_shadow(self):
+            return None
+
         def _karafun_raise_results_window(self):
             R.call("raise_results")
 
@@ -136,6 +181,8 @@ def make_app(cls, rec):
 
 
 def run(method, scenario, rng=None, answers=None, loaded=None):
+    import copy
+    scenario = copy.deepcopy(scenario)   # the methods mutate the entry: the caller keeps the original to hand to the Rust twin
     mod, consts = loaded or load()
     rec = Rec(scenario, rng, answers)
     g, R = build(rec, consts, {})
@@ -153,6 +200,10 @@ def run(method, scenario, rng=None, answers=None, loaded=None):
             out["value"] = list(app._karafun_press_play_control())
         elif method == "_karafun_playback_menu_state":
             out["value"] = app._karafun_playback_menu_state()
+        elif method == "_karafun_seek_to":
+            out["value"] = app._karafun_seek_to(scenario["target"])
+        elif method == "_karafun_apply_key_tempo":
+            out["value"] = list(app._karafun_apply_key_tempo(scenario["entry"], scenario["target_key"], scenario["target_tempo"]))
         else:
             point = scenario.get("point")
             v = app._karafun_activate_result_for_playback(None if point is None else tuple(point), scenario.get("reuse_point", False))
@@ -161,8 +212,11 @@ def run(method, scenario, rng=None, answers=None, loaded=None):
         out["raised"] = str(exc)
     active = app._active_external_karafun
     entry = active.get("entry") if isinstance(active, dict) else None
+    if method in ("_karafun_seek_to", "_karafun_apply_key_tempo"):
+        entry = scenario["entry"]
     ent = json.loads(json.dumps(entry)) if isinstance(entry, dict) else None
-    return {"out": out, "calls": rec.calls, "log": rec.log, "sleeps": rec.sleeps, "final_clock": rec.t, "entry": ent, "answers": rec.answers, "consumed": rec.pos}
+    flags = {"seek_running": bool(app._karafun_seek_running)} if method == "_karafun_seek_to" else {}
+    return {"out": out, "flags": flags, "calls": rec.calls, "log": rec.log, "sleeps": rec.sleeps, "final_clock": rec.t, "entry": ent, "answers": rec.answers, "consumed": rec.pos}
 
 
 def scenario_for(method, r):
@@ -170,6 +224,26 @@ def scenario_for(method, r):
         return {"was_running": r.random() < 0.5, "timeout": r.choice([None, None, 60.0, 5.0, 0.0, 2.7, 1.2])}
     if method in ("_karafun_press_play_control", "_karafun_playback_menu_state"):
         return {}
+    if method == "_karafun_seek_to":
+        entry = {}
+        if r.random() < 0.6:
+            entry["karafun_display_started_at"] = r.choice([50.0, 99.0, 0.0, 120.5])
+        if r.random() < 0.3:
+            entry["karafun_paused_at"] = r.choice([90.0, 0.0, 130.0])
+        if r.random() < 0.4:
+            entry["karafun_seek_offset_s"] = r.choice([0.0, 30.0, -20.0, None])
+        if r.random() < 0.5:
+            entry["karafun_completion_monitor"] = r.choice(["tok", "other"])
+        elapsed = r.choice([0.0, 12.5, 100.0, 249.9, 300.0, 5.0])
+        duration = r.choice([263.0, 180.0, 20.0, 10.0, 600.0, 3000.0])
+        sc = {"entry": entry, "times": r.choice([None] + [[elapsed, duration]] * 9), "target": r.choice([0.0, 33.3, 180.0, 255.0, 262.9, 270.0, 1e4, -5.0, 14.9, 15.0, 25.0, 35.0, 45.0, 2.5, elapsed + 5.0, elapsed - 25.0]),
+              "no_entry": r.random() < 0.05, "entry_changes": r.random() < 0.1, "seek_running": r.random() < 0.05}
+        if r.random() < 0.7:
+            sc["rearm_token"] = r.choice(["tok", "other"])
+        return sc
+    if method == "_karafun_apply_key_tempo":
+        return {"entry": r.choice([{}, {"karafun_key_current": 2, "karafun_tempo_current": 90}, {"karafun_key_current": None, "karafun_tempo_current": 0}, {"karafun_key_current": -3, "karafun_tempo_current": 110}]),
+                "target_key": r.choice([0, 2, -2, 5, -7, 12]), "target_tempo": r.choice([100, 90, 110, 75, 125, 100])}
     entry = {"artist": r.choice(["Sugarcult", "", "Zoë"]), "title": r.choice(["Memory", "Memory", "", "it's"])}
     active = r.choice([{"entry": entry}] * 7 + [None, {"entry": None}, {"x": 1}, "not a dict"])
     return {"active": active, "reuse_point": r.random() < 0.4, "point": r.choice([None, [404, 202], [10, 20], [0, 0]]),
