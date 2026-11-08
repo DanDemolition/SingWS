@@ -9,6 +9,7 @@
 //! * `{"op":"mp3_duration","hex":..,"size_hint":..}`  `fast_mp3_duration_from_stream`
 //! * `{"op":"normalize","paths":[..]}`        the two path normalisers and `os.path.realpath`
 
+pub mod dupes;
 pub mod duration;
 pub mod locations;
 pub mod names;
@@ -63,6 +64,10 @@ fn run(req: &Value) -> R<Value> {
             let data = hex_bytes(req.get("hex").and_then(Value::as_str).ok_or("missing hex")?)?;
             let hint = req.get("size_hint").and_then(Value::as_u64);
             Ok(json!(duration::mp3_duration_from_bytes(&data, hint)))
+        }
+        "dupes" => {
+            let paths: Vec<String> = req.get("paths").and_then(Value::as_array).ok_or("missing paths")?.iter().map(|p| p.as_str().unwrap_or("").to_string()).collect();
+            dupes::audit(&paths)
         }
         "normalize" => {
             let env = locations::Env { cwd: req.get("cwd").and_then(Value::as_str).unwrap_or("/").to_string() };
