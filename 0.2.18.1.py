@@ -4374,6 +4374,8 @@ DEFAULTS = {
     "karafun_monitor_shadow": True,
     # Stage E shadow: the duration watchdog, the key/tempo readback and the start decisions are also computed by the Rust helper; a difference is logged (karafun_flow_shadow.py).
     "karafun_flow_shadow": True,
+    # Stage E shadow: the static KaraFun AppleScript builders are wrapped once at launch and each distinct call is also built by the Rust helper; a difference is logged (karafun_builder_shadow.py).
+    "karafun_builder_shadow": True,
     # Stage E shadow: every ~30 s the host relay messages this app just sent (playback_tick, state, queue, chat) are rebuilt by a separate low-priority process
     # (a Rust helper) from a snapshot of the same inputs, and [RELAY-MSG-SHADOW] logs ONLY a difference (never chat text, names or ids). The message the app built
     # is always the one sent; the relay schema, retries and connection are untouched.
@@ -23004,12 +23006,17 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
         # One line each so a quiet shadow can be told apart from one that is off or whose helper is missing (they log nothing when all agrees).
-        for _mod_name in ("logpack_shadow", "relay_msg_shadow", "scan_shadow", "net_slice_shadow", "queue_state_shadow", "update_shadow", "settings_migrate_shadow", "songend_shadow", "karafun_script_shadow", "karafun_monitor_shadow", "karafun_flow_shadow"):
+        for _mod_name in ("logpack_shadow", "relay_msg_shadow", "scan_shadow", "net_slice_shadow", "queue_state_shadow", "update_shadow", "settings_migrate_shadow", "songend_shadow", "karafun_script_shadow", "karafun_monitor_shadow", "karafun_flow_shadow", "karafun_builder_shadow"):
             try:
                 # DEFAULTS are filled into self.settings later in __init__, so merge them here or a fresh profile would announce the wrong engine
                 __import__(_mod_name).announce({**DEFAULTS, **(self.settings if isinstance(self.settings, dict) else {})}, _diag)
             except Exception:
                 pass
+        try:  # Stage E shadow: wrap the static KaraFun script builders so the Rust builders check the same scripts (log-only; see karafun_builder_shadow.py)
+            import karafun_builder_shadow
+            karafun_builder_shadow.install(type(self), {**DEFAULTS, **(self.settings if isinstance(self.settings, dict) else {})}, _diag)
+        except Exception:
+            pass
         try:
             import update_shadow
             global _UPDATE_SHADOW_ON

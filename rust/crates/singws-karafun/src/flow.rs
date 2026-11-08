@@ -20,7 +20,7 @@ pub struct World<'a> {
 }
 
 impl<'a> World<'a> {
-    fn ask(&mut self, kind: &str) -> Value {
+    pub(crate) fn ask(&mut self, kind: &str) -> Value {
         let a = self.answers.get(self.pos).cloned();
         self.pos += 1;
         match a {
@@ -35,21 +35,21 @@ impl<'a> World<'a> {
             }
         }
     }
-    fn call(&mut self, name: &str, args: Vec<Value>, kw: Value) {
+    pub(crate) fn call(&mut self, name: &str, args: Vec<Value>, kw: Value) {
         self.calls.push(json!([name, args, kw]));
     }
-    fn sleep(&mut self, s: f64) {
+    pub(crate) fn sleep(&mut self, s: f64) {
         self.sleeps.push(s);
         self.t += s;
     }
-    fn require(&mut self) -> Result<(), String> {
+    pub(crate) fn require(&mut self) -> Result<(), String> {
         self.requires += 1;
         match self.end_session_at {
             Some(n) if self.requires >= n => Err("KaraFun playback session ended".to_string()),
             _ => Ok(()),
         }
     }
-    fn diag(&mut self, s: String) {
+    pub(crate) fn diag(&mut self, s: String) {
         self.log.push(s);
     }
     /// `(ok, error-or-None)` pairs the fake world answers as [bool, str]: an empty string is None.
@@ -64,7 +64,7 @@ impl<'a> World<'a> {
         self.call("press_play", vec![], json!({}));
         r
     }
-    fn mouse_click(&mut self, x: i64, y: i64) -> bool {
+    pub(crate) fn mouse_click(&mut self, x: i64, y: i64) -> bool {
         self.call("mouse_click", vec![json!(x), json!(y)], json!({"clicks": 1}));
         self.ask("mouse_click").as_bool().unwrap_or(false)
     }
@@ -76,7 +76,12 @@ impl<'a> World<'a> {
         self.call("menu_state", vec![], json!({}));
         self.ask("menu_state").as_str().unwrap_or("").to_string()
     }
-    fn session_script(&mut self, script: &str, timeout: i64) -> (bool, String, String) {
+    pub(crate) fn session_script(&mut self, script: &str, timeout: i64) -> (bool, String, String) {
+        self.call("session_script", vec![json!(script)], json!({"timeout": timeout}));
+        let v = self.ask("session_script");
+        (v[0].as_bool().unwrap_or(false), v[1].as_str().unwrap_or("").to_string(), v[2].as_str().unwrap_or("").to_string())
+    }
+    pub(crate) fn session_script_f(&mut self, script: &str, timeout: f64) -> (bool, String, String) {
         self.call("session_script", vec![json!(script)], json!({"timeout": timeout}));
         let v = self.ask("session_script");
         (v[0].as_bool().unwrap_or(false), v[1].as_str().unwrap_or("").to_string(), v[2].as_str().unwrap_or("").to_string())

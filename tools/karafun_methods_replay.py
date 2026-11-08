@@ -58,7 +58,10 @@ class Rec:
 OSA_TEXTS = ["ALREADY_PLAYING", "MENU_PLAY", "PLAY_NEXT|404.7|202", "PLAY|10|20", "PLAY|1.5|2.5|3", "ERROR|no control", "", "x|y", "FOUND|404|202|3:41", "FOUND|1|2", "FOUND|7.9|8.1|3:00", "FOUND||",
              "DOUBLE_CLICKED", "double_clicked", " DOUBLE_CLICKED ", "PLAYING", "idle", "Idle", "weird", "ERROR|a|b", "NOT_FOUND",
              "ADJUSTED|2|3", "ADJUSTED|0|0", "ADJUSTED|1|1|x", "ADJUSTED|5|", "ADJUSTED|a|1", "ADJUSTED|12|7", "adjusted|1|1", "SEEKED|3", "SEEKED|0", "SEEKED|12", "SEEKED|", "seeked|1",
-             "SEEKED|7|extra", "SEEKED|60", " SEEKED|4"]
+             "SEEKED|7|extra", "SEEKED|60", " SEEKED|4",
+             "ADJUSTED|123456789012345678|1", "ADJUSTED|1234567890123456789|1", "ADJUSTED|1|123456789012345678", "ADJUSTED|1|1234567890123456789", "ADJUSTED|-5|3", "ADJUSTED|1|-3",
+             "SEEKED|123456789012345678", "SEEKED|1234567890123456789", "ADJUSTED|\u0663|1", "ADJUSTED|1|\u0663", "SEEKED|\u0663", "ADJUSTED|1_0|1", "ADJUSTED| 1|1", "SEEKED|1_0",
+             "ADJUSTED|2|3", "ADJUSTED|1|1", "ADJUSTED|-1|1", "SEEKED|5", "SEEKED|-1"]
 OSA_ERRS = ["", "script failed", "timeout", "AX -1719", "boom"]
 
 
@@ -234,16 +237,16 @@ def scenario_for(method, r):
             entry["karafun_seek_offset_s"] = r.choice([0.0, 30.0, -20.0, None])
         if r.random() < 0.5:
             entry["karafun_completion_monitor"] = r.choice(["tok", "other"])
-        elapsed = r.choice([0.0, 12.5, 100.0, 249.9, 300.0, 5.0])
-        duration = r.choice([263.0, 180.0, 20.0, 10.0, 600.0, 3000.0])
-        sc = {"entry": entry, "times": r.choice([None] + [[elapsed, duration]] * 9), "target": r.choice([0.0, 33.3, 180.0, 255.0, 262.9, 270.0, 1e4, -5.0, 14.9, 15.0, 25.0, 35.0, 45.0, 2.5, elapsed + 5.0, elapsed - 25.0]),
+        elapsed = r.choice([0.0, 12.5, 100.0, 249.9, 300.0, 5.0, 5.5, 10.0, 14.5, 15.5, 4.5, 620.0])
+        duration = r.choice([263.0, 180.0, 20.0, 10.0, 600.0, 3000.0, 9.0, 8.5, 8.0, 7.0])
+        sc = {"entry": entry, "times": r.choice([None] + [[elapsed, duration]] * 9), "target": r.choice([0.0, 33.3, 180.0, 255.0, 262.9, 270.0, 1e4, -5.0, 610.0, 5.5, 8.0, 0.5, 1.0, 12.0, 15.5, 14.9, 15.0, 25.0, 35.0, 45.0, 2.5, elapsed + 5.0, elapsed - 25.0]),
               "no_entry": r.random() < 0.05, "entry_changes": r.random() < 0.1, "seek_running": r.random() < 0.05}
         if r.random() < 0.7:
             sc["rearm_token"] = r.choice(["tok", "other"])
         return sc
     if method == "_karafun_apply_key_tempo":
         return {"entry": r.choice([{}, {"karafun_key_current": 2, "karafun_tempo_current": 90}, {"karafun_key_current": None, "karafun_tempo_current": 0}, {"karafun_key_current": -3, "karafun_tempo_current": 110}]),
-                "target_key": r.choice([0, 2, -2, 5, -7, 12]), "target_tempo": r.choice([100, 90, 110, 75, 125, 100])}
+                "target_key": r.choice([0, 2, -2, 5, -7, 12, 1, -1, 3, -4]), "target_tempo": r.choice([100, 90, 110, 75, 125, 100, 101, 99, 91, 89])}
     entry = {"artist": r.choice(["Sugarcult", "", "Zoë"]), "title": r.choice(["Memory", "Memory", "", "it's"])}
     active = r.choice([{"entry": entry}] * 7 + [None, {"entry": None}, {"x": 1}, "not a dict"])
     return {"active": active, "reuse_point": r.random() < 0.4, "point": r.choice([None, [404, 202], [10, 20], [0, 0]]),

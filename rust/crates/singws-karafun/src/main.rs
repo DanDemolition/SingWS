@@ -54,6 +54,7 @@ fn answer(v: &Value) -> Value {
         "region_changed" => json!({"changed": geometry::region_changed(rect(&v["old"]), rect(&v["new"]), v["tolerance"].as_f64().unwrap_or(2.0))}),
         "method" => singws_karafun::methods::run(s("method"), &v["scenario"], v["answers"].as_array().map(|a| a.as_slice()).unwrap_or(&[])),
         "flow" => run_flow(v),
+        "prelude" => run_prelude(v),
         "startflow" => {
             let b = |k: &str| v[k].as_bool().unwrap_or(false);
             let act = startflow::play_action(&startflow::PlayInput { fast_start: b("fast_start"), managed_handoff: b("managed_handoff"), managed_start_state: s("managed_start_state"),
@@ -260,6 +261,27 @@ fn run_flow(v: &Value) -> Value {
         was_running: sc["karafun_was_running"].as_bool().unwrap_or(false),
         selected_query: s("selected_query"),
         title: s("title"),
+        entry: sc["entry"].as_object().cloned().unwrap_or_default(),
+        end_session_at: sc["end_session_at"].as_i64(),
+    };
+    let answers: Vec<Value> = v["answers"].as_array().cloned().unwrap_or_default();
+    let out = run(&scenario, &answers);
+    json!({"result": out.result, "entry": Value::Object(out.entry), "world": out.world})
+}
+
+fn run_prelude(v: &Value) -> Value {
+    use singws_karafun::prelude::{run, Scenario};
+    let sc = &v["scenario"];
+    let s = |k: &str| sc[k].as_str().unwrap_or("").to_string();
+    let scenario = Scenario {
+        auto_key_tempo: sc["settings"]["karafun_auto_key_tempo"].as_bool().unwrap_or(true),
+        found: s("found"),
+        last_error: s("last_error"),
+        needs_adjustment: sc["needs_adjustment"].as_bool().unwrap_or(false),
+        adjustment_signature: s("adjustment_signature"),
+        requested_key: sc["requested_key"].as_i64().unwrap_or(0),
+        requested_tempo: sc["requested_tempo"].as_i64().unwrap_or(100),
+        selected_query: s("selected_query"),
         entry: sc["entry"].as_object().cloned().unwrap_or_default(),
         end_session_at: sc["end_session_at"].as_i64(),
     };
