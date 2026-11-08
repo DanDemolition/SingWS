@@ -21,6 +21,19 @@ fn one(r: &Value) -> Value {
             let (fix, err) = c.result();
             json!({"stops": stops, "fix": fix, "error": err})
         }
+        "audio_priority" => match singws_misc::local_audio_output_priority(&r["name"], &r["kind"]) {
+            Ok((n, t)) => json!({"v": [n, t]}),
+            Err(e) => json!({"declined": e}),
+        },
+        "tombstone" => match singws_misc::tombstone_artist_title(&r["entry"]) {
+            Ok((a, t)) => json!({"v": [a, t]}),
+            Err(e) => json!({"declined": e}),
+        },
+        "next_active" => json!({"v": singws_misc::next_active_entry_after(r["songs"].as_array().map(|a| a.as_slice()).unwrap_or(&[]), r["index"].as_u64().map(|i| i as usize))}),
+        "request_ts" => match singws_misc::remote_request_timestamp(&r["req"]) {
+            Ok(f) => json!({"v": f}),
+            Err(e) => json!({"declined": e}),
+        },
         other => json!({"declined": format!("unknown op {other}")}),
     }
 }
