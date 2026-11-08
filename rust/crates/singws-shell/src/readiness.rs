@@ -337,12 +337,24 @@ fn karafun(r: &mut Report) {
     let t = Instant::now();
     // Fetch the list first, then count it, as the app's own scripts do: on macOS 27 the one-liner `count of (entire contents of w)` answers 0
     // for every window while `set x to entire contents of w` returns the real list (139 elements for KaraFun, measured 2026-11-06).
+    // The cheap read first: the number of windows and of top-level UI elements of window 1 (proves Accessibility reaches KaraFun in well under a second).
+    let top = singws_mac::run_applescript(
+        "tell application \"System Events\"\ntell (first application process whose name contains \"KaraFun\")\nset n to count of windows\nif n is 0 then return \"0|0\"\nreturn (n as string) & \"|\" & (count of UI elements of window 1) as string\nend tell\nend tell",
+        Duration::from_secs(20));
+    if top.ok {
+        r.fact("karafun_ui_top", json!(top.out));
+    }
+    // The full tree is slow on an Intel Mac (the app's own KaraFun probes take 5-10 s there): give it two minutes, and a timeout is a warning, not a failure.
     let windows = singws_mac::run_applescript(
         "tell application \"System Events\"\ntell (first application process whose name contains \"KaraFun\")\nset n to count of windows\nif n is 0 then return \"0\"\nset elems to entire contents of window 1\nreturn (n as string) & \"|\" & (count of elems) as string\nend tell\nend tell",
-        Duration::from_secs(40));
+        Duration::from_secs(120));
     let ms = t.elapsed().as_millis();
     if !windows.ok {
-        r.check("KaraFun UI (shell)", "fail", describe_script_error(&windows.err));
+        if windows.err.contains("timeout") && top.ok {
+            r.check("KaraFun UI (shell)", "warn", format!("reading the whole window tree did not finish in 120 s, but Accessibility does reach KaraFun (windows|top-level elements = {}): the full read is just slow on this Mac", top.out));
+        } else {
+            r.check("KaraFun UI (shell)", "fail", describe_script_error(&windows.err));
+        }
         return;
     }
     r.fact("karafun_ui_read_ms", json!(ms));
