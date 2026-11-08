@@ -5,7 +5,7 @@ after the result has been handed to the UI, writes its song index only into a sc
 deletes), and every failure is swallowed. Setting ``scan_engine``: ``"python"`` (default, nothing runs), ``"shadow"`` (this module),
 ``"rust"`` (NOT wired: treated as ``"python"`` and logged once, so the value cannot make the Rust scan the source of truth).
 
-Log lines (grep ``SCAN-SHADOW``): ``clean`` (identical), ``MISMATCH`` (first differences), ``skipped`` (quick scan, declined, or no helper).
+Log lines (grep ``SCAN-SHADOW``): ``clean`` (identical), ``MISMATCH`` (first differences), ``skipped`` (declined, or no helper).
 A mismatch is not necessarily a bug: the two scans walk the disk at different moments, so a file added or touched in between shows up.
 """
 
@@ -75,6 +75,13 @@ def build_request(roots, quick_mode, old_tracks, settings_snapshot, index_db: st
         "settings": {k: snapshot[k] for k in SETTING_KEYS if k in snapshot},
         "cwd": os.getcwd(),
     }
+    if quick_mode:
+        # The age of tracks.json (what the app's quick scan reads with TRACKS_PATH.stat()); read-only, 0 when the file is absent.
+        try:
+            tracks = Path(os.environ.get("SINGWS_HOME") or (Path.home() / "SingWS")) / "tracks.json"
+            request["tracks_baseline_ns"] = int(tracks.stat().st_mtime_ns)
+        except Exception:
+            request["tracks_baseline_ns"] = 0
     if index_db:
         request["index_db"] = index_db
         request["now"] = 0
@@ -125,9 +132,6 @@ def run_shadow(result: dict, request: dict, log) -> str:
             pass
 
     try:
-        if request.get("quick_mode"):
-            say("skipped: quick update (the Rust scan only does full scans)")
-            return "skipped"
         if not isinstance(result, dict) or not result.get("ok"):
             say("skipped: the app's own scan did not finish")
             return "skipped"

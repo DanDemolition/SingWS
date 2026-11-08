@@ -14,6 +14,7 @@ pub mod locations;
 pub mod names;
 pub mod pyfs;
 pub mod scan;
+mod quick;
 
 use pyfs::R;
 use serde_json::{Value, json};

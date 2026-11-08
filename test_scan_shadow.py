@@ -128,9 +128,27 @@ class Run(unittest.TestCase):
         self.assertEqual(self.run_with({"ok": True, "result": {}}, exit_code=3), "skipped")
         os.environ["SINGWS_SCAN_BIN"] = "/nonexistent/helper"
         self.assertEqual(scan_shadow.run_shadow(_result(), {"quick_mode": False}, self.lines.append), "skipped")
-        self.assertEqual(scan_shadow.run_shadow(_result(), {"quick_mode": True}, self.lines.append), "skipped")
+        self.assertEqual(scan_shadow.run_shadow(_result(), {"quick_mode": True}, self.lines.append), "skipped")  # no helper at that path
         self.assertEqual(scan_shadow.run_shadow({"ok": False}, {"quick_mode": False}, self.lines.append), "skipped")
         self.assertEqual(scan_shadow.run_shadow(_result(), {"quick_mode": False}, lambda m: 1 / 0), "skipped")
+
+    def test_a_quick_update_is_compared_too_and_carries_the_age_of_tracks_json(self):
+        home = tempfile.mkdtemp()
+        (Path(home) / "tracks.json").write_text("[]")
+        old = os.environ.get("SINGWS_HOME")
+        os.environ["SINGWS_HOME"] = home
+        try:
+            req = scan_shadow.build_request(["/m"], True, [], {})
+            self.assertEqual(req["tracks_baseline_ns"], (Path(home) / "tracks.json").stat().st_mtime_ns)
+            self.assertNotIn("tracks_baseline_ns", scan_shadow.build_request(["/m"], False, [], {}))
+            os.remove(Path(home) / "tracks.json")
+            self.assertEqual(scan_shadow.build_request(["/m"], True, [], {})["tracks_baseline_ns"], 0)
+        finally:
+            if old is None:
+                os.environ.pop("SINGWS_HOME", None)
+            else:
+                os.environ["SINGWS_HOME"] = old
+        self.assertEqual(self.run_with({"ok": True, "result": _result()}, request={"op": "scan", "quick_mode": True}), "clean")
 
     def test_start_runs_on_a_thread_when_enabled(self):
         os.environ["SINGWS_SCAN_BIN"] = str(_fake_helper(self.tmp.name, {"ok": True, "result": dict(_result(), index_rows=0)}))

@@ -13,30 +13,30 @@ use serde_json::{Map, Value, json};
 use std::collections::{HashMap, HashSet};
 use std::os::unix::fs::MetadataExt;
 
-fn utf8(path: &std::path::Path) -> R<String> {
+pub(crate) fn utf8(path: &std::path::Path) -> R<String> {
     path.to_str().map(str::to_string).ok_or_else(|| "decline: a path that is not valid UTF-8".to_string())
 }
 
 /// `os.stat` seen as Python's `int(st_mtime)`: CPython builds the float as `sec + nsec * 1e-9` in double arithmetic.
-fn mtime_int(m: &std::fs::Metadata) -> i64 {
+pub(crate) fn mtime_int(m: &std::fs::Metadata) -> i64 {
     (m.mtime() as f64 + m.mtime_nsec() as f64 * 1e-9).trunc() as i64
 }
 
-fn mtime_ns(m: &std::fs::Metadata) -> i128 {
+pub(crate) fn mtime_ns(m: &std::fs::Metadata) -> i128 {
     m.mtime() as i128 * 1_000_000_000 + m.mtime_nsec() as i128
 }
 
 #[cfg(target_os = "macos")]
-fn dev_of(m: &std::fs::Metadata) -> i64 {
+pub(crate) fn dev_of(m: &std::fs::Metadata) -> i64 {
     m.dev() as u32 as i32 as i64 // dev_t is a signed 32-bit integer on macOS
 }
 #[cfg(not(target_os = "macos"))]
-fn dev_of(m: &std::fs::Metadata) -> i64 {
+pub(crate) fn dev_of(m: &std::fs::Metadata) -> i64 {
     m.dev() as i64
 }
 
 /// `_scan_dir_sig`: [mtime_ns, size] of the directory.
-fn dir_sig(path: &str) -> Option<Value> {
+pub(crate) fn dir_sig(path: &str) -> Option<Value> {
     let m = std::fs::metadata(path).ok()?;
     Some(json!([mtime_ns(&m) as i64, m.len() as i64]))
 }
@@ -80,7 +80,7 @@ fn py_str(v: &Value) -> R<String> {
 }
 
 /// `_dedupe_library_tracks(tracks, trust_cached_identity=False, location_priority=...)`.
-fn dedupe(tracks: Vec<Value>, priority: &HashMap<String, i64>, env: &Env) -> R<Vec<Value>> {
+fn dedupe(tracks: Vec<Value>, priority: &HashMap<String, i64>, env: &Env, trust: bool) -> R<Vec<Value>> {
     let mut result: Vec<Value> = Vec::new();
     let mut seen_paths: HashSet<String> = HashSet::new();
     let mut seen_files: HashMap<(i64, u64), usize> = HashMap::new();
@@ -94,7 +94,18 @@ fn dedupe(tracks: Vec<Value>, priority: &HashMap<String, i64>, env: &Env) -> R<V
         item.insert("path".into(), Value::String(path.clone()));
         let path_key = scanned_key(&path, env)?;
         let mut physical: Option<(i64, u64)> = None;
-        if let Ok(m) = std::fs::metadata(&path) {
+        let cached = if trust {
+            match (item.get("scan_device"), item.get("scan_inode")) {
+                (Some(d), Some(i)) if !d.is_null() && !i.is_null() => Some((d.as_i64(), i.as_u64())),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        if let Some((d, i)) = cached {
+            // trust_cached_identity: the stored device and inode are the identity; a value int() cannot read leaves it unknown (no stat)
+            physical = d.zip(i);
+        } else if let Ok(m) = std::fs::metadata(&path) {
             physical = Some((dev_of(&m), m.ino()));
             item.insert("scan_device".into(), json!(dev_of(&m)));
             item.insert("scan_inode".into(), json!(m.ino()));
@@ -133,9 +144,6 @@ fn dedupe(tracks: Vec<Value>, priority: &HashMap<String, i64>, env: &Env) -> R<V
 pub fn build_scan_result(req: &Value) -> R<Value> {
     let started = std::time::Instant::now();
     let quick_mode = req.get("quick_mode").map(truthy).unwrap_or(false);
-    if quick_mode {
-        return decline("quick mode");
-    }
     let cwd = match req.get("cwd").and_then(Value::as_str) {
         Some(c) => c.to_string(),
         None => utf8(&std::env::current_dir().map_err(|e| e.to_string())?)?,
@@ -177,6 +185,19 @@ pub fn build_scan_result(req: &Value) -> R<Value> {
         if let Value::Object(o) = t {
             if o.get("path").map(truthy).unwrap_or(false) {
                 old_paths.insert(normalize_scanned_path(&py_str(&o["path"])?, &env)?);
+            }
+        }
+    }
+    let mut old_by_path: HashMap<String, Value> = HashMap::new();
+    let mut old_duration_by_path: HashMap<String, Value> = HashMap::new();
+    for t in &old_tracks {
+        if let Value::Object(o) = t {
+            if o.get("path").map(truthy).unwrap_or(false) {
+                let p = normalize_scanned_path(&py_str(&o["path"])?, &env)?;
+                old_by_path.insert(p.clone(), t.clone());
+                if o.get("duration").map(truthy).unwrap_or(false) {
+                    old_duration_by_path.insert(p, o["duration"].clone());
+                }
             }
         }
     }
@@ -237,49 +258,76 @@ pub fn build_scan_result(req: &Value) -> R<Value> {
     }
 
     let (mut files_seen, mut tracks_added, mut zip_count, mut mp4_count, mut cdg_count) = (0i64, 0i64, 0i64, 0i64, 0i64);
-    for scan_root in &roots {
-        let mut listing: Vec<(String, Vec<String>)> = Vec::new();
-        walk(scan_root, &mut listing)?;
-        for (root, files) in listing {
-            let root_abs = normalize_scanned_path(&root, &env)?;
-            if let Some(sig) = dir_sig(&root_abs) {
-                dir_sigs.insert(root_abs, sig);
-            }
-            for name in files {
-                files_seen += 1;
-                let full_path = normalize_scanned_path(&format!("{}/{}", root.trim_end_matches('/'), name), &env)?;
-                if name.starts_with('.') || seen.contains(&full_path) {
-                    continue;
+    let (mut tracks_reused, mut tracks_changed) = (0i64, 0i64);
+    let mut changed_paths: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    if quick_mode {
+        let baseline_ns = req.get("tracks_baseline_ns").and_then(Value::as_i64).unwrap_or(0) as i128;
+        let q = crate::quick::quick_scan(&crate::quick::Ctx {
+            env: &env,
+            roots: &roots,
+            fmt: &fmt,
+            locations: &locations,
+            old_tracks: &old_tracks,
+            old_by_path: &old_by_path,
+            old_duration_by_path: &old_duration_by_path,
+            stored_sigs: &stored_sigs,
+            baseline_ns,
+        })?;
+        new_tracks = q.new_tracks;
+        files_seen = q.files_seen;
+        tracks_added = q.tracks_added;
+        zip_count = q.zip_count;
+        mp4_count = q.mp4_count;
+        cdg_count = q.cdg_count;
+        tracks_reused = q.tracks_reused;
+        tracks_changed = q.tracks_changed;
+        changed_paths = q.changed_paths;
+        dir_sigs = q.dir_sigs;
+    } else {
+        for scan_root in &roots {
+            let mut listing: Vec<(String, Vec<String>)> = Vec::new();
+            walk(scan_root, &mut listing)?;
+            for (root, files) in listing {
+                let root_abs = normalize_scanned_path(&root, &env)?;
+                if let Some(sig) = dir_sig(&root_abs) {
+                    dir_sigs.insert(root_abs, sig);
                 }
-                let Some(song_type) = song_type_for_name(&name) else { continue };
-                match song_type {
-                    "mp4" => mp4_count += 1,
-                    "cdg" => cdg_count += 1,
-                    _ => zip_count += 1,
+                for name in files {
+                    files_seen += 1;
+                    let full_path = normalize_scanned_path(&format!("{}/{}", root.trim_end_matches('/'), name), &env)?;
+                    if name.starts_with('.') || seen.contains(&full_path) {
+                        continue;
+                    }
+                    let Some(song_type) = song_type_for_name(&name) else { continue };
+                    match song_type {
+                        "mp4" => mp4_count += 1,
+                        "cdg" => cdg_count += 1,
+                        _ => zip_count += 1,
+                    }
+                    seen.insert(full_path.clone());
+                    let (artist, title, disc_id) = parse_filename_stem(stem_of(&name), &fmt);
+                    let mut track = Map::new();
+                    track.insert("path".into(), json!(full_path));
+                    track.insert("type".into(), json!(song_type));
+                    track.insert("artist".into(), json!(artist));
+                    track.insert("title".into(), json!(title));
+                    track.insert("disc_id".into(), json!(disc_id));
+                    track.insert("duration".into(), Value::Null);
+                    if let Ok(m) = std::fs::metadata(&full_path) {
+                        track.insert("scan_mtime".into(), json!(mtime_int(&m)));
+                        track.insert("scan_mtime_ns".into(), json!(mtime_ns(&m) as i64));
+                        track.insert("scan_size".into(), json!(m.len() as i64));
+                        track.insert("scan_device".into(), json!(dev_of(&m)));
+                        track.insert("scan_inode".into(), json!(m.ino()));
+                    }
+                    if let Some(loc) = location_for_path(&full_path, &locations, &env)? {
+                        track.insert("library_location_id".into(), json!(loc.id));
+                    }
+                    let display = display_for_track(&full_path, &artist_title_of(&track).1, &artist_title_of(&track).0, &disc_of(&track));
+                    track.insert("display".into(), json!(display));
+                    new_tracks.push(Value::Object(track));
+                    tracks_added += 1;
                 }
-                seen.insert(full_path.clone());
-                let (artist, title, disc_id) = parse_filename_stem(stem_of(&name), &fmt);
-                let mut track = Map::new();
-                track.insert("path".into(), json!(full_path));
-                track.insert("type".into(), json!(song_type));
-                track.insert("artist".into(), json!(artist));
-                track.insert("title".into(), json!(title));
-                track.insert("disc_id".into(), json!(disc_id));
-                track.insert("duration".into(), Value::Null);
-                if let Ok(m) = std::fs::metadata(&full_path) {
-                    track.insert("scan_mtime".into(), json!(mtime_int(&m)));
-                    track.insert("scan_mtime_ns".into(), json!(mtime_ns(&m) as i64));
-                    track.insert("scan_size".into(), json!(m.len() as i64));
-                    track.insert("scan_device".into(), json!(dev_of(&m)));
-                    track.insert("scan_inode".into(), json!(m.ino()));
-                }
-                if let Some(loc) = location_for_path(&full_path, &locations, &env)? {
-                    track.insert("library_location_id".into(), json!(loc.id));
-                }
-                let display = display_for_track(&full_path, &artist_title_of(&track).1, &artist_title_of(&track).0, &disc_of(&track));
-                track.insert("display".into(), json!(display));
-                new_tracks.push(Value::Object(track));
-                tracks_added += 1;
             }
         }
     }
@@ -325,7 +373,7 @@ pub fn build_scan_result(req: &Value) -> R<Value> {
     for l in &locations {
         priority.insert(l.id.clone(), scanned_key(&l.path, &env)?.chars().count() as i64);
     }
-    let new_tracks = dedupe(new_tracks, &priority, &env)?;
+    let new_tracks = dedupe(new_tracks, &priority, &env, quick_mode)?;
 
     let mut new_paths: HashSet<String> = HashSet::new();
     for t in &new_tracks {
@@ -341,7 +389,10 @@ pub fn build_scan_result(req: &Value) -> R<Value> {
     removed.sort();
     let added_count = added.len() as i64;
     let removed_count = removed.len() as i64;
-    let reindex_needed = !roots.is_empty() || added_count > 0 || removed_count > 0;
+    let mut index_changed_set: std::collections::BTreeSet<String> = added.iter().cloned().collect();
+    index_changed_set.extend(changed_paths.iter().cloned());
+    let index_changed: Vec<String> = index_changed_set.into_iter().collect();
+    let reindex_needed = (!quick_mode && !roots.is_empty()) || added_count > 0 || removed_count > 0 || tracks_changed > 0;
     let mut summary = format!("Added: {} • Removed: {} • Total: {}", thousands(added_count), thousands(removed_count), thousands(new_tracks.len() as i64));
     if !suspect.is_empty() {
         summary.push_str(&format!(" • ⚠ {} location(s) looked empty; songs preserved", suspect.len()));
@@ -349,7 +400,7 @@ pub fn build_scan_result(req: &Value) -> R<Value> {
     let overlapping = (available.len() as i64 - roots.len() as i64).max(0);
     Ok(json!({
         "ok": true,
-        "quick_mode": false,
+        "quick_mode": quick_mode,
         "roots": roots,
         "requested_roots": requested_roots,
         "unavailable_roots": unavailable,
@@ -360,12 +411,12 @@ pub fn build_scan_result(req: &Value) -> R<Value> {
         "zip_count": zip_count,
         "mp4_count": mp4_count,
         "cdg_count": cdg_count,
-        "tracks_reused": 0,
-        "tracks_changed": 0,
+        "tracks_reused": tracks_reused,
+        "tracks_changed": tracks_changed,
         "files_seen": files_seen,
         "added_count": added_count,
         "removed_count": removed_count,
-        "index_changed_paths": added,
+        "index_changed_paths": index_changed,
         "index_removed_paths": removed,
         "reindex_needed": reindex_needed,
         "suspect_empty_roots": suspect,
@@ -447,9 +498,21 @@ mod tests {
     }
 
     #[test]
-    fn quick_mode_is_declined() {
-        let e = build_scan_result(&json!({"roots": [], "quick_mode": true})).unwrap_err();
-        assert!(e.starts_with("decline:"));
+    fn quick_mode_with_nothing_to_scan_is_an_empty_quick_result() {
+        let r = build_scan_result(&json!({"roots": [], "quick_mode": true})).unwrap();
+        assert_eq!(r["quick_mode"], json!(true));
+        assert_eq!(r["tracks"], json!([]));
+        assert_eq!(r["reindex_needed"], json!(false));
+    }
+
+    #[test]
+    fn a_quick_update_text_signature_it_cannot_read_is_declined_not_guessed() {
+        let dir = std::env::temp_dir().join(format!("scan_quick_decl_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let root = std::fs::canonicalize(&dir).unwrap().to_str().unwrap().to_string();
+        let e = build_scan_result(&json!({"roots": [root.clone()], "quick_mode": true, "settings": {"karaoke_scan_dir_sigs": {root: "12"}}})).unwrap_err();
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(e.starts_with("decline:"), "{e}");
     }
 
     #[test]

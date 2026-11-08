@@ -73,7 +73,9 @@ WANTED = {
 
 def load_oracle():
     tree = ast.parse((ROOT / "0.2.18.1.py").read_text(encoding="utf-8"))
-    ns = {"os": os, "time": time, "hashlib": hashlib, "zipfile": zipfile, "struct": struct, "io": io, "Path": Path,
+    sys.path.insert(0, str(ROOT))
+    import song_index  # the quick scan sorts new files with song_index.normalize_text
+    ns = {"song_index": song_index, "os": os, "time": time, "hashlib": hashlib, "zipfile": zipfile, "struct": struct, "io": io, "Path": Path,
           "TRACKS_PATH": Path("/nonexistent/tracks.json")}
     found = set()
     for node in tree.body:
@@ -522,6 +524,119 @@ def check_scan(rng, work, n, index_cases):
     failures.extend(dp.failures)
 
 
+def mutate_disk(rng, case_dir, roots, files):
+    """Change the disk the way a day of use does, so a quick update has real work: replaced, touched, removed, renamed, added files and folders."""
+    media = [f for f in files if os.path.isfile(f) and f.lower().endswith((".cdg", ".zip", ".mp4")) and not os.path.basename(f).startswith(".")]
+    dirs = sorted({os.path.dirname(f) for f in files if os.path.isdir(os.path.dirname(f))}) or [r for r in roots if os.path.isdir(r)]
+    for _ in range(rng.randrange(0, 5)):
+        op = rng.randrange(9)
+        try:
+            if op == 0 and media:                                   # content replaced: size and mtime change, the folder's mtime does not
+                with open(rng.choice(media), "ab") as fh:
+                    fh.write(b"x" * rng.randrange(1, 9))
+            elif op == 1 and media:                                 # only the mtime moves
+                f = rng.choice(media)
+                st = os.stat(f)
+                os.utime(f, ns=(st.st_atime_ns, st.st_mtime_ns + rng.choice([10**9, 1, -5 * 10**9])))
+            elif op == 2 and media:                                 # removed
+                os.remove(rng.choice(media))
+            elif op == 3 and media:                                 # renamed in place
+                f = rng.choice(media)
+                os.rename(f, os.path.join(os.path.dirname(f), "renamed " + rand_name(rng)))
+            elif op == 4 and dirs:                                  # added file
+                with open(os.path.join(rng.choice(dirs), "new " + rand_name(rng)), "wb") as fh:
+                    fh.write(bytes(rng.randrange(0, 30)))
+            elif op == 5 and dirs:                                  # added folder with files
+                d = os.path.join(rng.choice(dirs), "Fresh" + str(rng.randrange(99)))
+                os.makedirs(d, exist_ok=True)
+                for _i in range(rng.randrange(1, 4)):
+                    with open(os.path.join(d, "n " + rand_name(rng)), "wb") as fh:
+                        fh.write(b"y")
+            elif op == 6 and dirs and len(dirs) > 1:                # folder removed
+                shutil.rmtree(rng.choice(dirs[1:]), ignore_errors=True)
+            elif op == 7 and media:                                 # moved to another folder
+                f = rng.choice(media)
+                os.rename(f, os.path.join(rng.choice(dirs), "moved " + os.path.basename(f)))
+            elif op == 8 and dirs:                                  # a folder touched without a change
+                os.utime(rng.choice(dirs), None)
+        except OSError:
+            pass
+
+
+def check_quick(rng, work, n):
+    """Quick (incremental) update: a full scan gives the old library and the stored folder signatures, the disk then changes, and the app's own quick scan is compared with the Rust one."""
+    fn = ORACLE["_build_library_scan_result"]
+    for i in range(n):
+        case_dir, roots, _old, settings = make_case(rng, work, 5000 + i)
+        os.environ["HOME"] = os.path.join(case_dir, "home")
+        os.chdir(case_dir)
+        settings.pop("karaoke_scan_dir_sigs", None)
+        try:
+            first = canon(fn(roots, False, [], settings))
+        except Exception:  # noqa: BLE001
+            tally("quick: first scan raised")
+            continue
+        old = [dict(t) for t in first["tracks"]]
+        for t in old:                                               # the odd tracks older libraries hold
+            r = rng.random()
+            if r < 0.08:
+                for k in ("scan_mtime", "scan_mtime_ns", "scan_size", "scan_device", "scan_inode"):
+                    t.pop(k, None)
+            elif r < 0.14:
+                t.pop("scan_mtime_ns", None)
+            elif r < 0.2:
+                t["artist"] = ""
+                t.pop("display", None)
+            elif r < 0.25:
+                t["scan_mtime"] = float(t.get("scan_mtime", 0)) + 0.5
+            if rng.random() < 0.3:
+                t["duration"] = rng.randrange(60, 400)
+        if rng.random() < 0.15:
+            old.append({"path": os.path.join(case_dir, "home", "lib", ".hidden.cdg"), "type": "cdg", "artist": "x", "title": "y", "display": "x - y"})
+        if rng.random() < 0.15:
+            old.append(old_track("/somewhere/else/" + rand_name(rng), rng))
+        settings = dict(settings)
+        sigs = dict(first["dir_sigs"])
+        if rng.random() < 0.2:
+            sigs = {}
+        elif rng.random() < 0.2 and sigs:
+            for k in rng.sample(sorted(sigs), min(len(sigs), 2)):
+                sigs[k] = [sigs[k][0] + rng.choice([0, 7, -3]), sigs[k][1] + rng.choice([0, 0, 1])]
+        if sigs:
+            settings["karaoke_scan_dir_sigs"] = sigs
+        tp = Path(case_dir) / "tracks.json"
+        baseline = 0
+        if rng.random() < 0.7:
+            tp.write_text("[]", encoding="utf-8")
+            os.utime(tp, ns=(10**18, time.time_ns() + rng.choice([-10**11, 0, 10**11])))
+            baseline = tp.stat().st_mtime_ns
+        ORACLE["TRACKS_PATH"] = tp
+        files = [t["path"] for t in first["tracks"]]
+        mutate_disk(rng, case_dir, roots, files)
+        try:
+            py = canon(fn(roots, True, old, settings))
+        except Exception:  # noqa: BLE001
+            tally("quick: python raised")
+            continue
+        req = {"op": "scan", "roots": roots, "quick_mode": True, "old_tracks": old, "settings": settings, "cwd": case_dir, "tracks_baseline_ns": baseline}
+        r = subprocess.run([CLI], input=json.dumps(req), capture_output=True, text=True, cwd=case_dir, env={**os.environ, "HOME": os.path.join(case_dir, "home")})
+        resp = json.loads(r.stdout)
+        if not resp.get("ok"):
+            if str(resp.get("error", "")).startswith("decline:"):
+                tally("quick declined")
+                continue
+            fail(f"quick case {i}: rust error {resp.get('error')}")
+            continue
+        rs = resp["result"]
+        if compare_scan(f"quick case {i}", py, rs):
+            tally("quick compared")
+            tally("  quick: tracks reused", py["tracks_reused"])
+            tally("  quick: tracks changed", py["tracks_changed"])
+            if py["added_count"] or py["removed_count"]:
+                tally("  quick: cases with added or removed tracks")
+    ORACLE["TRACKS_PATH"] = Path("/nonexistent/tracks.json")
+
+
 def check_real(roots):
     fn = ORACLE["_build_library_scan_result"]
     for root in roots:
@@ -551,6 +666,7 @@ def main(argv=None):
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--real-root", action="append", default=[])
     ap.add_argument("--index-cases", type=int, default=25)
+    ap.add_argument("--quick-cases", type=int, default=150)
     a = ap.parse_args(argv)
     if not Path(CLI).exists():
         raise SystemExit(f"build first: cargo build --release -p singws-scan -p singws-db -p singws-dbw  (looked for {CLI})")
@@ -564,6 +680,7 @@ def main(argv=None):
         check_zip(rng, work, 84)
         check_normalize(rng, work, 500)
         check_scan(rng, work, a.cases, a.index_cases)
+        check_quick(rng, work, a.quick_cases)
         os.environ["HOME"] = saved_home
         check_real(a.real_root)
     finally:
