@@ -129,10 +129,11 @@ pub fn run_applescript(source: &str, timeout: Duration) -> ScriptResult {
     }
     #[cfg(target_os = "macos")]
     {
-        // Default since 2026-11-08: the `osascript` tool, exactly how the Python app runs its scripts. The in-process NSAppleScript below NEVER finished a KaraFun search whose
-        // query had several words (`keystroke "Journey Dont Stop Believin"`) although `osascript` finishes it in ~6 s (found by the live ladder comparison); it also cannot be
-        // interrupted, while a timed-out `osascript` is killed. SINGWS_APPLESCRIPT_RUNNER=inprocess selects the old runner.
-        if std::env::var("SINGWS_APPLESCRIPT_RUNNER").map_or(true, |v| v != "inprocess") {
+        // The default stays the in-process NSAppleScript: it is what the Python app uses (so Accessibility / Automation belong to the APP, not to /usr/bin/osascript) and it
+        // works inside a Cocoa app. A COMMAND-LINE process has no run loop and there the in-process runner never finished a multi-word KaraFun search (`keystroke "Journey Dont
+        // Stop Believin"`) while `osascript` did in ~6 s (live ladder comparison, 2026-11-08), and a hung NSAppleScript cannot be interrupted. Such tools select the
+        // `osascript` runner with SINGWS_APPLESCRIPT_RUNNER=osascript (a timed-out osascript is killed).
+        if std::env::var("SINGWS_APPLESCRIPT_RUNNER").map_or(false, |v| v == "osascript") {
             return run_osascript(source, timeout);
         }
     }
@@ -191,7 +192,7 @@ pub fn run_osascript(source: &str, timeout: Duration) -> ScriptResult {
     }
 }
 
-/// The original runner: NSAppleScript inside this process (see `run_applescript` for why it is no longer the default).
+/// The default runner: NSAppleScript inside this process (see `run_applescript`).
 pub fn run_applescript_in_process(source: &str, timeout: Duration) -> ScriptResult {
     if source.trim().is_empty() {
         return ScriptResult { ok: false, out: String::new(), err: "empty_script".into() };
@@ -317,6 +318,17 @@ mod tests {
     }
 
     #[cfg(target_os = "macos")]
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn the_osascript_runner_returns_errors_and_kills_on_timeout() {
+        assert_eq!(run_osascript("return 1+1", Duration::from_secs(20)).out, "2");
+        let bad = run_osascript("this is not applescript (", Duration::from_secs(20));
+        assert!(!bad.ok && !bad.err.is_empty());
+        let t = std::time::Instant::now();
+        assert_eq!(run_osascript("delay 30\nreturn 1", Duration::from_millis(300)), ScriptResult { ok: false, out: String::new(), err: "timeout".into() });
+        assert!(t.elapsed() < Duration::from_secs(5), "a timed-out osascript is killed, not waited for");
+    }
+
     #[test]
     fn script_that_outlasts_the_timeout_reports_timeout() {
         let r = run_applescript("delay 3\nreturn 1", Duration::from_millis(200));
