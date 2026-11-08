@@ -52,6 +52,7 @@ fn answer(v: &Value) -> Value {
             json!({"region": [a.0, a.1, a.2, a.3]})
         }
         "region_changed" => json!({"changed": geometry::region_changed(rect(&v["old"]), rect(&v["new"]), v["tolerance"].as_f64().unwrap_or(2.0))}),
+        "method" => singws_karafun::methods::run(s("method"), &v["scenario"], v["answers"].as_array().map(|a| a.as_slice()).unwrap_or(&[])),
         "flow" => run_flow(v),
         "startflow" => {
             let b = |k: &str| v[k].as_bool().unwrap_or(false);

@@ -78,7 +78,7 @@ SURVIVOR_NOTES: dict = {
 }
 
 
-FILES = ("lib.rs", "pure.rs", "ladder.rs", "monitor.rs", "readback.rs", "watchdog.rs", "startflow.rs", "flow.rs", "geometry.rs")
+FILES = ("lib.rs", "pure.rs", "ladder.rs", "monitor.rs", "readback.rs", "watchdog.rs", "startflow.rs", "flow.rs", "geometry.rs", "methods.rs")
 
 
 def generate(name, text):
@@ -112,7 +112,7 @@ def setup():
     (WORK / "src").mkdir(parents=True, exist_ok=True)
     (WORK / "Cargo.toml").write_text(__import__("re").sub(r"# A live runner.*?\[dependencies\]\n", "[dependencies]\n", (REAL / "Cargo.toml").read_text(), flags=__import__("re").S).replace('singws-mac = { path = "../singws-mac", optional = true }\n', "") + "\n[workspace]\n")
     shutil.copy(ROOT / "rust/Cargo.lock", WORK / "Cargo.lock")
-    for name in ("main.rs", "script_lines.rs", "casefold_table.rs", "builders.rs", "lib.rs", "pure.rs", "ladder.rs", "monitor.rs", "readback.rs", "watchdog.rs", "startflow.rs", "flow.rs", "geometry.rs"):
+    for name in ("main.rs", "script_lines.rs", "casefold_table.rs", "builders.rs", "lib.rs", "pure.rs", "ladder.rs", "monitor.rs", "readback.rs", "watchdog.rs", "startflow.rs", "flow.rs", "geometry.rs", "methods.rs"):
         shutil.copy(REAL / "src" / name, WORK / "src" / name)
 
 
@@ -146,6 +146,9 @@ def main():
     import karafun_geometry_parity as gp
     gp.run_rust = spy
     assert gp.main(["--seeds", str(SEEDS), "--binary", str(release)]) == 0, "the geometry must equal the Python first"
+    import karafun_methods_parity as mp2
+    mp2.run_rust = spy
+    assert mp2.main(["--seeds", str(SEEDS), "--binary", str(release)]) == 0, "the four methods must equal the Python first"
     print(f"oracle ready: {sum(len(b) for b, _ in captured)} requests in {len(captured)} batches", flush=True)
     setup()
     originals = {n: (WORK / "src" / n).read_text() for n in FILES}
