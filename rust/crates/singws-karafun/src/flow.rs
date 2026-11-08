@@ -17,9 +17,31 @@ pub struct World<'a> {
     pub end_session_at: Option<i64>,
     pub order_error: Option<String>,
     pub declined: Option<String>,
+    /// Whole-method mode (worker.rs): the closures run for real, the UI thread runs inline, every read of the session counts.
+    pub unified: bool,
+    pub bgm_scheduled: bool,
+    pub handoff_scheduled: bool,
+    pub event_flag: bool,
+    /// settings["karafun_native_double_click"]
+    pub native: bool,
+    /// the session dict's `host_focus_restored` key: None = never set
+    pub session_restored: Option<bool>,
 }
 
 impl<'a> World<'a> {
+    pub fn new(answers: &'a [Value], end_session_at: Option<i64>) -> World<'a> {
+        World { answers, pos: 0, calls: vec![], log: vec![], sleeps: vec![], t: 100.0, requires: 0, end_session_at, order_error: None, declined: None, unified: false,
+                bgm_scheduled: false, handoff_scheduled: false, event_flag: false, native: false, session_restored: None }
+    }
+    /// One read of the session object: counts, and says whether the session is still the current one.
+    pub(crate) fn session_read(&mut self) -> bool {
+        self.requires += 1;
+        !matches!(self.end_session_at, Some(n) if self.requires >= n)
+    }
+    /// `_session_is_current()`: a counted read in whole-method mode, a scripted answer in the per-stretch harnesses.
+    pub(crate) fn session_current(&mut self) -> bool {
+        if self.unified { self.session_read() } else { self.ask("session_current").as_bool().unwrap_or(false) }
+    }
     pub(crate) fn ask(&mut self, kind: &str) -> Value {
         let a = self.answers.get(self.pos).cloned();
         self.pos += 1;
@@ -43,11 +65,7 @@ impl<'a> World<'a> {
         self.t += s;
     }
     pub(crate) fn require(&mut self) -> Result<(), String> {
-        self.requires += 1;
-        match self.end_session_at {
-            Some(n) if self.requires >= n => Err("KaraFun playback session ended".to_string()),
-            _ => Ok(()),
-        }
+        if self.session_read() { Ok(()) } else { Err(if self.unified { "KaraFun launch cancelled: playback session ended" } else { "KaraFun playback session ended" }.to_string()) }
     }
     pub(crate) fn diag(&mut self, s: String) {
         self.log.push(s);
@@ -76,15 +94,23 @@ impl<'a> World<'a> {
         self.call("menu_state", vec![], json!({}));
         self.ask("menu_state").as_str().unwrap_or("").to_string()
     }
-    pub(crate) fn session_script(&mut self, script: &str, timeout: i64) -> (bool, String, String) {
-        self.call("session_script", vec![json!(script)], json!({"timeout": timeout}));
-        let v = self.ask("session_script");
-        (v[0].as_bool().unwrap_or(false), v[1].as_str().unwrap_or("").to_string(), v[2].as_str().unwrap_or("").to_string())
+    pub(crate) fn session_script(&mut self, script: &str, timeout: i64) -> Result<(bool, String, String), String> {
+        self.session_script_json(script, json!(timeout))
     }
-    pub(crate) fn session_script_f(&mut self, script: &str, timeout: f64) -> (bool, String, String) {
+    pub(crate) fn session_script_f(&mut self, script: &str, timeout: f64) -> Result<(bool, String, String), String> {
+        self.session_script_json(script, json!(timeout))
+    }
+    /// `_run_session_script`: in whole-method mode it checks the session before and after (the per-stretch harnesses stub it without the checks).
+    fn session_script_json(&mut self, script: &str, timeout: Value) -> Result<(bool, String, String), String> {
+        if self.unified {
+            self.require()?;
+        }
         self.call("session_script", vec![json!(script)], json!({"timeout": timeout}));
         let v = self.ask("session_script");
-        (v[0].as_bool().unwrap_or(false), v[1].as_str().unwrap_or("").to_string(), v[2].as_str().unwrap_or("").to_string())
+        if self.unified {
+            self.require()?;
+        }
+        Ok((v[0].as_bool().unwrap_or(false), v[1].as_str().unwrap_or("").to_string(), v[2].as_str().unwrap_or("").to_string()))
     }
     fn in_progress(&mut self) -> bool {
         self.ask("in_progress").as_bool().unwrap_or(false)
@@ -141,7 +167,38 @@ pub struct Outcome {
     pub world: Value,
 }
 
-fn flow(w: &mut World, sc: &Scenario, entry: &mut Map<String, Value>) -> Result<String, String> {
+/// The worker's nested closures: stubbed (one recorded call) in the per-stretch harness, the real closures in whole-method mode.
+fn closure(w: &mut World, entry: &mut Map<String, Value>, which: &str, reason: &str) -> Result<(), String> {
+    if !w.unified {
+        match which {
+            "bgm" => w.call("schedule_bgm_fade", vec![json!(reason)], json!({})),
+            "early" => w.call("schedule_early_handoff", vec![json!(reason)], json!({})),
+            "watch" => w.call("watch_start", vec![json!(reason)], json!({})),
+            _ => w.call("native_double_click", vec![], json!({})),
+        }
+        return Ok(());
+    }
+    {
+        let mut h = crate::helpers::H { w: &mut *w, entry: &mut *entry };
+        match which {
+            "bgm" => h.bgm(reason),
+            "early" => h.early(reason),
+            "watch" => h.watch(),
+            _ => h.dbl(),
+        }
+    }
+    if w.declined.is_some() { Err("declined".to_string()) } else { Ok(()) }
+}
+
+fn closure_watch(w: &mut World, entry: &mut Map<String, Value>, point: (i64, i64)) -> Result<(), String> {
+    if !w.unified {
+        w.call("watch_start", vec![json!([point.0, point.1])], json!({}));
+        return Ok(());
+    }
+    closure(w, entry, "watch", "")
+}
+
+pub(crate) fn flow(w: &mut World, sc: &Scenario, entry: &mut Map<String, Value>) -> Result<String, String> {
     w.require()?;
     w.diag(format!("[KARAFUN-AUTO] activating KaraFun result mode={} x={} y={}", sc.parts[0], sc.parts[1], sc.parts[2]));
     let fx: f64 = sc.parts[1].parse().map_err(|_| "declined".to_string()).map_err(|e| { w.declined = Some("a coordinate Python would reject with its own error text".into()); e })?;
@@ -155,7 +212,7 @@ fn flow(w: &mut World, sc: &Scenario, entry: &mut Map<String, Value>) -> Result<
     let result_activated_at;
     if sc.queued {
         if !capture {
-            w.call("schedule_bgm_fade", vec![json!("before_adjusted_queue_play")], json!({}));
+            closure(w, entry, "bgm", "before_adjusted_queue_play")?;
         }
         let (pressed, err) = w.press();
         if !pressed {
@@ -166,19 +223,30 @@ fn flow(w: &mut World, sc: &Scenario, entry: &mut Map<String, Value>) -> Result<
         entry.insert("karafun_playback_clock_started_at".into(), json!(result_activated_at));
         entry.insert("karafun_playback_assumed".into(), json!(true));
         entry.insert("karafun_explicit_play_sent".into(), json!(true));
-        w.call("schedule_early_handoff", vec![json!("after_adjusted_queue_playback_started")], json!({}));
+        closure(w, entry, "early", "after_adjusted_queue_playback_started")?;
         if capture {
-            w.call("watch_start", vec![json!([point.0, point.1])], json!({}));
+            closure_watch(w, entry, point)?;
         }
         w.sleep(0.8);
     } else if managed {
         if !w.mouse_click(point.0, point.1) {
             return Err("Could not select the KaraFun result".into());
         }
-        w.call("schedule_early_handoff", vec![json!("after_result_activation")], json!({}));
-        let ok = w.ask("event_wait").as_bool().unwrap_or(false);
-        w.call("event_wait", vec![], json!({"timeout": 3.0}));
-        w.t += if ok { 0.2 } else { 3.0 };
+        closure(w, entry, "early", "after_result_activation")?;
+        let ok = if w.unified {
+            if w.event_flag {
+                true
+            } else {
+                w.call("event_wait", vec![], json!({"timeout": 3.0}));
+                w.t += 3.0;
+                false
+            }
+        } else {
+            let ok = w.ask("event_wait").as_bool().unwrap_or(false);
+            w.call("event_wait", vec![], json!({"timeout": 3.0}));
+            w.t += if ok { 0.2 } else { 3.0 };
+            ok
+        };
         if !ok {
             w.diag("[KARAFUN-AUTO] fullscreen handoff UI dispatch timed out".into());
         }
@@ -195,11 +263,11 @@ fn flow(w: &mut World, sc: &Scenario, entry: &mut Map<String, Value>) -> Result<
             w.diag("[KARAFUN-AUTO] fullscreen audience handoff not verified before play; playback blocked to protect the show screen".into());
             return Err("KaraFun audience screen could not be verified. The song was selected but was not started.".into());
         }
-        w.call("schedule_bgm_fade", vec![json!("fullscreen_handoff_ready")], json!({}));
+        closure(w, entry, "bgm", "fullscreen_handoff_ready")?;
         let (activated, activation_error);
         if capture {
             w.call("renderer_ready_script", vec![], json!({}));
-            let (raised, raise_result, raise_error) = w.session_script("ready-script", 5);
+            let (raised, raise_result, raise_error) = w.session_script("ready-script", 5)?;
             if raised && py_strip(&raise_result) == "READY" {
                 let r = w.activate(point, false);
                 activated = r.0;
@@ -244,7 +312,7 @@ fn flow(w: &mut World, sc: &Scenario, entry: &mut Map<String, Value>) -> Result<
         }
     } else {
         if !capture {
-            w.call("schedule_bgm_fade", vec![json!("before_result_activation")], json!({}));
+            closure(w, entry, "bgm", "before_result_activation")?;
         }
         let (activated, err) = w.activate(point, capture);
         if !activated {
@@ -255,8 +323,8 @@ fn flow(w: &mut World, sc: &Scenario, entry: &mut Map<String, Value>) -> Result<
         entry.insert("karafun_playback_clock_started_at".into(), json!(result_activated_at));
         entry.insert("karafun_playback_assumed".into(), json!(true));
         if capture {
-            w.call("schedule_early_handoff", vec![json!("after_capture_playback_started")], json!({}));
-            w.call("watch_start", vec![json!([point.0, point.1])], json!({}));
+            closure(w, entry, "early", "after_capture_playback_started")?;
+            closure_watch(w, entry, point)?;
         }
         w.sleep(0.8);
     }
@@ -271,7 +339,7 @@ fn flow(w: &mut World, sc: &Scenario, entry: &mut Map<String, Value>) -> Result<
         entry.insert("karafun_playback_assumed".into(), json!(!truthy(entry.get("karafun_explicit_play_sent"))));
         w.diag(format!("[KARAFUN-AUTO] fast start continuing after result activation state={initial_probe_state}; monitor will verify"));
     } else {
-        let (o, probe, probe_err) = w.session_script("probe-script", 5);
+        let (o, probe, probe_err) = w.session_script("probe-script", 5)?;
         ok = o;
         initial_probe_state = py_strip(&or_str(&probe, &probe_err)).to_string();
         if initial_probe_state.starts_with("ERROR|KaraFun control window not found") {
@@ -282,7 +350,7 @@ fn flow(w: &mut World, sc: &Scenario, entry: &mut Map<String, Value>) -> Result<
     let r = repr!(w, &initial_probe_state);
     w.diag(format!("[KARAFUN-AUTO] playback pre-click state={r}"));
     if ok && initial_probe_state == "PLAYING" {
-        w.call("schedule_early_handoff", vec![json!("pre_click_playing")], json!({}));
+        closure(w, entry, "early", "pre_click_playing")?;
     }
     let managed_state_unknown = fast_start && managed && initial_probe_state == "UNKNOWN";
     let explicit = truthy(entry.get("karafun_explicit_play_sent"));
@@ -306,8 +374,15 @@ fn flow(w: &mut World, sc: &Scenario, entry: &mut Map<String, Value>) -> Result<
         w.diag("[KARAFUN-AUTO] play click skipped already playing".into());
     }
     if capture {
-        w.call("schedule_early_handoff", vec![json!("start_action_finished")], json!({}));
+        closure(w, entry, "early", "start_action_finished")?;
         w.call("ui_thread", vec![], json!({}));
+        if w.unified {
+            let session = match w.session_restored {
+                Some(r) => json!({"id": 1, "host_focus_restored": r}),
+                None => json!({"id": 1}),
+            };
+            w.call("activate_host", vec![session], json!({}));
+        }
     }
     let mut verified_playing = ok && initial_probe_state == "PLAYING" && !fast_start;
     w.call(
@@ -323,7 +398,7 @@ fn flow(w: &mut World, sc: &Scenario, entry: &mut Map<String, Value>) -> Result<
         let max_probe_attempts = if sc.was_running { 12 } else { 30 };
         for probe_attempt in 0..max_probe_attempts {
             w.sleep(1.0);
-            let (o, probe, probe_err) = w.session_script("probe-script", 5);
+            let (o, probe, probe_err) = w.session_script("probe-script", 5)?;
             ok = o;
             last_playback_probe = py_strip(&or_str(&probe, &probe_err)).to_string();
             if last_playback_probe == "UNKNOWN" || last_playback_probe == "ERROR|KaraFun control window not found" {
@@ -335,12 +410,12 @@ fn flow(w: &mut World, sc: &Scenario, entry: &mut Map<String, Value>) -> Result<
             if probe_attempt == 0 && !native_double_click_retried && !(ok && last_playback_probe == "PLAYING") {
                 native_double_click_retried = true;
                 if w.menu_state() == "IDLE" {
-                    w.call("native_double_click", vec![], json!({}));
+                    closure(w, entry, "dbl", "")?;
                 }
             }
             if ok && last_playback_probe == "PLAYING" {
-                w.call("schedule_early_handoff", vec![json!("playback_verified")], json!({}));
-                w.call("schedule_bgm_fade", vec![json!("playback_verified")], json!({}));
+                closure(w, entry, "early", "playback_verified")?;
+                closure(w, entry, "bgm", "playback_verified")?;
                 if !entry.contains_key("karafun_display_started_at") {
                     entry.insert("karafun_display_started_at".into(), json!(w.t));
                 }
@@ -371,7 +446,7 @@ fn flow(w: &mut World, sc: &Scenario, entry: &mut Map<String, Value>) -> Result<
         w.sleep(1.5);
         w.call("set_key_tempo_script", vec![json!(sc.requested_key), json!(sc.requested_tempo)], json!({}));
         let script = format!("kt-script:{}:{}", sc.requested_key, sc.requested_tempo);
-        let (ok, a, script_error) = w.session_script(&script, 8);
+        let (ok, a, script_error) = w.session_script(&script, 8)?;
         adjusted = a;
         if !ok {
             let cut: String = script_error.chars().take(180).collect();
@@ -396,7 +471,7 @@ fn flow(w: &mut World, sc: &Scenario, entry: &mut Map<String, Value>) -> Result<
 }
 
 pub fn run(sc: &Scenario, answers: &[Value]) -> Outcome {
-    let mut w = World { answers, pos: 0, calls: vec![], log: vec![], sleeps: vec![], t: 100.0, requires: 0, end_session_at: sc.end_session_at, order_error: None, declined: None };
+    let mut w = World::new(answers, sc.end_session_at);
     let mut entry = sc.entry.clone();
     let r = flow(&mut w, sc, &mut entry);
     let result = match r {

@@ -5,6 +5,8 @@ use crate::ladder::py_repr;
 use serde_json::{json, Map, Value};
 
 pub struct Scenario {
+    /// `int(time.time())` when the entry is submitted
+    pub now: i64,
     pub ok: bool,
     pub message: String,
     pub current: bool,
@@ -64,7 +66,7 @@ pub fn run(sc: &Scenario) -> Outcome {
     }
     if sc.ok {
         entry.insert("karafun_submission_state".into(), json!("karafun_queued"));
-        entry.insert("karafun_submitted_at".into(), json!(1_700_000_100_i64));
+        entry.insert("karafun_submitted_at".into(), json!(sc.now));
         entry.insert("karafun_idempotency_key".into(), json!(sc.request_uid));
         entry.remove("karafun_pending_at");
         calls.push(json!(["set_status", ["playing"], {"message": "Playing in KaraFun", "notify": null}]));

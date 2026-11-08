@@ -59,6 +59,7 @@ fn answer(v: &Value) -> Value {
         "finish" => run_finish(v),
         "intake" => run_intake(v),
         "helpers" => run_helpers(v),
+        "worker" => run_worker(v),
         "startflow" => {
             let b = |k: &str| v[k].as_bool().unwrap_or(false);
             let act = startflow::play_action(&startflow::PlayInput { fast_start: b("fast_start"), managed_handoff: b("managed_handoff"), managed_start_state: s("managed_start_state"),
@@ -77,8 +78,8 @@ fn answer(v: &Value) -> Value {
             let queries: Vec<String> = v["queries"].as_array().map(|a| a.iter().map(|q| q.as_str().unwrap_or("").to_string()).collect()).unwrap_or_default();
             let mut answers = v["answers"].as_array().cloned().unwrap_or_default().into_iter();
             let mut next = |_: &str| match answers.next() {
-                Some(x) => Answer { ok: x["ok"].as_bool().unwrap_or(false), text: x["text"].as_str().unwrap_or("").to_string(), error: x["error"].as_str().unwrap_or("").to_string() },
-                None => Answer { ok: false, text: String::new(), error: "answers exhausted".to_string() },
+                Some(x) => Answer { ok: x["ok"].as_bool().unwrap_or(false), text: x["text"].as_str().unwrap_or("").to_string(), error: x["error"].as_str().unwrap_or("").to_string(), abort: None },
+                None => Answer { ok: false, text: String::new(), error: "answers exhausted".to_string(), abort: None },
             };
             let o = ladder::run(&queries, s("safe_title"), s("safe_artist"), &mut next);
             if let Some(why) = o.declined {
@@ -313,6 +314,7 @@ fn run_finish(v: &Value) -> Value {
     let s = |k: &str| sc[k].as_str().unwrap_or("").to_string();
     let b = |k: &str| sc[k].as_bool().unwrap_or(false);
     let scenario = Scenario {
+        now: 1_700_000_100,
         ok: sc["result"]["ok"].as_bool().unwrap_or(false),
         message: sc["result"]["message"].as_str().unwrap_or("").to_string(),
         current: b("current"),
@@ -441,4 +443,29 @@ fn run_monitor_replay(v: &Value) -> Value {
         }
     }
     json!({"passes": out_passes})
+}
+
+fn run_worker(v: &Value) -> Value {
+    use singws_karafun::worker::{run, Scenario};
+    let sc = &v["scenario"];
+    let s = |k: &str| sc[k].as_str().unwrap_or("").to_string();
+    let scenario = Scenario {
+        settings: sc["settings"].clone(),
+        entry: sc["entry"].as_object().cloned().unwrap_or_default(),
+        artist: s("artist"),
+        title: s("title"),
+        key: sc["key"].clone(),
+        tempo: sc["tempo"].clone(),
+        request_uid: s("request_uid"),
+        queries: sc["queries"].as_array().map(|a| a.iter().map(|x| x.as_str().unwrap_or("").to_string()).collect()).unwrap_or_default(),
+        end_session_at: sc["end_session_at"].as_i64(),
+        capture_session: sc["capture_session"].as_bool(),
+        handoff_error: sc["handoff_error"].as_str().map(|x| x.to_string()),
+        needs_attention: sc["needs_attention"].as_bool().unwrap_or(false),
+        launch_error: sc["launch_error"].as_str().map(|x| x.to_string()),
+        active_ok: sc["active_ok"].as_bool().unwrap_or(true),
+    };
+    let answers: Vec<Value> = v["answers"].as_array().cloned().unwrap_or_default();
+    let out = run(&scenario, &answers);
+    json!({"result": out.returned, "entry": Value::Object(out.entry), "world": out.world})
 }

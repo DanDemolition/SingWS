@@ -47,7 +47,7 @@ fn clip(s: &str, n: usize) -> String {
     s.chars().take(n).collect()
 }
 
-fn prelude(w: &mut World, sc: &Scenario, entry: &mut Map<String, Value>) -> Result<bool, String> {
+pub(crate) fn prelude(w: &mut World, sc: &Scenario, entry: &mut Map<String, Value>) -> Result<bool, String> {
     let parts: Vec<&str> = sc.found.split('|').collect();
     if parts.len() < 3 || !["FOUND", "TITLE_ONLY", "FIRST"].contains(&parts[0]) {
         return Err(or_str(&sc.last_error, "No acceptable KaraFun match"));
@@ -83,7 +83,7 @@ fn prelude(w: &mut World, sc: &Scenario, entry: &mut Map<String, Value>) -> Resu
             return Err("Could not select the KaraFun result for key/tempo setup".into());
         }
         w.call("play_now_queue_script", vec![], json!({}));
-        let (queued_ok, queued_result, queued_error) = w.session_script("play-now-queue-script", 20);
+        let (queued_ok, queued_result, queued_error) = w.session_script("play-now-queue-script", 20)?;
         if !queued_ok || py_strip(&queued_result) != "QUEUED_PAUSED" {
             let why = clip(&or_str(&queued_error, &or_str(&queued_result, "unknown")), 120);
             w.diag(format!("[KARAFUN-AUTO] could not prepare key/tempo setup; playing without it: {why}"));
@@ -104,7 +104,7 @@ fn prelude(w: &mut World, sc: &Scenario, entry: &mut Map<String, Value>) -> Resu
                 for attempt in [1, 2] {
                     w.require()?;
                     let timeout = 10.0 + key_steps as f64 * 0.3 + tempo_steps as f64 * 0.25;
-                    let (adjust_ok, adjust_result, adjust_error) = w.session_script_f(&adjust_lines, timeout);
+                    let (adjust_ok, adjust_result, adjust_error) = w.session_script_f(&adjust_lines, timeout)?;
                     let done = py_strip(&adjust_result).to_string();
                     auto_adjusted = adjust_ok && done == format!("ADJUSTED|{key_steps}|{tempo_steps}");
                     let shown = clip(&or_str(&done, &adjust_error), 80);
@@ -121,6 +121,9 @@ fn prelude(w: &mut World, sc: &Scenario, entry: &mut Map<String, Value>) -> Resu
                 entry.insert("karafun_key_current".into(), json!(sc.requested_key));
                 entry.insert("karafun_tempo_current".into(), json!(sc.requested_tempo));
                 w.call("ui_thread", vec![], json!({}));
+                if w.unified {
+                    w.call("show_key_tempo", vec![json!(sc.requested_key), json!(sc.requested_tempo)], json!({}));
+                }
             } else {
                 let lead = if sc.auto_key_tempo { "KaraFun key/tempo could not be set automatically " } else { "Automatic KaraFun key/tempo is turned off " };
                 w.call("notify", vec![json!(format!("{lead}(key {:+}, tempo {}%). Adjust it in KaraFun.", sc.requested_key, sc.requested_tempo))], json!({"level": "warning"}));
@@ -131,7 +134,7 @@ fn prelude(w: &mut World, sc: &Scenario, entry: &mut Map<String, Value>) -> Resu
 }
 
 pub fn run(sc: &Scenario, answers: &[Value]) -> Outcome {
-    let mut w = World { answers, pos: 0, calls: vec![], log: vec![], sleeps: vec![], t: 100.0, requires: 0, end_session_at: sc.end_session_at, order_error: None, declined: None };
+    let mut w = World::new(answers, sc.end_session_at);
     let mut entry = sc.entry.clone();
     let r = prelude(&mut w, sc, &mut entry);
     let result = match r {

@@ -12,6 +12,8 @@ pub struct Answer {
     pub ok: bool,
     pub text: String,
     pub error: String,
+    /// the runner raised instead of answering (the session ended): the ladder stops at once with this as the error
+    pub abort: Option<String>,
 }
 
 #[derive(Debug, Default, PartialEq)]
@@ -125,6 +127,10 @@ pub fn run_with(queries: &[String], safe_title: &str, safe_artist: &str, runner:
             o.log.push(line);
             o.requests.push(format!("search:{}:{}:{}:{}", query, ui_retry, safe_title, artist_match));
             let a = runner(&Request::Search { query: query.clone() });
+            if let Some(m) = &a.abort {
+                o.raised = Some(m.clone());
+                return o;
+            }
             ok = a.ok;
             candidate = a.text.clone();
             if ok {
@@ -186,7 +192,7 @@ mod tests {
     use super::*;
 
     fn a(ok: bool, text: &str, error: &str) -> Answer {
-        Answer { ok, text: text.into(), error: error.into() }
+        Answer { ok, text: text.into(), error: error.into(), abort: None }
     }
 
     fn go(queries: &[&str], artist: &str, answers: Vec<Answer>) -> Outcome {

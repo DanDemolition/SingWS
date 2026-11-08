@@ -30,13 +30,10 @@ fn truthy(v: Option<&Value>) -> bool {
     }
 }
 
-struct H<'w, 'a> {
-    w: &'w mut World<'a>,
-    entry: Map<String, Value>,
-    native: bool,
-    bgm_scheduled: bool,
-    handoff_scheduled: bool,
-    host_focus_restored: bool,
+/// The closures act on the world's shared state (the once-only flags, the native-click setting, the session dict) and on the queue entry they close over.
+pub(crate) struct H<'w, 'a, 'e> {
+    pub(crate) w: &'w mut World<'a>,
+    pub(crate) entry: &'e mut Map<String, Value>,
 }
 
 macro_rules! repr {
@@ -51,16 +48,16 @@ macro_rules! repr {
     };
 }
 
-impl<'w, 'a> H<'w, 'a> {
+impl<'w, 'a, 'e> H<'w, 'a, 'e> {
     fn session_current(&mut self) -> bool {
-        self.w.ask("session_current").as_bool().unwrap_or(false)
+        self.w.session_current()
     }
 
-    fn bgm(&mut self, reason: &str) {
-        if self.bgm_scheduled {
+    pub(crate) fn bgm(&mut self, reason: &str) {
+        if self.w.bgm_scheduled {
             return;
         }
-        self.bgm_scheduled = true;
+        self.w.bgm_scheduled = true;
         self.w.diag(format!("[KARAFUN] delayed BGM fade scheduled reason={reason}"));
         self.w.call("ui_thread", vec![], json!({}));
         if self.session_current() {
@@ -84,7 +81,7 @@ impl<'w, 'a> H<'w, 'a> {
         self.w.call("native_double_click", vec![json!(x), json!(y)], json!({}));
     }
 
-    fn dbl(&mut self) {
+    pub(crate) fn dbl(&mut self) {
         if truthy(self.entry.get("karafun_native_retry_sent")) || truthy(self.entry.get("karafun_queued_for_adjustment")) {
             return;
         }
@@ -97,28 +94,29 @@ impl<'w, 'a> H<'w, 'a> {
         self.native_click_with_context(x, y);
     }
 
-    fn return_to_singws(&mut self) {
+    pub(crate) fn return_to_singws(&mut self) {
         if !self.session_current() {
             return;
         }
-        self.host_focus_restored = false;
+        self.w.session_restored = Some(false);
         self.w.call("activate_host", vec![json!({"id": 1, "host_focus_restored": false})], json!({}));
     }
 
-    fn early(&mut self, reason: &str) {
-        if self.handoff_scheduled {
+    pub(crate) fn early(&mut self, reason: &str) {
+        if self.w.handoff_scheduled {
             return;
         }
-        self.handoff_scheduled = true;
+        self.w.handoff_scheduled = true;
         self.w.diag(format!("[KARAFUN] early show-screen handoff scheduled reason={reason}"));
         self.w.call("ui_thread", vec![], json!({}));
         if self.session_current() {
             self.w.call("handoff_show_screen", vec![], json!({}));
         }
         self.w.call("handoff_dispatched_set", vec![], json!({}));
+        self.w.event_flag = true;
     }
 
-    fn watch(&mut self) {
+    pub(crate) fn watch(&mut self) {
         self.w.call("thread", vec![], json!({"thread_name": "karafun-start-watch"}));
         let started = self.w.t;
         loop {
@@ -131,8 +129,8 @@ impl<'w, 'a> H<'w, 'a> {
             self.w.call("menu_state", vec![], json!({}));
             let state = self.w.ask("menu_state").as_str().unwrap_or("").to_string();
             if state == "PLAYING" {
-                if truthy(self.entry.get("karafun_native_retry_sent")) && !self.native {
-                    self.native = true;
+                if truthy(self.entry.get("karafun_native_retry_sent")) && !self.w.native {
+                    self.w.native = true;
                     self.w.call("ui_thread", vec![], json!({}));
                     self.w.call("save_settings", vec![], json!({}));
                     self.w.diag("[KARAFUN-AUTO] learned: native double-click needed on this Mac".into());
@@ -165,7 +163,13 @@ impl<'w, 'a> H<'w, 'a> {
                     self.w.diag("[KARAFUN-AUTO] learned native click did not start playback; trying accessibility double-click".into());
                     let p = self.entry.get("karafun_result_activation_point").cloned().unwrap_or(Value::Null);
                     self.w.call("click_point_script", vec![p], json!({}));
-                    self.w.call("session_script", vec![json!("click-script")], json!({"timeout": 5}));
+                    if self.w.unified {
+                        if self.w.session_script("click-script", 5).is_err() {
+                            return;
+                        }
+                    } else {
+                        self.w.call("session_script", vec![json!("click-script")], json!({"timeout": 5}));
+                    }
                 }
             }
             self.w.sleep(0.5);
@@ -174,9 +178,12 @@ impl<'w, 'a> H<'w, 'a> {
 }
 
 pub fn run(sc: &Scenario, answers: &[Value]) -> Outcome {
-    let mut w = World { answers, pos: 0, calls: vec![], log: vec![], sleeps: vec![], t: 100.0, requires: 0, end_session_at: None, order_error: None, declined: None };
-    let (entry, native, restored) = {
-        let mut h = H { w: &mut w, entry: sc.entry.clone(), native: sc.native_double_click, bgm_scheduled: false, handoff_scheduled: false, host_focus_restored: true };
+    let mut w = World::new(answers, None);
+    w.native = sc.native_double_click;
+    w.session_restored = Some(true);
+    let mut entry = sc.entry.clone();
+    {
+        let mut h = H { w: &mut w, entry: &mut entry };
         for op in &sc.ops {
             match op[0].as_str().unwrap_or("") {
                 "bgm" => h.bgm(op[1].as_str().unwrap_or("")),
@@ -190,8 +197,8 @@ pub fn run(sc: &Scenario, answers: &[Value]) -> Outcome {
                 break;
             }
         }
-        (h.entry, h.native, h.host_focus_restored)
-    };
+    }
+    let (native, restored) = (w.native, w.session_restored.unwrap_or(true));
     let world = json!({"calls": w.calls, "log": w.log, "sleeps": w.sleeps, "final_clock": w.t, "order_error": w.order_error, "declined": w.declined, "consumed": w.pos});
     Outcome { entry, native_double_click: native, session: json!({"id": 1, "host_focus_restored": restored}), world }
 }

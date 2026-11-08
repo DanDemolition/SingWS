@@ -27,7 +27,7 @@ fn pair(w: &mut World, kind: &str) -> (bool, String) {
     (v[0].as_bool().unwrap_or(false), v[1].as_str().unwrap_or("").to_string())
 }
 
-fn setup(w: &mut World, sc: &Scenario, entry: &mut Map<String, Value>) -> Result<bool, String> {
+pub(crate) fn setup(w: &mut World, sc: &Scenario, entry: &mut Map<String, Value>) -> Result<bool, String> {
     w.require()?;
     for k in STALE {
         entry.remove(k);
@@ -38,6 +38,9 @@ fn setup(w: &mut World, sc: &Scenario, entry: &mut Map<String, Value>) -> Result
     let was_running = w.ask("running").as_bool().unwrap_or(false);
     if !was_running {
         w.call("ui_thread", vec![], json!({}));
+        if w.unified {
+            w.call("set_status", vec![json!("launching")], json!({"message": "Starting KaraFun...", "notify": null}));
+        }
     }
     w.call("open_karafun", vec![], json!({}));
     if !w.ask("open").as_bool().unwrap_or(false) {
@@ -45,7 +48,7 @@ fn setup(w: &mut World, sc: &Scenario, entry: &mut Map<String, Value>) -> Result
         return Err(if e.is_empty() { "KaraFun could not be opened".to_string() } else { e });
     }
     w.require()?;
-    let current = w.ask("session_current").as_bool().unwrap_or(false);
+    let current = w.session_current();
     w.call("wait_until_ready", vec![], json!({"session_current": current, "was_running": was_running}));
     let err = w.ask("wait");
     if let Some(msg) = err.as_str() {
@@ -68,7 +71,7 @@ fn setup(w: &mut World, sc: &Scenario, entry: &mut Map<String, Value>) -> Result
 }
 
 pub fn run(sc: &Scenario, answers: &[Value]) -> Outcome {
-    let mut w = World { answers, pos: 0, calls: vec![], log: vec![], sleeps: vec![], t: 100.0, requires: 0, end_session_at: sc.end_session_at, order_error: None, declined: None };
+    let mut w = World::new(answers, sc.end_session_at);
     let mut entry = sc.entry.clone();
     let result = match setup(&mut w, sc, &mut entry) {
         Ok(r) => json!({"ok": true, "was_running": r}),

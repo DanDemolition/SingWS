@@ -121,7 +121,10 @@ def build_world(rec, preds):
 
         def _run_on_ui_thread(self, fn):
             R.call("ui_thread")
-            fn()
+            try:
+                fn()
+            except Exception:  # noqa: BLE001 - an exception on the UI thread never reaches the worker
+                pass
 
         def _open_karafun_for_entry(self, entry):
             R.call("open_karafun")
@@ -153,7 +156,11 @@ def build_world(rec, preds):
             if lines == "diag-script":
                 v = R.ask("diag", lambda r: [r.random() < 0.7, r.choice(["window ok", "", "x" * 1000]), r.choice(["", "diag error"])])
                 return (bool(v[0]), v[1], v[2])
-            v = R.ask("session_script", lambda r: [r.random() < 0.8, r.choice(SCRIPT_TEXTS), r.choice(SCRIPT_ERRS)])
+            def make(r):
+                if lines == "probe-script" and sc.get("menu_mode") == "stubborn":
+                    return [True, "IDLE", ""]
+                return [r.random() < 0.8, r.choice(texts_for(lines)), r.choice(SCRIPT_ERRS)]
+            v = R.ask("session_script", make)
             return (bool(v[0]), v[1], v[2])
 
         def _karafun_search_diag_script(self, title):
@@ -219,7 +226,15 @@ def build_world(rec, preds):
 
         def _karafun_playback_menu_state(self):
             R.call("menu_state")
-            return R.ask("menu_state", lambda r: r.choice(["PLAYING", "IDLE", "IDLE", "UNKNOWN"]))
+            def make(r):
+                mode = sc.get("menu_mode")
+                R.menu_asks = getattr(R, "menu_asks", 0) + 1
+                if mode == "stubborn":
+                    return "IDLE"
+                if mode == "slow":
+                    return "IDLE" if R.menu_asks <= 10 else "PLAYING"
+                return r.choice(["PLAYING", "IDLE", "IDLE", "UNKNOWN"])
+            return R.ask("menu_state", make)
 
         def _karafun_run_window_script(self, lines, timeout=None):
             R.call("window_script", lines, timeout=timeout)
@@ -305,7 +320,10 @@ def build_world(rec, preds):
             R.call("thread", thread_name=self._n)
             if self._n == "karafun-search-play":
                 R.armed = True
-            self._t()
+            try:
+                self._t()
+            except Exception:  # noqa: BLE001 - an exception in a thread ends that thread only
+                pass
 
     class Event:
         def __init__(self):
@@ -335,14 +353,48 @@ def build_world(rec, preds):
     return me, g, session
 
 
+def texts_for(script):
+    """What the machine could answer to this script: the right answer first, then the near misses."""
+    script = str(script)
+    if script == "search-script":
+        return ["FOUND|404|202|3:41", "FOUND|404.7|202.2|0:00", "TITLE_ONLY|1|2|", "FIRST|1|2|3:00", "ERROR|No usable KaraFun search result", "SEARCHED", "", "FOUND|1", "x|y|z"]
+    if script == "play-now-queue-script":
+        return ["QUEUED_PAUSED", "QUEUED_PAUSED", "QUEUED", "", " QUEUED_PAUSED ", "weird"]
+    if script.startswith("adjust:"):
+        _, _, ks, _, ts = script.split(":")
+        return [f"ADJUSTED|{ks}|{ts}", f"ADJUSTED|{ks}|{ts}", f" ADJUSTED|{ks}|{ts} ", "ADJUSTED|0|0", "", "weird"]
+    if script.startswith("kt-script:"):
+        return ["ADJUSTED|true|true", "ADJUSTED|true|false", "ADJUSTED|false|true", "ADJUSTED|false|false", "", "weird"]
+    if script == "probe-script":
+        return ["PLAYING", "PLAYING", "IDLE", "UNKNOWN", "ERROR|KaraFun control window not found", "", "weird"]
+    if script == "ready-script":
+        return ["READY", "READY", "weird", ""]
+    return SCRIPT_TEXTS
+
+
 CLOCKS = [0.0, 221.0, 3.0, 0.5, 600.0, 1.0, 59.9, -1.0]
 SCRIPT_TEXTS = ["FOUND|404|202|3:41", "TITLE_ONLY|1|2|", "FIRST|1|2|3:00", "ERROR|No usable KaraFun search result", "SEARCHED", "", "FOUND|1", "FOUND|404.7|202.2|0:00", "x|y|z",
                 "QUEUED_PAUSED", "QUEUED", "READY", "PLAYING", "IDLE", "UNKNOWN", "ADJUSTED|2|0", "ADJUSTED|0|10", "ADJUSTED|true|true", "ADJUSTED|true|false", "ADJUSTED|false|false", "weird"]
 SCRIPT_ERRS = ["", "", "timeout", "AXError -1719", "Invalid index", "not allowed assistive access", "error -1743", "Zoë", "e" * 200]
 
 
+class Lucky:
+    """A lucky scenario's answers lean toward the first (usually successful) choice, so the deep paths of the method are reached as often as the early failures."""
+
+    def __init__(self, r):
+        self.r = r
+
+    def random(self):
+        return self.r.random() ** 3
+
+    def choice(self, seq):
+        return seq[int(len(seq) * self.r.random() ** 2)]
+
+
 def run(code_and_preds, scenario, rng=None, answers=None):
     code, preds = code_and_preds
+    if scenario.get("lucky") and rng is not None:
+        rng = Lucky(rng)
     rec = Recorder(scenario, rng, answers)
     me, g, session = build_world(rec, preds)
     g = dict(g)
@@ -353,7 +405,7 @@ def run(code_and_preds, scenario, rng=None, answers=None):
     try:
         out["returned"] = g["_automate_karafun_search_and_play"](me, entry, key=scenario["key"], tempo_percent=scenario["tempo"]) if scenario["active_ok"] else False
     except Exception as exc:  # noqa: BLE001
-        out["raised"] = f"{type(exc).__name__}: {exc}"
+        out["raised"] = str(exc)
     return {"result": out, "calls": rec.calls, "log": rec.log, "sleeps": rec.sleeps, "entry": entry, "final_clock": rec.t, "answers": rec.answers}
 
 
@@ -372,8 +424,8 @@ def random_scenario(r):
                          "karafun_fast_start_enabled": r.random() < 0.6, "karafun_auto_key_tempo": r.random() < 0.85, "karafun_native_double_click": r.random() < 0.3},
             "entry": entry, "artist": artist, "title": title, "key": r.choice([0, 0, 2, -1, 3, -12, 24]), "tempo": r.choice([None, 100, 100, 90, 110, 75, 250]),
             "request_uid": r.choice(["uid-1", "uid-é"]), "queries": r.choice([["Memory Sugarcult", "Memory"], ["Memory"], [], ["it's"], ["Zoë", "Zoë x"]]),
-            "end_session_at": r.choice([None] * 8 + list(range(1, 30))), "capture_session": r.choice([None, None, True, False]), "handoff_error": r.choice([None, None, None, "no show window"]),
-            "needs_attention": r.random() < 0.3, "launch_error": r.choice([None, None, "launch failed"]), "stuck_handoff": r.random() < 0.1, "active_ok": r.random() < 0.97}
+            "end_session_at": r.choice([None] * 14 + list(range(1, 60))), "capture_session": r.choice([None, None, True, False]), "handoff_error": r.choice([None, None, None, "no show window"]),
+            "needs_attention": r.random() < 0.3, "launch_error": r.choice([None, None, "launch failed"]), "stuck_handoff": r.random() < 0.1, "active_ok": r.random() < 0.97, "lucky": r.random() < 0.6, "menu_mode": r.choice([None] * 5 + ["stubborn", "slow", "slow"])}
 
 
 def main(argv=None):

@@ -14,7 +14,7 @@ fn run(lines: &[String], secs: u64) -> Answer {
     // the app runs a search with an 18 s limit; SINGWS_LIVE_TIMEOUT overrides it when KaraFun is slow to answer
     let secs = std::env::var("SINGWS_LIVE_TIMEOUT").ok().and_then(|v| v.parse().ok()).unwrap_or(secs);
     let r = run_applescript(&lines.join("\n"), Duration::from_secs(secs));
-    Answer { ok: r.ok, text: r.out.trim().to_string(), error: r.err }
+    Answer { ok: r.ok, text: r.out.trim().to_string(), error: r.err, abort: None }
 }
 
 fn main() {
