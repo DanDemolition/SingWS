@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 
 pub mod silence;
+pub mod tail;
 
 use std::fmt;
 use std::fs::File;
