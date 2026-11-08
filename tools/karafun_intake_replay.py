@@ -100,17 +100,17 @@ def run(intake, scenario):
     return {"result": result, "calls": rec.calls, "log": rec.log, "entry": world["entry"]}
 
 
-KEYS = [0, 2, -3, 12, 13, -13, 99, None, "", "3", " 4 ", "-5", "+6", "abc", "1.5", 2.7, -2.7, 0.0, 1e30, -1e30, True, False, "000000000000000000000000000012", "99999999999999999999999999", "-99999999999999999999999999"]
-TEMPOS = [None, 100, 90, 110, 49, 50, 200, 201, 0, -5, "", "90", " 120 ", "abc", "99.5", 49.9, 200.5, 1e30, -1e30, True, False, "000000000000000000000000000090", "99999999999999999999999999"]
+KEYS = [0, 1, 2, -3, 12, 13, -13, 99, None, "", "3", " 4 ", "-5", "+6", "abc", "1.5", 2.7, -2.7, 0.0, 1e30, -1e30, True, False, "000000000000000000000000000012", "99999999999999999999999999", "-99999999999999999999999999", "0", "-0", "00", "1_0", "\u0663", "999999999999999999", "1000000000000000000"]
+TEMPOS = [None, 100, 90, 110, 49, 50, 200, 201, 0, -5, "", "90", " 120 ", "abc", "99.5", 49.9, 200.5, 1e30, -1e30, True, False, "000000000000000000000000000090", "99999999999999999999999999", "0", "1_00", "\u0669\u0660"]
 
 
 def random_scenario(r):
     entry = {}
     if r.random() < 0.6:
-        entry["karafun_submission_state"] = r.choice(["karafun_queued", "karafun_completed", "karafun_pending", " Karafun_Pending ", "KARAFUN_QUEUED", "", None, "other", "karafun_failed"])
+        entry["karafun_submission_state"] = r.choice(["karafun_queued", "karafun_completed", "karafun_pending", " Karafun_Pending ", "KARAFUN_QUEUED", "", None, "other", "karafun_failed", [], {}, [1], {"a": 1}])
     if r.random() < 0.7:
         entry["karafun_pending_at"] = r.choice([0, 0.0, None, 1_700_000_100.0 - 5, 1_700_000_100.0 - 29.5, 1_700_000_100.0 - 30, 1_700_000_100.0 - 31, 1_700_000_100,
-                                                "1700000090.5", "abc", "", " 1700000000 ", True, 5, -3.5])
+                                                "1700000090.5", "abc", "", " 1700000000 ", True, 5, -3.5, 1, 1.0])
     if r.random() < 0.3:
         entry["karafun_explicit_play_sent"] = True
     artist, title = r.choice([("Sugarcult", "Memory"), ("", "Memory"), ("Zoë", ""), ("a", "b"), ("", ""), ("A", "Zoë (live)")])

@@ -132,8 +132,8 @@ def random_scenario(r):
     entry = {}
     for k in ("karafun_pending_at", "karafun_adjustment_applied", "other"):
         if r.random() < 0.5:
-            entry[k] = r.choice(["sig", "k+2/t90", 5, None])
-    sig = r.choice(["k+2/t90", "k0/t100"])
+            entry[k] = r.choice(["sig", "k+2/t90", 5, None, 1, 0, True, False, 7, "1"])
+    sig = r.choice(["k+2/t90", "k0/t100", "5", "1", "True", "7", "0"])
     return {"result": {"ok": ok, "message": msg}, "entry": entry, "current": r.random() < 0.9, "handoff_error": r.choice([None, None, None, "no show window", "Zoë"]),
             "needs_attention": r.random() < 0.3, "apple_err": r.random() < 0.15, "ax_err": r.random() < 0.15, "capture_session": r.choice([None, True, False]),
             "adjustment_signature": sig, "request_uid": r.choice(["uid-1", "uid-é"]), "requested_key": r.choice([0, 2, -1]), "requested_tempo": r.choice([100, 90, 110]),

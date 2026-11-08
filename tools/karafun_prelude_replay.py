@@ -187,7 +187,7 @@ def random_scenario(r):
     sig = r.choice(["k+2/t90", "k0/t100", "k-1/t110"])
     return {"settings": {"karafun_auto_key_tempo": r.random() < 0.8},
             "found": found, "last_error": r.choice(["", "boom", "window not ready"]), "needs_adjustment": r.random() < 0.6, "adjustment_signature": sig,
-            "requested_key": r.choice([0, 2, -1, 3, 0, -12, 24]), "requested_tempo": r.choice([100, 90, 110, 75, 125, 101, 99, 250]),
+            "requested_key": r.choice([0, 2, -1, 3, 0, -12, 24, 1]), "requested_tempo": r.choice([100, 90, 110, 75, 125, 101, 99, 250]),
             "selected_query": r.choice(["Memory Sugarcult", "it's", "Zoë"]), "entry": entry,
             "end_session_at": r.choice([None] * 8 + [1, 2, 3, 4, 5])}
 

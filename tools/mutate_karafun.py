@@ -29,6 +29,23 @@ import mutate_songend as ms  # noqa: E402  (code_spans, PATTERNS)
 
 # "L<line>:<old>-><new>" -> "equivalent: why" | "GAP: what the corpus lacks"
 SURVIVOR_NOTES: dict = {
+    'prelude.rs|if secs != 0.0 && secs > 0.0 {| > -> >= ': 'equivalent: secs is already known to be non-zero there, so > 0.0 and >= 0.0 agree',
+    'prelude.rs|if w.ask("apply_duration").as_bool().unwrap_or(false) {|false->true': 'equivalent under the replay contract: the scripted world always answers with the right type, so this default is never read',
+    'setup.rs|(v[0].as_bool().unwrap_or(false), v[1].as_str().unwrap_or("").to_strin|false->true': 'equivalent under the replay contract: the scripted world always answers with the right type, so this default is never read',
+    'setup.rs|let was_running = w.ask("running").as_bool().unwrap_or(false);|false->true': 'equivalent under the replay contract: the scripted world always answers with the right type, so this default is never read',
+    'setup.rs|if !w.ask("open").as_bool().unwrap_or(false) {|false->true': 'equivalent under the replay contract: the scripted world always answers with the right type, so this default is never read',
+    'setup.rs|let current = w.ask("session_current").as_bool().unwrap_or(false);|false->true': 'equivalent under the replay contract: the scripted world always answers with the right type, so this default is never read',
+    'setup.rs|let mut w = World { answers, pos: 0, calls: vec![], log: vec![], sleep|100.0->99.0': 'equivalent: the start value of the fake clock is not observable; only sleeps and answers are compared',
+    'finish.rs|Some(Value::Number(n)) if n.as_f64().map_or(false, |f| f != 0.0) => n.|false->true': 'equivalent: a JSON number always converts to f64, so the default is unreachable',
+    'intake.rs|Value::Number(n) => n.as_f64().map_or(true, |f| f != 0.0),|true->false': 'equivalent: a JSON number always converts to f64, so the default is unreachable',
+    'intake.rs|Value::Bool(b) => Int::Value(if *b { 1.0 } else { 0.0 }),|0.0->1.0': 'equivalent: the caller tests truthiness first (int(key or 0)), so False never reaches py_int; the tempo path maps False the same way only after the None check and a False tempo is covered by the 50 clamp (0 and 1 both clamp to 50)',
+    'intake.rs|let mag = if trimmed.is_empty() { 0.0 } else if trimmed.len() > 18 { 1|0->1': 'equivalent: for 18 digits or fewer the parse cannot fail, so the fallback is unreachable',
+    'intake.rs|let mag = if trimmed.is_empty() { 0.0 } else if trimmed.len() > 18 { 1| > -> >= ': 'equivalent: the value is only compared with bounds of at most 200, so an 18-digit number and 1e30 clamp identically',
+    'intake.rs|let mag = if trimmed.is_empty() { 0.0 } else if trimmed.len() > 18 { 1|18->19': 'equivalent: the value is only compared with bounds of at most 200, so an 18- or 19-digit number and 1e30 clamp identically',
+    'intake.rs|None => 0.0,|0.0->1.0': 'equivalent: the pending age is measured against a 30 s window from a clock reading near 1.7e9, so 0 and 1 are both far older',
+    'intake.rs|Some(v) if !truthy(v) => 0.0,|0.0->1.0': 'equivalent: the pending age is measured against a 30 s window from a clock reading near 1.7e9, so 0 and 1 are both far older',
+    'intake.rs|Some(Value::Bool(_)) => 1.0,|1.0->2.0': 'equivalent: the pending age is measured against a 30 s window from a clock reading near 1.7e9, so 1 and 2 are both far older',
+    'intake.rs|Some(Value::Number(n)) => n.as_f64().unwrap_or(0.0),|0.0->1.0': 'equivalent: a JSON number always converts to f64, so the default is unreachable',
     # --- flow.rs (2026-11-08) ---
     'flow.rs|let ok = v[0].as_bool().unwrap_or(false);|false->true': 'equivalent under the replay contract: the scripted world always answers with the right type, so this default is never read',
     'flow.rs|self.ask("mouse_click").as_bool().unwrap_or(false)|false->true': 'equivalent under the replay contract: the scripted world always answers with the right type, so this default is never read',
