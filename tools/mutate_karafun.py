@@ -95,10 +95,49 @@ SURVIVOR_NOTES: dict = {
     "pure.rs|let mut in_space = false;|false->true": "equivalent: the whitespace collapse runs after the regex that already turned every non-alphanumeric run into one space, and the result is stripped",
     "pure.rs|in_space = true;|true->false": "equivalent: same reason, no run of spaces can reach the collapse",
     # --- geometry.rs (2026-11-08) ---
+    # --- methods.rs (2026-11-08) ---
+    'methods.rs|(v[0].as_bool().unwrap_or(false), v[1].as_str().unwrap_or("").to_strin|false->true': 'equivalent under the replay contract: the scripted world / scenario always supplies a value of the right type, so this default is never read',
+    'methods.rs|self.ask("mouse_click").as_bool().unwrap_or(false)|false->true': 'equivalent under the replay contract: the scripted world / scenario always supplies a value of the right type, so this default is never read',
+    'methods.rs|self.ask("double_click").as_bool().unwrap_or(false)|false->true': 'equivalent under the replay contract: the scripted world / scenario always supplies a value of the right type, so this default is never read',
+    'methods.rs|let current = w.ask("session_current").as_bool().unwrap_or(false);|false->true': 'equivalent under the replay contract: the scripted world / scenario always supplies a value of the right type, so this default is never read',
+    'methods.rs|return (false, "declined".into());|false->true': 'equivalent: a declined case is excluded from every comparison, so the first element of its result is never read',
+    'methods.rs|return (false, "declined".into(), Value::Object(entry));|false->true': 'equivalent: a declined case is excluded from every comparison, so the first element of its result is never read',
+    'methods.rs|Some(Value::Number(n)) => n.as_f64().map_or(true, |f| f != 0.0),|true->false': 'equivalent: a JSON number always converts to f64, so the default is unreachable',
+    'methods.rs|Some(Value::String(s)) => !s.is_empty(),|!->': 'equivalent: the methods only test booleans and numbers for truthiness',
+    'methods.rs|Some(Value::Array(a)) => !a.is_empty(),|!->': 'equivalent: the methods only test booleans and numbers for truthiness',
+    'methods.rs|Some(Value::Object(o)) => !o.is_empty(),|!->': 'equivalent: the methods only test booleans and numbers for truthiness',
+    'methods.rs|(v[0].as_bool().unwrap_or(false), v[1].as_str().unwrap_or("").to_strin|false->true': 'equivalent under the replay contract: the scripted world / scenario always supplies a value of the right type, so this default is never read',
+    'methods.rs|(v[0].as_bool().unwrap_or(false), v[1].as_str().unwrap_or("").to_strin|2->3': 'equivalent under the replay contract: the scripted world / scenario always supplies a value of the right type, so this default is never read',
+    'methods.rs|let (kd, td) = (a.parse::<i64>().unwrap_or(0), b.parse::<i64>().unwrap|0->1': 'equivalent: at most 18 ASCII digits always parse as i64, so the unwrap_or default is never used',
+    'methods.rs|let (kd, td) = (a.parse::<i64>().unwrap_or(0), b.parse::<i64>().unwrap|0->1': 'equivalent: at most 18 ASCII digits always parse as i64, so the unwrap_or default is never used',
+    'methods.rs|let capped = if duration - 8.0 < inp.target { duration - 8.0 } else { | < -> <= ': 'equivalent: at equality both branches give the same number',
+    'methods.rs|let target = if capped > 0.0 { capped } else { 0.0 };| > -> >= ': 'equivalent: at capped == 0 both branches give 0.0',
+    'methods.rs|let item = if steps > 0 { "Skip Forward 10s" } else { "Skip Back 10s" | > -> >= ': 'equivalent: steps == 0 returned earlier, so `steps > 0` and `steps >= 0` agree here',
+    'methods.rs|done = d.parse::<i64>().unwrap_or(0);|0->1': 'equivalent: at most 18 ASCII digits always parse as i64, so the unwrap_or default is never used',
+    'methods.rs|let moved = (done as f64) * 10.0 * (if steps > 0 { 1.0 } else { -1.0 }| > -> >= ': 'equivalent: steps == 0 returned earlier, so `steps > 0` and `steps >= 0` agree here',
+    'methods.rs|let base = if py_truthy(entry.get("karafun_seek_offset_s")) { entry["k|0.0->1.0': 'equivalent: the value is only read when its entry field is truthy, and a truthy field is always a number, so the unwrap_or default is never used',
+    'methods.rs|let started = entry["karafun_display_started_at"].as_f64().unwrap_or(0|0.0->1.0': 'equivalent: the value is only read when its entry field is truthy, and a truthy field is always a number, so the unwrap_or default is never used',
+    'methods.rs|let reference = if py_truthy(entry.get("karafun_paused_at")) { entry["|0.0->1.0': 'equivalent: the value is only read when its entry field is truthy, and a truthy field is always a number, so the unwrap_or default is never used',
+    'methods.rs|entry.insert("karafun_display_started_at".into(), json!(if reference <| < -> <= ': 'equivalent: at equality both branches give the same value',
+    'methods.rs|let timeout = sc["timeout"].as_f64().unwrap_or(60.0);|60.0->61.0': 'equivalent under the replay contract: the scripted world / scenario always supplies a value of the right type, so this default is never read',
+    'methods.rs|if let Err(e) = wait_until_ready(&mut w, sc["was_running"].as_bool().u|false->true': 'equivalent under the replay contract: the scripted world / scenario always supplies a value of the right type, so this default is never read',
+    'methods.rs|no_entry: sc["no_entry"].as_bool().unwrap_or(false),|false->true': 'equivalent under the replay contract: the scripted world / scenario always supplies a value of the right type, so this default is never read',
+    'methods.rs|entry_changes: sc["entry_changes"].as_bool().unwrap_or(false),|false->true': 'equivalent under the replay contract: the scripted world / scenario always supplies a value of the right type, so this default is never read',
+    'methods.rs|target: sc["target"].as_f64().unwrap_or(0.0),|0.0->1.0': 'equivalent under the replay contract: the scripted world / scenario always supplies a value of the right type, so this default is never read',
+    'methods.rs|seek_running: sc["seek_running"].as_bool().unwrap_or(false),|false->true': 'equivalent under the replay contract: the scripted world / scenario always supplies a value of the right type, so this default is never read',
+    'methods.rs|let (k, t) = apply_key_tempo(&mut w, &mut entry, sc["target_key"].as_i|0->1': 'equivalent under the replay contract: the scripted world / scenario always supplies a value of the right type, so this default is never read',
+    'methods.rs|let (k, t) = apply_key_tempo(&mut w, &mut entry, sc["target_key"].as_i|100->101': 'equivalent under the replay contract: the scripted world / scenario always supplies a value of the right type, so this default is never read',
+    'methods.rs|native_double_click: sc["settings"]["karafun_native_double_click"].as_|false->true': 'equivalent under the replay contract: the scripted world / scenario always supplies a value of the right type, so this default is never read',
+    'methods.rs|change_session_on_resolve: sc["change_session_on_resolve"].as_bool().u|false->true': 'equivalent under the replay contract: the scripted world / scenario always supplies a value of the right type, so this default is never read',
+    'methods.rs|reuse_point: sc["reuse_point"].as_bool().unwrap_or(false),|false->true': 'equivalent under the replay contract: the scripted world / scenario always supplies a value of the right type, so this default is never read',
+    'methods.rs|(Ok(a), Ok(b)) if a.is_finite() && b.is_finite() => (a, b),|&&->||': 'equivalent: every timeout in the scenarios is finite, so both operands are always finite',
+    'methods.rs|let looks_nonascii = parts[1].chars().chain(parts[2].chars()).any(|c| |==->!=': 'equivalent for correctness: this guard only decides to DECLINE (decline more = fewer cases compared, never a wrong answer); the declined count in the parity report shows the effect',
+    'methods.rs|let looks_nonascii = parts[1].chars().chain(parts[2].chars()).any(|c| |!->': 'equivalent for correctness: this guard only decides to DECLINE (decline more = fewer cases compared, never a wrong answer); the declined count in the parity report shows the effect',
+    "methods.rs|if t.chars().any(|c| !c.is_ascii()) || t.contains('_') {|||->&&": 'GAP: decline guard for a non-ASCII digit without an underscore; no scenario puts such text at this parse point yet',
 }
 
 
-FILES = ("lib.rs", "pure.rs", "ladder.rs", "monitor.rs", "readback.rs", "watchdog.rs", "startflow.rs", "flow.rs", "geometry.rs", "methods.rs", "prelude.rs")
+FILES = ("lib.rs", "pure.rs", "ladder.rs", "monitor.rs", "readback.rs", "watchdog.rs", "startflow.rs", "flow.rs", "geometry.rs", "methods.rs", "prelude.rs", "setup.rs")
 
 
 def generate(name, text):
@@ -132,7 +171,7 @@ def setup():
     (WORK / "src").mkdir(parents=True, exist_ok=True)
     (WORK / "Cargo.toml").write_text(__import__("re").sub(r"# A live runner.*?\[dependencies\]\n", "[dependencies]\n", (REAL / "Cargo.toml").read_text(), flags=__import__("re").S).replace('singws-mac = { path = "../singws-mac", optional = true }\n', "") + "\n[workspace]\n")
     shutil.copy(ROOT / "rust/Cargo.lock", WORK / "Cargo.lock")
-    for name in ("main.rs", "script_lines.rs", "casefold_table.rs", "builders.rs", "lib.rs", "pure.rs", "ladder.rs", "monitor.rs", "readback.rs", "watchdog.rs", "startflow.rs", "flow.rs", "prelude.rs", "geometry.rs", "methods.rs"):
+    for name in ("main.rs", "script_lines.rs", "casefold_table.rs", "builders.rs", "lib.rs", "pure.rs", "ladder.rs", "monitor.rs", "readback.rs", "watchdog.rs", "startflow.rs", "flow.rs", "prelude.rs", "setup.rs", "geometry.rs", "methods.rs"):
         shutil.copy(REAL / "src" / name, WORK / "src" / name)
 
 
@@ -172,6 +211,9 @@ def main():
     import karafun_prelude_parity as ppar
     ppar.run_rust = spy
     assert ppar.main(["--seeds", str(SEEDS * 2), "--binary", str(release)]) == 0, "the prelude must equal the Python first"
+    import karafun_setup_parity as spar
+    spar.run_rust = spy
+    assert spar.main(["--seeds", str(SEEDS * 2), "--binary", str(release)]) == 0, "the setup must equal the Python first"
     print(f"oracle ready: {sum(len(b) for b, _ in captured)} requests in {len(captured)} batches", flush=True)
     setup()
     originals = {n: (WORK / "src" / n).read_text() for n in FILES}

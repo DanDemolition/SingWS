@@ -11,6 +11,7 @@ pub mod monitor;
 pub mod pure;
 pub mod flow;
 pub mod prelude;
+pub mod setup;
 pub mod methods;
 pub mod geometry;
 pub mod readback;

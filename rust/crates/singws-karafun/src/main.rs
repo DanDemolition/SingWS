@@ -55,6 +55,7 @@ fn answer(v: &Value) -> Value {
         "method" => singws_karafun::methods::run(s("method"), &v["scenario"], v["answers"].as_array().map(|a| a.as_slice()).unwrap_or(&[])),
         "flow" => run_flow(v),
         "prelude" => run_prelude(v),
+        "setup" => run_setup(v),
         "startflow" => {
             let b = |k: &str| v[k].as_bool().unwrap_or(false);
             let act = startflow::play_action(&startflow::PlayInput { fast_start: b("fast_start"), managed_handoff: b("managed_handoff"), managed_start_state: s("managed_start_state"),
@@ -283,6 +284,19 @@ fn run_prelude(v: &Value) -> Value {
         requested_tempo: sc["requested_tempo"].as_i64().unwrap_or(100),
         selected_query: s("selected_query"),
         entry: sc["entry"].as_object().cloned().unwrap_or_default(),
+        end_session_at: sc["end_session_at"].as_i64(),
+    };
+    let answers: Vec<Value> = v["answers"].as_array().cloned().unwrap_or_default();
+    let out = run(&scenario, &answers);
+    json!({"result": out.result, "entry": Value::Object(out.entry), "world": out.world})
+}
+
+fn run_setup(v: &Value) -> Value {
+    use singws_karafun::setup::{run, Scenario};
+    let sc = &v["scenario"];
+    let scenario = Scenario {
+        entry: sc["entry"].as_object().cloned().unwrap_or_default(),
+        launch_error: sc["launch_error"].as_str().map(|s| s.to_string()),
         end_session_at: sc["end_session_at"].as_i64(),
     };
     let answers: Vec<Value> = v["answers"].as_array().cloned().unwrap_or_default();
