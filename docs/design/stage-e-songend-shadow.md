@@ -27,3 +27,12 @@ model working, not a bug. Anything else is a finding: read the song's `[END-AUDI
   and the driver + Rust model start the music at the same position for the same reason (136 of 151 identical, the other 15 never start the music before the song ends, in both; 0 different).
 * End to end through the real `update_time_left` with the shadow on: normal songs compare clean; a song whose ticks were stalled over the pre-start window is flagged.
 * NOT seen in a real show. The 4 hooks are `_songend_shadow_note` calls (a settings lookup when off).
+
+## Findings from the first real show (2026-11-06, Intel, 1.0.3.1): 7 MISMATCH lines, all shadow-side
+* 5 of 7 (songs 12, 18, 24, 29, 34; up to 73 s apart) were the SHADOW reading the raw transport duration, which for MP3+G is only the CDG graphics length. The app floors it with the real
+  audio length (`_effective_karaoke_duration_ns`); the model, given the short graphics duration, handed the music over at the graphics end. Replaying songs 18 and 34 through the
+  model with the app's real facts reproduced the app exactly (234.5 s and 320.5 s `prestart`). Fixed in `note_music_start`: the shadow uses the same floored duration.
+  Test: `test_a_graphics_short_disc_uses_the_apps_floored_duration` (fails on the old code).
+* 1 (song 39) was a 0.1 s tie between `verified_end` and `prestart`, both meaning "the music starts at the end of the audio": now treated as equal within 0.5 s.
+* The Python music decisions were correct in every one of these songs; nothing here changed what the app does.
+* Song 43 (310.3 vs 314.0) is explained by the same duration flooring. NOT re-checked against the real show again until the next show log.

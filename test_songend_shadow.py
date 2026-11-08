@@ -58,7 +58,7 @@ class Pure(unittest.TestCase):
         self.assertEqual(se.compare(191.0, "verified_end", {"pos_s": 191.0, "reason": "verified_end"}), [])
         self.assertEqual(se.compare(191.0, "verified_end", {"pos_s": 192.4, "reason": "verified_end"}), [])
         self.assertEqual(len(se.compare(191.0, "verified_end", {"pos_s": 193.0, "reason": "verified_end"})), 1)
-        self.assertEqual(len(se.compare(191.0, "verified_end", {"pos_s": 191.0, "reason": "prestart"})), 1)
+        self.assertEqual(len(se.compare(191.0, "verified_end", {"pos_s": 191.0, "reason": "handoff:karaoke_end_overlap"})), 1)  # (verified_end vs prestart within 0.5 s is a tie, see below)
         self.assertIn("never started", se.compare(191.0, "prestart", None)[0])
 
     def test_announce_lines(self):
@@ -99,6 +99,12 @@ class WithTheModel(unittest.TestCase):
         r = se.predict(se.build_spec({"settings": s, "mode": "cdg", "media_dur_s": 200.0}))
         self.assertAlmostEqual(r["pos_s"], 192.0, delta=0.5)
 
+    def test_verified_end_and_prestart_within_half_a_second_are_a_tie(self):
+        rs = {"pos_s": 374.0, "reason": "prestart"}
+        self.assertEqual(se.compare(373.9, "verified_end", rs), [])
+        self.assertTrue(se.compare(372.9, "verified_end", rs), "one second apart is a real difference")
+        self.assertTrue(se.compare(374.0, "handoff:karaoke_end_overlap", rs), "other reasons still differ")
+
     def test_run_shadow_clean_and_mismatch(self):
         lines = []
         facts = {"settings": DEFAULT_SETTINGS, "mode": "cdg", "media_dur_s": 200.0, "audio_end_s": 193.0, "audio_duration_s": 200.0, "visual_end_s": 195.0}
@@ -120,6 +126,20 @@ class WithTheModel(unittest.TestCase):
         thread.join(20)
         self.assertTrue(any("first check clean" in x for x in lines), lines)
         self.assertIsNone(se.note_music_start(app, "prestart", lines.append))  # only the FIRST start of a song counts
+
+    def test_a_graphics_short_disc_uses_the_apps_floored_duration(self):
+        """2026-11-06 show: mpv reports only the CDG graphics length; the app floors it with the real audio length. The shadow must do the same, or the model
+        hands the music over at the short graphics end (5 of 7 mismatches)."""
+        transport = types.SimpleNamespace(query_times_ns=lambda: (150 * se.NS, int(191.2 * se.NS)))
+        mk = lambda: types.SimpleNamespace(settings={**DEFAULT_SETTINGS, "songend_shadow": True}, karaoke_transport=transport, bg_music=types.SimpleNamespace(playlist=["a"]))
+        app = mk()
+        app.__dict__.update({"_karaoke_audio_end_s": 193.0, "_karaoke_audio_duration_s": 200.0, "_karaoke_visual_end_s": 195.0, "_bgm_session_started": True})
+        app._effective_karaoke_duration_ns = lambda d: max(d, int(200.0 * se.NS))
+        lines = []
+        se.note_song_start(app, "cdg")
+        se.note_music_start(app, "verified_end", lines.append).join(20)
+        self.assertTrue(any("first check clean" in x for x in lines), lines)
+        self.assertFalse(any("MISMATCH" in x for x in lines), lines)
 
     def test_legacy_detector_songs_are_not_compared(self):
         transport = types.SimpleNamespace(query_times_ns=lambda: (200 * se.NS, 100 * se.NS))

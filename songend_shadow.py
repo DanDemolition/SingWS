@@ -237,7 +237,12 @@ def compare(app_pos_s: float, app_reason: str, rs: dict | None) -> list[str]:
     if rs is None:
         return [f"app={app_pos_s:.1f}s ({app_reason}) rust=never started before the song ended"]
     out = []
-    if abs(rs["pos_s"] - app_pos_s) > TOLERANCE_S or rs.get("reason") != app_reason:
+    same_reason = rs.get("reason") == app_reason
+    # The verified-end fade and the generic pre-start both mean "the music starts at the end of the audio"; when they land within half a second of each other
+    # which one wins is a tie, not a disagreement (2026-11-06 song 39: 373.9 s vs 374.0 s).
+    if not same_reason and {rs.get("reason"), app_reason} == {"verified_end", "prestart"} and abs(rs["pos_s"] - app_pos_s) <= 0.5:
+        same_reason = True
+    if abs(rs["pos_s"] - app_pos_s) > TOLERANCE_S or not same_reason:
         out.append(f"app={app_pos_s:.1f}s ({app_reason}) rust={rs['pos_s']:.1f}s ({rs.get('reason')})")
     return out
 
@@ -298,6 +303,16 @@ def note_music_start(app, kind: str, log=None) -> threading.Thread | None:
         if not times or not times[0] or times[1] is None:
             return None
         dur_ns, pos_ns = times
+        # The app keys every end-of-song rule off the duration floored by the real AUDIO length (MP3+G: mpv reports only the graphics stream, often much
+        # shorter). Reading the raw transport duration here made 5 of 7 mismatches in the 2026-11-06 show (the model handed off at the short graphics end).
+        try:
+            eff = getattr(app, "_effective_karaoke_duration_ns", None)
+            if callable(eff):
+                floored = eff(dur_ns)
+                if floored:
+                    dur_ns = floored
+        except Exception:  # noqa: BLE001
+            pass
         settings = {k: app.settings.get(k) for k in SETTING_KEYS if k in app.settings}
         facts = {"settings": settings, "mode": rec["mode"], "media_dur_s": dur_ns / NS, "audio_end_s": app.__dict__.get("_karaoke_audio_end_s"),
                  "audio_duration_s": app.__dict__.get("_karaoke_audio_duration_s"), "visual_end_s": app.__dict__.get("_karaoke_visual_end_s"),
