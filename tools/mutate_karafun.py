@@ -137,7 +137,7 @@ SURVIVOR_NOTES: dict = {
 }
 
 
-FILES = ("lib.rs", "pure.rs", "ladder.rs", "monitor.rs", "readback.rs", "watchdog.rs", "startflow.rs", "flow.rs", "geometry.rs", "methods.rs", "prelude.rs", "setup.rs", "finish.rs", "intake.rs")
+FILES = ("lib.rs", "pure.rs", "ladder.rs", "monitor.rs", "readback.rs", "watchdog.rs", "startflow.rs", "flow.rs", "geometry.rs", "methods.rs", "prelude.rs", "setup.rs", "finish.rs", "intake.rs", "helpers.rs")
 
 
 def generate(name, text):
@@ -171,7 +171,7 @@ def setup():
     (WORK / "src").mkdir(parents=True, exist_ok=True)
     (WORK / "Cargo.toml").write_text(__import__("re").sub(r"# A live runner.*?\[dependencies\]\n", "[dependencies]\n", (REAL / "Cargo.toml").read_text(), flags=__import__("re").S).replace('singws-mac = { path = "../singws-mac", optional = true }\n', "") + "\n[workspace]\n")
     shutil.copy(ROOT / "rust/Cargo.lock", WORK / "Cargo.lock")
-    for name in ("main.rs", "script_lines.rs", "casefold_table.rs", "builders.rs", "lib.rs", "pure.rs", "ladder.rs", "monitor.rs", "readback.rs", "watchdog.rs", "startflow.rs", "flow.rs", "prelude.rs", "setup.rs", "finish.rs", "intake.rs", "geometry.rs", "methods.rs"):
+    for name in ("main.rs", "script_lines.rs", "casefold_table.rs", "builders.rs", "lib.rs", "pure.rs", "ladder.rs", "monitor.rs", "readback.rs", "watchdog.rs", "startflow.rs", "flow.rs", "prelude.rs", "setup.rs", "finish.rs", "intake.rs", "helpers.rs", "geometry.rs", "methods.rs"):
         shutil.copy(REAL / "src" / name, WORK / "src" / name)
 
 
@@ -220,6 +220,9 @@ def main():
     import karafun_intake_parity as ipar
     ipar.run_rust = spy
     assert ipar.main(["--seeds", str(SEEDS * 2), "--binary", str(release)]) == 0, "the intake must equal the Python first"
+    import karafun_helpers_parity as hpar
+    hpar.run_rust = spy
+    assert hpar.main(["--seeds", str(SEEDS * 2), "--binary", str(release)]) == 0, "the helpers must equal the Python first"
     print(f"oracle ready: {sum(len(b) for b, _ in captured)} requests in {len(captured)} batches", flush=True)
     setup()
     originals = {n: (WORK / "src" / n).read_text() for n in FILES}

@@ -58,6 +58,7 @@ fn answer(v: &Value) -> Value {
         "setup" => run_setup(v),
         "finish" => run_finish(v),
         "intake" => run_intake(v),
+        "helpers" => run_helpers(v),
         "startflow" => {
             let b = |k: &str| v[k].as_bool().unwrap_or(false);
             let act = startflow::play_action(&startflow::PlayInput { fast_start: b("fast_start"), managed_handoff: b("managed_handoff"), managed_start_state: s("managed_start_state"),
@@ -346,6 +347,19 @@ fn run_intake(v: &Value) -> Value {
     };
     let out = run(&scenario);
     json!({"result": out.result, "entry": Value::Object(out.entry), "calls": out.calls, "log": out.log, "declined": out.declined})
+}
+
+fn run_helpers(v: &Value) -> Value {
+    use singws_karafun::helpers::{run, Scenario};
+    let sc = &v["scenario"];
+    let scenario = Scenario {
+        native_double_click: sc["settings"]["karafun_native_double_click"].as_bool().unwrap_or(false),
+        entry: sc["entry"].as_object().cloned().unwrap_or_default(),
+        ops: sc["ops"].as_array().map(|a| a.iter().map(|o| o.as_array().cloned().unwrap_or_default()).collect()).unwrap_or_default(),
+    };
+    let answers: Vec<Value> = v["answers"].as_array().cloned().unwrap_or_default();
+    let out = run(&scenario, &answers);
+    json!({"entry": Value::Object(out.entry), "native": out.native_double_click, "session": out.session, "world": out.world})
 }
 
 fn run_watchdog(v: &Value) -> Value {

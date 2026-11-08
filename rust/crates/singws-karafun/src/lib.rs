@@ -14,6 +14,7 @@ pub mod prelude;
 pub mod setup;
 pub mod finish;
 pub mod intake;
+pub mod helpers;
 pub mod methods;
 pub mod geometry;
 pub mod readback;
