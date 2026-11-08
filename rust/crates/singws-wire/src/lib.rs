@@ -183,10 +183,93 @@ pub fn prepare(method: &str, url: &str, params: &Value, data: &Value, json_body:
     Ok(Prepared { method, url, body, content_type, content_length })
 }
 
+
+/// A multipart request as `requests.Request(..., data=, files=).prepare()` builds it (urllib3's `encode_multipart_formdata`, HTML5-style header parameters).
+#[derive(Debug, PartialEq, Eq)]
+pub struct PreparedMultipart {
+    pub method: String,
+    pub url: String,
+    pub body: Vec<u8>,
+    pub content_type: String,
+    pub content_length: usize,
+}
+
+fn plain_header_text(s: &str) -> bool {
+    s.is_ascii() && !s.chars().any(|c| c == '"' || c == '\\' || c.is_control())
+}
+
+/// `files` is an object `{field: {"filename", "content": text | "content_hex": hex, "content_type"}}`; `data` an object of scalar (or list-of-scalar) form fields.
+/// Names and file names with a quote, backslash, control character or non-ASCII letter are declined: urllib3 escapes or encodes them differently between versions.
+pub fn prepare_multipart(method: &str, url: &str, params: &Value, data: &Value, files: &Value, boundary: &str) -> Result<PreparedMultipart, String> {
+    let method = method.to_ascii_uppercase();
+    let url = prepare_url(url, params)?;
+    if !boundary.chars().all(|c| c.is_ascii_alphanumeric()) || boundary.is_empty() {
+        return Err("boundary must be plain letters and digits".into());
+    }
+    let mut body: Vec<u8> = Vec::new();
+    let mut part = |name: &str, filename: Option<&str>, content_type: Option<&str>, content: &[u8]| -> Result<(), String> {
+        for t in [Some(name), filename, content_type].into_iter().flatten() {
+            if !plain_header_text(t) {
+                return Err("a field or file name with a character urllib3 escapes (declined)".into());
+            }
+        }
+        body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+        let mut disposition = format!("Content-Disposition: form-data; name=\"{name}\"");
+        if let Some(f) = filename {
+            disposition.push_str(&format!("; filename=\"{f}\""));
+        }
+        body.extend_from_slice(disposition.as_bytes());
+        body.extend_from_slice(b"\r\n");
+        if let Some(ct) = content_type {
+            body.extend_from_slice(format!("Content-Type: {ct}\r\n").as_bytes());
+        }
+        body.extend_from_slice(b"\r\n");
+        body.extend_from_slice(content);
+        body.extend_from_slice(b"\r\n");
+        Ok(())
+    };
+    if let Value::Object(map) = data {
+        for (k, v) in map {
+            let items: Vec<&Value> = match v {
+                Value::Array(a) => a.iter().collect(),
+                other => vec![other],
+            };
+            for item in items {
+                if let Some(text) = scalar_text(item)? {
+                    part(k, None, None, text.as_bytes())?;
+                }
+            }
+        }
+    } else if !matches!(data, Value::Null) {
+        return Err("data must be an object".into());
+    }
+    let Value::Object(files) = files else { return Err("files must be an object".into()) };
+    for (name, spec) in files {
+        let filename = spec.get("filename").and_then(Value::as_str).ok_or("a file needs a filename")?;
+        let content_type = spec.get("content_type").and_then(Value::as_str);
+        let content: Vec<u8> = if let Some(h) = spec.get("content_hex").and_then(Value::as_str) {
+            (0..h.len() / 2).map(|i| u8::from_str_radix(&h[i * 2..i * 2 + 2], 16).map_err(|e| e.to_string())).collect::<Result<_, _>>()?
+        } else {
+            spec.get("content").and_then(Value::as_str).unwrap_or("").as_bytes().to_vec()
+        };
+        part(name, Some(filename), content_type, &content)?;
+    }
+    body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+    let content_length = body.len();
+    Ok(PreparedMultipart { method, url, body, content_type: format!("multipart/form-data; boundary={boundary}"), content_length })
+}
+
 fn one(request: &Value) -> Value {
     let get = |k: &str| request.get(k).cloned().unwrap_or(Value::Null);
     let method = request.get("method").and_then(Value::as_str).unwrap_or("GET");
     let url = request.get("url").and_then(Value::as_str).unwrap_or("");
+    if request.get("files").is_some() {
+        let boundary = request.get("boundary").and_then(Value::as_str).unwrap_or("");
+        return match prepare_multipart(method, url, &get("params"), &get("data"), &get("files"), boundary) {
+            Ok(p) => json!({"ok": true, "method": p.method, "url": p.url, "body_hex": p.body.iter().map(|b| format!("{b:02x}")).collect::<String>(), "content_type": p.content_type, "content_length": p.content_length}),
+            Err(e) => json!({ "ok": false, "error": e }),
+        };
+    }
     match prepare(method, url, &get("params"), &get("data"), &get("json")) {
         Ok(p) => json!({
             "ok": true,
