@@ -60,6 +60,7 @@ fn answer(v: &Value) -> Value {
         "intake" => run_intake(v),
         "helpers" => run_helpers(v),
         "worker" => run_worker(v),
+        "machine" => singws_karafun::machine::run(&v["scenario"]),
         "startflow" => {
             let b = |k: &str| v[k].as_bool().unwrap_or(false);
             let act = startflow::play_action(&startflow::PlayInput { fast_start: b("fast_start"), managed_handoff: b("managed_handoff"), managed_start_state: s("managed_start_state"),

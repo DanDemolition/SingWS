@@ -16,6 +16,7 @@ pub mod finish;
 pub mod intake;
 pub mod helpers;
 pub mod worker;
+pub mod machine;
 pub mod methods;
 pub mod geometry;
 pub mod readback;
