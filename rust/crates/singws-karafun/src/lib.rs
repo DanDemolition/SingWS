@@ -9,6 +9,7 @@ mod script_lines;
 pub mod ladder;
 pub mod monitor;
 pub mod pure;
+pub mod flow;
 pub mod readback;
 pub mod startflow;
 pub mod watchdog;

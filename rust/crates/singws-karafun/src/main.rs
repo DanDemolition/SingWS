@@ -32,6 +32,7 @@ fn answer(v: &Value) -> Value {
                 watchdog::Check::Warn { log } => json!({"warn": log}),
             }
         }
+        "flow" => run_flow(v),
         "startflow" => {
             let b = |k: &str| v[k].as_bool().unwrap_or(false);
             let act = startflow::play_action(&startflow::PlayInput { fast_start: b("fast_start"), managed_handoff: b("managed_handoff"), managed_start_state: s("managed_start_state"),
@@ -220,6 +221,32 @@ fn run_monitor(v: &Value) -> Value {
 }
 
 /// The duration watchdog after a scripted monitor run: the first timer's delay, what firing the timer at `fire_now` would do, and the re-armed delay.
+fn run_flow(v: &Value) -> Value {
+    use singws_karafun::flow::{run, Scenario};
+    let sc = &v["scenario"];
+    let st = &sc["settings"];
+    let s = |k: &str| sc[k].as_str().unwrap_or("").to_string();
+    let scenario = Scenario {
+        capture: st["karafun_dual_renderer_capture"].as_bool().unwrap_or(false),
+        manage: st["karafun_manage_show_screen"].as_bool().unwrap_or(true),
+        fast_enabled: st["karafun_fast_start_enabled"].as_bool().unwrap_or(true),
+        parts: sc["parts"].as_array().map(|a| a.iter().map(|x| x.as_str().unwrap_or("").to_string()).collect()).unwrap_or_default(),
+        queued: sc["queued_for_adjustment"].as_bool().unwrap_or(false),
+        needs_adjustment: sc["needs_adjustment"].as_bool().unwrap_or(false),
+        adjustment_signature: s("adjustment_signature"),
+        requested_key: sc["requested_key"].as_i64().unwrap_or(0),
+        requested_tempo: sc["requested_tempo"].as_i64().unwrap_or(100),
+        was_running: sc["karafun_was_running"].as_bool().unwrap_or(false),
+        selected_query: s("selected_query"),
+        title: s("title"),
+        entry: sc["entry"].as_object().cloned().unwrap_or_default(),
+        end_session_at: sc["end_session_at"].as_i64(),
+    };
+    let answers: Vec<Value> = v["answers"].as_array().cloned().unwrap_or_default();
+    let out = run(&scenario, &answers);
+    json!({"result": out.result, "entry": Value::Object(out.entry), "world": out.world})
+}
+
 fn run_watchdog(v: &Value) -> Value {
     let d = match drive_monitor(v) {
         Ok(d) => d,
