@@ -1,0 +1,17 @@
+[package]
+name = "singws-loudcache"
+version = "0.1.0"
+edition = "2021"
+description = "Offline port of the loudness cache rules in 0.2.18.1.py (_loudness_gain_from_lufs, loudness_info_cached, loudness_gain_db_cached, loudness_failed_cached, _loudness_mark_failed's record, and the cache + checkpoint replay of _loudness_load_cache). Pure: values in, values out. Proof only: Python still owns the cache; tools/loudcache_parity.py compares both."
+publish = false
+
+[lib]
+name = "singws_loudcache"
+path = "src/lib.rs"
+
+[[bin]]
+name = "singws-loudcache"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = { version = "1.0.151", features = ["float_roundtrip", "preserve_order"] }
