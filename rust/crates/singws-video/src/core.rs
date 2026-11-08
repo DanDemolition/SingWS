@@ -218,7 +218,18 @@ impl Inner {
     }
 
     fn init_core(self: &Arc<Self>, events: &mut Vec<JoinHandle<()>>) -> Option<Handle> {
-        let h = self.api.create()?;
+        let Some(h) = self.api.create() else {
+            // Silent before 2026-11-07: on the Intel Mac every Python-free readiness run ended here with nothing in the log.
+            extern "C" {
+                fn setlocale(category: i32, locale: *const std::ffi::c_char) -> *const std::ffi::c_char;
+            }
+            let numeric = unsafe {
+                let p = setlocale(4 /* LC_NUMERIC on macOS */, std::ptr::null());
+                if p.is_null() { String::from("?") } else { std::ffi::CStr::from_ptr(p).to_string_lossy().into_owned() }
+            };
+            bridge_log!("[bridge] mpv_create returned null (LC_NUMERIC={:?} LANG={:?} LC_ALL={:?})", numeric, std::env::var("LANG").ok(), std::env::var("LC_ALL").ok());
+            return None;
+        };
         let vo = if self.renderer.get().is_some() {
             "libmpv".to_string()
         } else {

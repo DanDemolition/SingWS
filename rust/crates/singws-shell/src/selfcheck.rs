@@ -86,6 +86,17 @@ pub(crate) fn ns_view_state(view: usize) -> Value {
 static OPTIONS: Mutex<Option<Options>> = Mutex::new(None);
 static CHECKS: Mutex<Vec<Value>> = Mutex::new(Vec::new());
 static BRIDGE: Mutex<usize> = Mutex::new(0);
+static BRIDGE_LOG: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+unsafe extern "C" fn bridge_log_cb(line: *const std::ffi::c_char) {
+    if !line.is_null() {
+        let s = unsafe { std::ffi::CStr::from_ptr(line) }.to_string_lossy().into_owned();
+        let mut g = BRIDGE_LOG.lock().unwrap();
+        if g.len() < 100 {
+            g.push(s);
+        }
+    }
+}
 static BGM: Mutex<Option<JoinHandle<()>>> = Mutex::new(None);
 
 /// Parse the `--selfcheck` arguments. `None` = not a selfcheck run.
@@ -223,9 +234,10 @@ impl qobject::SelfCheck {
             record("video_bridge_create", false, json!({"error": "no video path or no window ids"}));
             return false;
         };
+        singws_video::singws_bridge_set_log_callback(Some(bridge_log_cb));
         let h = singws_video::singws_bridge_create(output_view as usize, preview_view as usize, video.as_ptr(), std::ptr::null());
         if h.is_null() {
-            record("video_bridge_create", false, json!({"error": "singws_bridge_create returned null (views or libmpv)"}));
+            record("video_bridge_create", false, json!({"error": "singws_bridge_create returned null (views or libmpv)", "bridge_log": *BRIDGE_LOG.lock().unwrap()}));
             return false;
         }
         *BRIDGE.lock().unwrap() = h as usize;
