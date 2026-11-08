@@ -17,7 +17,7 @@ pub enum Pane {
 }
 
 /// Python `float(text)` for the plain cases. `Err(true)` = a form this port does not model (decline), `Err(false)` = Python would raise ValueError.
-fn py_float(s: &str) -> Result<f64, bool> {
+pub(crate) fn py_float(s: &str) -> Result<f64, bool> {
     let t = py_strip(s);
     if t.chars().any(|c| !c.is_ascii()) || t.contains('_') {
         return Err(true);

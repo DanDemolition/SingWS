@@ -57,6 +57,7 @@ fn answer(v: &Value) -> Value {
         "prelude" => run_prelude(v),
         "setup" => run_setup(v),
         "finish" => run_finish(v),
+        "intake" => run_intake(v),
         "startflow" => {
             let b = |k: &str| v[k].as_bool().unwrap_or(false);
             let act = startflow::play_action(&startflow::PlayInput { fast_start: b("fast_start"), managed_handoff: b("managed_handoff"), managed_start_state: s("managed_start_state"),
@@ -328,6 +329,23 @@ fn run_finish(v: &Value) -> Value {
     };
     let out = run(&scenario);
     json!({"entry": Value::Object(out.entry), "calls": out.calls, "log": out.log, "declined": out.declined})
+}
+
+fn run_intake(v: &Value) -> Value {
+    use singws_karafun::intake::{run, Scenario};
+    let sc = &v["scenario"];
+    let s = |k: &str| sc[k].as_str().unwrap_or("").to_string();
+    let scenario = Scenario {
+        entry: sc["entry"].as_object().cloned().unwrap_or_default(),
+        artist: s("artist"),
+        title: s("title"),
+        key: sc["key"].clone(),
+        tempo: sc["tempo"].clone(),
+        request_uid: s("request_uid"),
+        queries: sc["queries"].as_array().map(|a| a.iter().map(|x| x.as_str().unwrap_or("").to_string()).collect()).unwrap_or_default(),
+    };
+    let out = run(&scenario);
+    json!({"result": out.result, "entry": Value::Object(out.entry), "calls": out.calls, "log": out.log, "declined": out.declined})
 }
 
 fn run_watchdog(v: &Value) -> Value {
