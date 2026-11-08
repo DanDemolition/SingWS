@@ -1,0 +1,17 @@
+[package]
+name = "singws-discbrand"
+version = "0.1.0"
+edition = "2021"
+description = "Offline port of the karaoke disc / brand matching rules of 0.2.18.1.py (aliases, canonical brand, priority lists, which disc version a request gets, the brand picker list, the library brand scan report). Pure. Proof only: Python still decides; tools/discbrand_parity.py compares both."
+publish = false
+
+[lib]
+name = "singws_discbrand"
+path = "src/lib.rs"
+
+[[bin]]
+name = "singws-discbrand"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = { version = "1.0.151", features = ["float_roundtrip", "preserve_order"] }
