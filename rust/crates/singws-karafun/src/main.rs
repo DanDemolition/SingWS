@@ -25,6 +25,13 @@ fn answer(v: &Value) -> Value {
             Parsed::None => json!({"values": null}),
             Parsed::Decline => json!({"decline": "digits"}),
         },
+        "watchdog_check" => {
+            let n = |k: &str| v[k].as_f64();
+            match watchdog::check(n("now").unwrap_or(0.0), n("last_playing_ts"), n("confirmed_at"), v["duration"].as_i64().unwrap_or(0), n("seek_offset").unwrap_or(0.0)) {
+                watchdog::Check::Extend(e) => json!({"extend": e}),
+                watchdog::Check::Warn { log } => json!({"warn": log}),
+            }
+        }
         "startflow" => {
             let b = |k: &str| v[k].as_bool().unwrap_or(false);
             let act = startflow::play_action(&startflow::PlayInput { fast_start: b("fast_start"), managed_handoff: b("managed_handoff"), managed_start_state: s("managed_start_state"),

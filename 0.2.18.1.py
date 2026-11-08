@@ -4372,6 +4372,8 @@ DEFAULTS = {
     "karafun_script_shadow": True,
     # Stage E shadow: the completion monitor records each run and replays it through the Rust monitor when it ends; a difference in the actions is logged (karafun_monitor_shadow.py).
     "karafun_monitor_shadow": True,
+    # Stage E shadow: the duration watchdog, the key/tempo readback and the start decisions are also computed by the Rust helper; a difference is logged (karafun_flow_shadow.py).
+    "karafun_flow_shadow": True,
     # Stage E shadow: every ~30 s the host relay messages this app just sent (playback_tick, state, queue, chat) are rebuilt by a separate low-priority process
     # (a Rust helper) from a snapshot of the same inputs, and [RELAY-MSG-SHADOW] logs ONLY a difference (never chat text, names or ids). The message the app built
     # is always the one sent; the relay schema, retries and connection are untouched.
@@ -23002,7 +23004,7 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
         # One line each so a quiet shadow can be told apart from one that is off or whose helper is missing (they log nothing when all agrees).
-        for _mod_name in ("logpack_shadow", "relay_msg_shadow", "scan_shadow", "net_slice_shadow", "queue_state_shadow", "update_shadow", "settings_migrate_shadow", "songend_shadow", "karafun_script_shadow", "karafun_monitor_shadow"):
+        for _mod_name in ("logpack_shadow", "relay_msg_shadow", "scan_shadow", "net_slice_shadow", "queue_state_shadow", "update_shadow", "settings_migrate_shadow", "songend_shadow", "karafun_script_shadow", "karafun_monitor_shadow", "karafun_flow_shadow"):
             try:
                 # DEFAULTS are filled into self.settings later in __init__, so merge them here or a fresh profile would announce the wrong engine
                 __import__(_mod_name).announce({**DEFAULTS, **(self.settings if isinstance(self.settings, dict) else {})}, _diag)
@@ -59915,18 +59917,22 @@ class KaraokeApp(QWidget):
                 if (not (ok and initial_probe_state == "PLAYING")
                         and not managed_state_unknown
                         and not entry.get("karafun_explicit_play_sent")):
+                    _flow_action = "Press"
                     pressed, press_error = self._karafun_press_play_control()
                     if not pressed:
                         raise RuntimeError(press_error or "KaraFun play automation failed")
                     entry["karafun_playback_clock_started_at"] = time.monotonic()
                 elif entry.get("karafun_explicit_play_sent"):
+                    _flow_action = "SkipExplicit"
                     _diag("[KARAFUN-AUTO] play click skipped; explicit Play already sent")
                 elif managed_state_unknown:
+                    _flow_action = "DeferToMonitor"
                     # UNKNOWN is not permission to toggle Play: the result
                     # double-click may already have started the song. Let the
                     # monitor retry only after it positively observes IDLE.
                     _diag("[KARAFUN-AUTO] managed playback state unknown; deferring to monitor")
                 else:
+                    _flow_action = "SkipAlreadyPlaying"
                     entry["karafun_playback_clock_started_at"] = result_activated_at
                     _diag("[KARAFUN-AUTO] play click skipped already playing")
                 if bool(self.settings.get("karafun_dual_renderer_capture", False)):
@@ -59944,6 +59950,14 @@ class KaraokeApp(QWidget):
                 verified_playing = bool(
                     ok and initial_probe_state == "PLAYING" and not fast_start
                 )
+                try:  # Stage E shadow: the Rust rules decide the same start (log-only; karafun_flow_shadow.py)
+                    import karafun_flow_shadow
+                    karafun_flow_shadow.startflow(
+                        getattr(self, "settings", None), _diag, fast_start=fast_start, managed_handoff=managed_handoff, managed_start_state=managed_start_state,
+                        explicit_play_sent=bool(entry.get("karafun_explicit_play_sent")), probe_ok=ok, probe_state=initial_probe_state, was_running=bool(karafun_was_running),
+                        python_action=_flow_action, python_initial=initial_probe_state, python_verified=verified_playing)
+                except Exception:
+                    pass
                 last_playback_probe = ""
                 native_double_click_retried = False
                 if not verified_playing and not fast_start:
@@ -60327,6 +60341,13 @@ class KaraokeApp(QWidget):
                         extend = 15.0
                     else:
                         extend = None
+                    try:  # Stage E shadow: the Rust watchdog rule decides the same thing; a difference is logged (log-only; karafun_flow_shadow.py)
+                        import karafun_flow_shadow
+                        karafun_flow_shadow.watchdog(
+                            getattr(self, "settings", None), _diag, now=time.monotonic(), last_playing_ts=(last_playing if last_playing > 0 else None),
+                            confirmed_at=playback_confirmed_at, duration=fallback_duration, seek_offset=entry.get("karafun_seek_offset_s") or 0.0, python_extend=extend)
+                    except Exception:
+                        pass
                     if extend is not None:
                         again = threading.Timer(extend, _duration_watchdog_fired)
                         again.daemon = True
@@ -60719,6 +60740,11 @@ class KaraokeApp(QWidget):
                                     time.sleep(2.0)             # a disagreeing read must repeat before it is believed
                                     second = self._karafun_read_key_tempo()
                                 values = karafun_confirmed_readback(known, first, second)
+                                try:  # Stage E shadow (log-only; karafun_flow_shadow.py)
+                                    import karafun_flow_shadow
+                                    karafun_flow_shadow.readback(getattr(self, "settings", None), _diag, known=known, first=first, second=second, python_values=values)
+                                except Exception:
+                                    pass
                                 _diag(
                                     f"[KARAFUN] key/tempo readback first={first} second={second} known={known} "
                                     f"-> {'applied ' + str(values) if values else 'display unchanged'}"

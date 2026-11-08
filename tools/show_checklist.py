@@ -126,7 +126,7 @@ def check_quiet_shadows(rows):
     text = sr.quiet_shadows(rows)
     out = []
     worst = PASS
-    for tag in ("QUEUE-STATE-SHADOW", "UPDATE-SHADOW", "SETTINGS-MIGRATE-SHADOW", "KARAFUN-SCRIPT-SHADOW", "KARAFUN-MONITOR-SHADOW"):
+    for tag in ("QUEUE-STATE-SHADOW", "UPDATE-SHADOW", "SETTINGS-MIGRATE-SHADOW", "KARAFUN-SCRIPT-SHADOW", "KARAFUN-MONITOR-SHADOW", "KARAFUN-FLOW-SHADOW"):
         line = next((x for x in text.splitlines() if x.strip().startswith(tag)), "")
         verdict = line.split("   (")[0].replace(tag, "").strip() or "no line"
         out.append(f"{tag}: {verdict}")
