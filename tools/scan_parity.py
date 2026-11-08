@@ -584,13 +584,26 @@ def check_quick(rng, work, n):
                     t.pop(k, None)
             elif r < 0.14:
                 t.pop("scan_mtime_ns", None)
-            elif r < 0.2:
+            elif r < 0.17:
                 t["artist"] = ""
+                t.pop("display", None)
+            elif r < 0.19:
+                t.pop("artist", None)
+            elif r < 0.21:
+                t["title"] = ""
+            elif r < 0.23:
                 t.pop("display", None)
             elif r < 0.25:
                 t["scan_mtime"] = float(t.get("scan_mtime", 0)) + 0.5
             if rng.random() < 0.3:
                 t["duration"] = rng.randrange(60, 400)
+        if old and rng.random() < 0.3:                             # the same path twice, and the same file under a spelling that normalizes to its path
+            dup = dict(rng.choice(old))
+            if rng.random() < 0.5:
+                dup["path"] = os.path.dirname(dup["path"]) + "/./" + os.path.basename(dup["path"])
+            old.insert(rng.randrange(len(old) + 1), dup)
+        if rng.random() < 0.15:
+            old.extend(rng.choice([["junk"], [{"nopath": 1}], [{"path": ""}], [{"path": None}], [5, {"path": "/nowhere/x.cdg", "artist": "q"}]]))
         if rng.random() < 0.15:
             old.append({"path": os.path.join(case_dir, "home", "lib", ".hidden.cdg"), "type": "cdg", "artist": "x", "title": "y", "display": "x - y"})
         if rng.random() < 0.15:
@@ -602,17 +615,24 @@ def check_quick(rng, work, n):
         elif rng.random() < 0.2 and sigs:
             for k in rng.sample(sorted(sigs), min(len(sigs), 2)):
                 sigs[k] = [sigs[k][0] + rng.choice([0, 7, -3]), sigs[k][1] + rng.choice([0, 0, 1])]
+        if sigs and rng.random() < 0.2:                            # stored signatures of odd shapes (an older build, a damaged file)
+            for k in rng.sample(sorted(sigs), min(len(sigs), 2)):
+                sigs[k] = rng.choice([[1], [], {"a": 1}, 5, [None, 1], [1, None], [1.5, 2.5], [True, False], None, [sigs[k][0]], [sigs[k][0], None]])
         if sigs:
             settings["karaoke_scan_dir_sigs"] = sigs
+        files = [t["path"] for t in first["tracks"]]
+        mutate_disk(rng, case_dir, roots, files)
         tp = Path(case_dir) / "tracks.json"
         baseline = 0
         if rng.random() < 0.7:
             tp.write_text("[]", encoding="utf-8")
             os.utime(tp, ns=(10**18, time.time_ns() + rng.choice([-10**11, 0, 10**11])))
+            live = [os.stat(d).st_mtime_ns for d in {os.path.dirname(f) for f in files} | set(roots) if os.path.isdir(d)]
+            if live and rng.random() < 0.4:                         # a baseline exactly at (or one step either side of) a folder's mtime: the comparison edge
+                edge = rng.choice(sorted(live)) + rng.choice([0, 0, 1, -1])
+                os.utime(tp, ns=(edge, edge))
             baseline = tp.stat().st_mtime_ns
         ORACLE["TRACKS_PATH"] = tp
-        files = [t["path"] for t in first["tracks"]]
-        mutate_disk(rng, case_dir, roots, files)
         try:
             py = canon(fn(roots, True, old, settings))
         except Exception:  # noqa: BLE001
@@ -634,6 +654,34 @@ def check_quick(rng, work, n):
             tally("  quick: tracks changed", py["tracks_changed"])
             if py["added_count"] or py["removed_count"]:
                 tally("  quick: cases with added or removed tracks")
+    ORACLE["TRACKS_PATH"] = Path("/nonexistent/tracks.json")
+
+
+def check_quick_edges(work):
+    """The comparison edge of the quick update's baseline rule, built by hand: no stored folder signatures, a file added to a known folder, and tracks.json exactly as old as
+    that folder (or one nanosecond either side). A folder as old as tracks.json is taken to be unchanged; one nanosecond newer is rescanned."""
+    fn = ORACLE["_build_library_scan_result"]
+    for variant, delta in enumerate((0, 1, -1, 0, 1, -1)):
+        case_dir = os.path.join(work, f"edge{variant}")
+        root = os.path.join(case_dir, "lib")
+        os.makedirs(root)
+        os.chdir(case_dir)
+        open(os.path.join(root, "a - one.cdg"), "wb").write(b"x")
+        first = canon(fn([root], False, [], {}))
+        if variant >= 3:
+            open(os.path.join(root, "b - two.cdg"), "wb").write(b"yy")
+        tp = Path(case_dir) / "tracks.json"
+        tp.write_text("[]", encoding="utf-8")
+        edge = os.stat(root).st_mtime_ns + delta
+        os.utime(tp, ns=(edge, edge))
+        ORACLE["TRACKS_PATH"] = tp
+        py = canon(fn([root], True, first["tracks"], {}))
+        req = {"op": "scan", "roots": [root], "quick_mode": True, "old_tracks": first["tracks"], "settings": {}, "cwd": case_dir, "tracks_baseline_ns": tp.stat().st_mtime_ns}
+        resp = json.loads(subprocess.run([CLI], input=json.dumps(req), capture_output=True, text=True, cwd=case_dir).stdout)
+        if resp.get("ok") and compare_scan(f"quick edge {variant}", py, resp["result"]):
+            tally("quick edge cases compared")
+        elif not resp.get("ok"):
+            fail(f"quick edge {variant}: rust error {resp.get('error')}")
     ORACLE["TRACKS_PATH"] = Path("/nonexistent/tracks.json")
 
 
@@ -681,6 +729,7 @@ def main(argv=None):
         check_normalize(rng, work, 500)
         check_scan(rng, work, a.cases, a.index_cases)
         check_quick(rng, work, a.quick_cases)
+        check_quick_edges(work)
         os.environ["HOME"] = saved_home
         check_real(a.real_root)
     finally:

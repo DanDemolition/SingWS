@@ -506,6 +506,16 @@ mod tests {
     }
 
     #[test]
+    fn a_quick_update_ignores_old_entries_that_hold_no_path() {
+        let dir = std::env::temp_dir().join(format!("scan_quick_nopath_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let root = std::fs::canonicalize(&dir).unwrap().to_str().unwrap().to_string();
+        let r = build_scan_result(&json!({"roots": [root], "quick_mode": true, "old_tracks": [{"nopath": 1}, "junk", {"path": ""}, {"path": null}]})).unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(r["tracks"], json!([]));
+    }
+
+    #[test]
     fn a_quick_update_text_signature_it_cannot_read_is_declined_not_guessed() {
         let dir = std::env::temp_dir().join(format!("scan_quick_decl_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();

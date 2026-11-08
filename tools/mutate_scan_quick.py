@@ -22,7 +22,15 @@ ENV["PATH"] = os.path.expanduser("~/.cargo/bin") + ":" + ENV["PATH"]
 FILE = "quick.rs"
 
 # "snippet[:70]|old->new" -> "equivalent: why" | "GAP: what is missing"
-NOTES: dict = {}
+NOTES: dict = {
+    'if o.get("path").map(truthy).unwrap_or(false) {|false->true': 'equivalent: an old entry without a path would be stored under an empty key, and the dedupe at the end drops every entry without a path',
+    'let new0 = sig[0].as_i64().unwrap_or(0) as i128;|0->1': 'equivalent: a folder signature built from a stat always holds integers, so the default is never read',
+    'let new1 = sig[1].as_i64().unwrap_or(0) as i128;|0->1': 'equivalent: a folder signature built from a stat always holds integers, so the default is never read',
+    'if no_dir_cache && c.baseline_ns != 0 && new0 <= c.baseline_ns {|0->1': 'equivalent: with a baseline of 0 the comparison `new0 <= 0` is false for every real folder time, so testing `!= 1` instead of `!= 0` changes nothing',
+    'if lower.ends_with(".mp4") || lower.ends_with(".cdg") || lower.ends_wi|||->&&': 'equivalent on this file system: macOS refuses file names that are not valid UTF-8, so the decline branch cannot be reached by a media file name',
+    'let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);|false->true': 'equivalent: the file type of a directory entry only fails when the entry vanished mid-listing, which the fuzz cannot time',
+    'let Some(Value::Object(o)) = old else { return Ok((Value::Null, false,|false->true': 'equivalent: the reuse branch is only entered when the old track is an object, so the else branch cannot be reached',
+}
 
 
 def run(cmd, **kw):

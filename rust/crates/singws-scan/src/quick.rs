@@ -465,3 +465,18 @@ impl Walk<'_> {
         Ok((Value::Object(track), false, old.is_some()))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dirname_follows_posix_path_dirname() {
+        assert_eq!(dirname("/a/b/c.cdg"), "/a/b");
+        assert_eq!(dirname("/c.cdg"), "/");
+        assert_eq!(dirname("/"), "/");
+        assert_eq!(dirname("c.cdg"), "");
+        assert_eq!(dirname("/a//b"), "/a");
+        assert_eq!(basename("/a/b/c.cdg"), "c.cdg");
+    }
+}
