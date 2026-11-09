@@ -48,6 +48,102 @@ def find_helper() -> Optional[Path]:
     return None
 
 
+# ---- the browser: installed Chrome if there is one, else Chrome for Testing downloaded once into ~/SingWS
+_CFT_INDEX = "https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json"
+
+
+def _platform_key() -> str:
+    import platform
+    return "mac-arm64" if platform.machine() in ("arm64", "aarch64") else "mac-x64"
+
+
+def browser_root() -> Path:
+    """Where downloaded browsers live (~/SingWS/Chrome-for-Testing, or under SINGWS_HOME)."""
+    home = os.environ.get("SINGWS_HOME")
+    return (Path(home) if home else Path.home() / "SingWS") / "Chrome-for-Testing"
+
+
+def _cft_binary(folder: Path) -> Path:
+    return folder / f"chrome-{_platform_key()}" / "Google Chrome for Testing.app" / "Contents" / "MacOS" / "Google Chrome for Testing"
+
+
+def downloaded_chrome() -> Optional[Path]:
+    """A Chrome for Testing already downloaded (the newest version folder), if any."""
+    root = browser_root()
+    if not root.is_dir():
+        return None
+    for folder in sorted((d for d in root.iterdir() if d.is_dir() and not d.name.startswith(".")), reverse=True):
+        binary = _cft_binary(folder)
+        if binary.is_file() and (folder / ".complete").is_file():
+            return binary
+    return None
+
+
+def ensure_browser(progress: Callable[[int, int], None] = lambda done, total: None, *, urlopen=None, verify: bool = True) -> Path:
+    """The browser KaraFun's player runs in: an installed Google Chrome, else the Chrome for Testing in ~/SingWS (downloaded now if it is not
+    there yet: about 200 MB from Google's own site, signature checked, unpacked into a folder of its own and used only by SingWS).
+    `progress(bytes_done, bytes_total)` is called while it downloads. Raises RuntimeError (nothing half-installed is left behind)."""
+    installed = find_chrome()
+    if installed is not None:
+        return installed
+    have = downloaded_chrome()
+    if have is not None:
+        return have
+    import shutil
+    import tempfile
+    import urllib.request
+    opener = urlopen or urllib.request.urlopen
+    try:
+        with opener(_CFT_INDEX, timeout=30) as response:
+            index = json.loads(response.read().decode("utf-8"))
+        stable = index["channels"]["Stable"]
+        version = str(stable["version"])
+        url = next(d["url"] for d in stable["downloads"]["chrome"] if d["platform"] == _platform_key())
+    except Exception as error:
+        raise RuntimeError(f"could not find a browser to download: {error}") from error
+    if not url.startswith("https://"):
+        raise RuntimeError("the browser download address is not https")
+    root = browser_root()
+    root.mkdir(parents=True, exist_ok=True)
+    work = Path(tempfile.mkdtemp(prefix=".download-", dir=root))
+    try:
+        archive = work / "chrome.zip"
+        total = done = 0
+        with opener(url, timeout=60) as response, open(archive, "wb") as out:
+            total = int(response.headers.get("Content-Length") or 0)
+            while True:
+                chunk = response.read(1 << 20)
+                if not chunk:
+                    break
+                out.write(chunk)
+                done += len(chunk)
+                progress(done, total)
+        if total and done != total:
+            raise RuntimeError(f"the download stopped early ({done} of {total} bytes)")
+        unpacked = work / "unpacked"
+        unpacked.mkdir()
+        # ditto keeps the app's links and permissions (Python's zipfile would lose them).
+        result = subprocess.run(["/usr/bin/ditto", "-x", "-k", str(archive), str(unpacked)], capture_output=True, text=True, timeout=300)
+        if result.returncode != 0:
+            raise RuntimeError("the browser could not be unpacked: " + (result.stderr or "").strip()[:200])
+        archive.unlink()
+        app = unpacked / f"chrome-{_platform_key()}" / "Google Chrome for Testing.app"
+        if verify:
+            check = subprocess.run(["/usr/bin/codesign", "--verify", "--deep", "--strict", str(app)], capture_output=True, text=True, timeout=120)
+            if check.returncode != 0:
+                raise RuntimeError("the downloaded browser's signature is not valid: " + (check.stderr or "").strip()[:200])
+        if not _cft_binary(unpacked).is_file():
+            raise RuntimeError("the downloaded browser has no program in it")
+        (unpacked / ".complete").write_text(version)
+        final = root / version
+        if final.exists():
+            shutil.rmtree(final, ignore_errors=True)
+        unpacked.rename(final)
+        return _cft_binary(final)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
 class KaraFunWeb:
     def __init__(self, profile_dir=None, *, on_message: Callable[[dict], None] = lambda m: None,
                  on_frame: Callable[[bytes], None] = lambda b: None, on_log: Callable[[str], None] = lambda s: None,
@@ -157,3 +253,96 @@ class KaraFunWeb:
 
     def stop_screencast(self) -> None:
         self.command("screencast", on=False)
+
+
+class KaraFunWebService:
+    """The whole set-up, automatic: nothing to choose or install by hand.
+
+    start() runs on its own thread: it finds Google Chrome or downloads Chrome for Testing into ~/SingWS (a fixed folder, shown as progress),
+    starts the helper with a profile folder that keeps the sign-in, and when KaraFun says it is not signed in it opens KaraFun's own sign-in
+    ("Add a TV") in the user's browser, once. `on_state(state, detail)` says where it is, for a line of text in the settings:
+      "preparing"  detail "Looking for a browser" / "Downloading the browser (37%)"
+      "starting"   "Starting KaraFun's player"
+      "ready"      "Signed in to <plan>"     (the player is up and signed in)
+      "sign_in"    "Sign in to KaraFun in your browser, then come back"
+      "error"      the reason (the caller can start() again to retry)
+    The player's own messages and picture frames go to `on_message` and `on_frame` as in KaraFunWeb."""
+
+    def __init__(self, on_state: Callable[[str, str], None], *, on_message: Callable[[dict], None] = lambda m: None,
+                 on_frame: Callable[[bytes], None] = lambda b: None, on_log: Callable[[str], None] = lambda s: None,
+                 profile_dir=None, make_web=None, find_browser=None):
+        self.on_state, self.on_message, self.on_frame, self.on_log = on_state, on_message, on_frame, on_log
+        home = os.environ.get("SINGWS_HOME")
+        self.profile_dir = Path(profile_dir) if profile_dir else (Path(home) if home else Path.home() / "SingWS") / "Chrome-KaraFun"
+        self._make_web = make_web or (lambda **kw: KaraFunWeb(self.profile_dir, **kw))
+        self._find_browser = find_browser or ensure_browser
+        self.web: Optional[KaraFunWeb] = None
+        self.state = "idle"
+        self._thread: Optional[threading.Thread] = None
+        self._lock = threading.Lock()
+        self._signed_out_seen = 0
+        self._sign_in_opened = False
+        self._ready_told = False
+
+    def _set(self, state: str, detail: str = "") -> None:
+        self.state = state
+        try:
+            self.on_state(state, detail)
+        except Exception as error:
+            self.on_log(f"state callback error: {error!r}")
+
+    def start(self) -> None:
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                return
+            self._signed_out_seen = 0
+            self._sign_in_opened = False
+            self._ready_told = False
+            self._thread = threading.Thread(target=self._run, name="karafun-web-setup", daemon=True)
+            self._thread.start()
+
+    def stop(self) -> None:
+        web, self.web = self.web, None
+        if web is not None:
+            web.close()
+        self.state = "idle"
+
+    def _progress(self, done: int, total: int) -> None:
+        percent = f" ({done * 100 // total}%)" if total else ""
+        self._set("preparing", f"Downloading the browser{percent}")
+
+    def _run(self) -> None:
+        try:
+            self._set("preparing", "Looking for a browser")
+            browser = self._find_browser(self._progress)
+            self._set("starting", "Starting KaraFun's player")
+            web = self._make_web(on_message=self._message, on_frame=self.on_frame, on_log=self.on_log, chrome_path=browser)
+            self.web = web
+            web.start()
+        except Exception as error:
+            self.on_log(f"set-up failed: {error}")
+            self._set("error", str(error))
+
+    def _message(self, message: dict) -> None:
+        kind = message.get("type")
+        if kind == "status":
+            if message.get("signedIn"):
+                self._signed_out_seen = 0
+                if not self._ready_told or self.state != "ready":
+                    self._ready_told = True
+                    self._set("ready", "Signed in" + (f" ({message['plan']})" if message.get("plan") else ""))
+            else:
+                self._signed_out_seen += 1
+                # A few statuses in a row, so a page still starting does not count as "signed out".
+                if self._signed_out_seen == 4 and self.web is not None:
+                    self._ready_told = False
+                    self._set("sign_in", "Sign in to KaraFun in your browser, then come back")
+                    if not self._sign_in_opened:
+                        self._sign_in_opened = True
+                        self.web.sign_in()
+        elif kind == "error" and message.get("message") == "KaraFun's web player stopped":
+            self._set("error", "KaraFun's player stopped")
+        try:
+            self.on_message(message)
+        except Exception as error:
+            self.on_log(f"message callback error: {error!r}")
