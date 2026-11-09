@@ -54,6 +54,18 @@
   // what its search found, so a song chosen elsewhere (SingWS's library,
   // from KaraFun's song list) is looked up first, by `query` (its artist
   // and title), and picked out by its id.
+  // KaraFun's web player numbers songs its own way (NOFX - Linoleum is 58970
+  // there, 3241559 in the catalogue SingWS uses), so when the id is not among
+  // the results the song is picked by artist and title, and the host keeps
+  // hearing the id it asked for.
+  let alias = null;
+  const norm = t => String(t || '').toLowerCase().normalize('NFKD').replace(/[^\p{L}\p{N}]+/gu, '');
+  const byName = (list, query) => {
+    const q = norm(query);
+    return list.find(r => norm(`${r.content.artist.name} ${r.content.title}`) === q)
+      || list.find(r => q.includes(norm(r.content.artist.name)) && q.includes(norm(r.content.title)));
+  };
+  const askedId = web => (alias && alias.web === web ? alias.asked : web);
   window.singwsPlay = async (id, query) => {
     // Black until this song plays: KaraFun's canvas still shows the last
     // song's lyrics while the new one is found and loaded.
@@ -65,14 +77,16 @@
       // can trip on (it found nothing for "Alice in Chains Would?").
       const plain = query.replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
       for (const term of plain && plain !== query ? [query, plain] : [query]) {
-        try { item = (await find(term)).find(r => r.content.id === id); } catch (error) { return fail('Play', error); }
+        try { const list = await find(term); item = list.find(r => r.content.id === id) || byName(list, query); } catch (error) { return fail('Play', error); }
         if (item) break;
-        post({ type: 'log', message: `search "${term}": song ${id} not among ${results.length} result(s)` });
+        post({ type: 'log', message: `search "${term}": song ${id} not among ${results.length} result(s) [${results.map(r => typeof r.content.id + ':' + r.content.id + ' ' + r.content.title).join('; ')}]` });
       }
     }
     if (!item && query && !results.length) return fail('Play', `KaraFun's search found nothing for "${query}" (no internet? Settings → KaraFun account… → Reload KaraFun once it's back)`);
     if (!item) return fail('Play', `KaraFun didn't find song ${id}${query ? ` ("${query}")` : ''}`);
     try {
+      const web = item.content.id;
+      alias = { asked: id, web };
       const queue = store('queue');
       // KaraFun's own queue is kept (across sessions too) and it plays on
       // through it: emptied first, so this song is the only one, and nothing
@@ -80,10 +94,10 @@
       await clearQueue();
       // Added to the empty queue, which plays it...
       await queue.mainAction([item], 'search');
-      const added = queue.$state.rawQueue.find(entry => entry.content && entry.content.id === id);
+      const added = queue.$state.rawQueue.find(entry => entry.content && entry.content.id === web);
       await sleep(800);
       // ... or, if KaraFun didn't start it by itself, played now.
-      if (added && store('mediaSession').$state.currentSongId !== id) await queue.playNowWithQueueIds([added.id]);
+      if (added && store('mediaSession').$state.currentSongId !== web) await queue.playNowWithQueueIds([added.id]);
       post({ type: 'log', message: `playing ${item.content.artist && item.content.artist.name} - ${item.content.title} (${id}); KaraFun's queue: ${queue.$state.rawQueue.length}` });
     } catch (error) { fail('Play', error); }
   };
@@ -213,11 +227,11 @@
       if (store('remote').$state.session && !turningOff) turnRemoteOff();
       const state = store('player').$state;
       const songId = store('mediaSession').$state.currentSongId;
-      if (blankFor !== null && songId === blankFor && playbackState === 3) blankUntil(null);
+      if (blankFor !== null && askedId(songId) === blankFor && playbackState === 3) blankUntil(null);
       const entry = store('queue').$state.rawQueue.find(e => e.content && e.content.id === songId);
       post({ type: 'status', signedIn: !!session.userId, plan: session.planCaption || '', queue: store('queue').$state.rawQueue.length,
         playing: playbackState === 3, state: playbackState, position: state.currentTime || 0, duration: state.duration || 0,
-        song: entry ? { id: songId, title: entry.content.title || '', artist: (entry.content.artist && entry.content.artist.name) || '' } : null });
+        song: entry ? { id: askedId(songId), title: entry.content.title || '', artist: (entry.content.artist && entry.content.artist.name) || '' } : null });
     } catch (error) {}
   }, 500);
 })();

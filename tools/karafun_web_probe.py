@@ -33,6 +33,7 @@ def main():
         t = m.get("type")
         if t == "status":
             state["status"] += 1
+            state["signed"] = bool(m.get("signedIn"))
             key = (m.get("signedIn"), m.get("state"), (m.get("song") or {}).get("id"), int(m.get("position") or 0) // 10)
             if key != state["last"]:
                 state["last"] = key
@@ -57,7 +58,7 @@ def main():
     did = False
     while time.monotonic() - start < args.seconds:
         time.sleep(0.5)
-        if state["ready"] and not did:
+        if state["ready"] and not did and (state.get("signed") or time.monotonic() - start > 20):
             did = True
             if args.signin:
                 k.sign_in()
