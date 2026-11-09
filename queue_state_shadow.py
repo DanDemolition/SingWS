@@ -49,6 +49,12 @@ def enabled(settings) -> bool:
     return bool((settings or {}).get("queue_state_shadow", True))
 
 
+def driver_mode(settings) -> str:
+    """Setting ``queue_state_driver``: ``"off"`` (default), ``"dry_run"`` (log what it would do) or ``"apply"``. Anything else is off."""
+    mode = str((settings or {}).get("queue_state_driver", "off") or "off").strip().lower()
+    return mode if mode in ("dry_run", "apply") else "off"
+
+
 def find_helper() -> Path | None:
     arch = "arm64" if platform.machine().lower() in ("arm64", "aarch64") else "x86_64"
     candidates: list[Path] = []
@@ -77,6 +83,8 @@ def announce(settings, log) -> str:
     """One line per launch: on or off, and whether the helper is there (a quiet shadow otherwise says nothing when everything agrees)."""
     try:
         text = f"enabled available={int(find_helper() is not None)}" if enabled(settings) else "off (queue_state_shadow=false)"
+        if driver_mode(settings) != "off":
+            text += f" driver={driver_mode(settings)}"
         log(f"[QUEUE-STATE-SHADOW] {text}")
         return text
     except Exception:  # noqa: BLE001
@@ -277,13 +285,81 @@ def finish(rec, app, log, wait: bool = False):
         if _guard(app) != rec.guard:
             return None  # the reconcile touched the waitlist / attention / unmatched / deferred state: outside the model
         post = snapshot_state(app)
-        thread = threading.Thread(target=run_check, args=(rec, post, log), name="queue-state-shadow", daemon=True)
+        thread = threading.Thread(target=run_check, args=(rec, post, log, None, app), name="queue-state-shadow", daemon=True)
         thread.start()
         if wait:
             thread.join(TIMEOUT_S + 5)
         return thread
     except Exception:  # noqa: BLE001
         return None
+
+
+MAX_DRIVER_REMOVALS = 5
+
+
+def host_removed_ghosts(post: dict, rust_snapshot: dict) -> list:
+    """Request ids that the app's queue still holds although the host removed them (tombstoned / in the removed set) and that the Rust queue rules do NOT keep.
+
+    This is the one thing the driver may act on: AGENTS.md says the server must never recreate a song the host intentionally removed, and a stale copy that survived a
+    reconcile is exactly that. The driver never adds, reorders or edits anything."""
+    rust_ids = set()
+    for singer in rust_snapshot.get("queue", []):
+        for song in singer.get("songs", []):
+            if song.get("remote_request_id") is not None:
+                rust_ids.add(int(song["remote_request_id"]))
+    removed = {int(x) for x in post.get("removed", [])}
+    removed |= {int(k) for k, t in post.get("tombstones", {}).items() if t.get("status") in ("removed", "host_removed")}
+    ghosts = []
+    for singer in post.get("queue", []):
+        for song in singer.get("songs", []):
+            rid = song.get("rid")
+            if rid and rid in removed and rid not in rust_ids and rid not in ghosts:
+                ghosts.append(rid)
+    return ghosts
+
+
+def _apply_ghost_removal(app, ghosts: list, log) -> int:
+    """On the UI thread: remove the stale local copies through the host's own song removal. Every request is re-checked first (still queued, still removed by the host,
+    not the song that is playing)."""
+    done = 0
+    try:
+        removed_now = {int(x) for x in (object.__getattribute__(app, "__dict__").get("_remote_removed_request_ids") or set())}
+        data = app._ensure_remote_request_tombstones()
+        tombs = {int(k) for k, t in ((data or {}).get("requests") or {}).items() if isinstance(t, dict) and t.get("status") in ("removed", "host_removed")}
+        current = str(getattr(app, "_current_karaoke_request_id", "") or "").strip()
+        for rid in ghosts[:MAX_DRIVER_REMOVALS]:
+            if rid not in removed_now and rid not in tombs:
+                continue
+            for singer in list(getattr(app, "queue", []) or []):
+                for entry in list(singer.get("songs", []) or []):
+                    try:
+                        if app._queue_entry_remote_request_id(entry) != rid:
+                            continue
+                        entry_id = app._ensure_queue_entry_id(entry)
+                        if bool(getattr(app, "karaoke_playing", False)) and current and entry_id == current:
+                            continue
+                        if app.shell_queue_remove_song(entry_id) == "removed":
+                            done += 1
+                    except Exception:
+                        continue
+    except Exception:
+        pass
+    _say(log, f"driver removed {done} stale request(s) the host had removed")
+    return done
+
+
+def drive(app, ghosts: list, mode: str, log) -> str:
+    """Act (or say what it would do) about stale requests. Returns what happened, for tests."""
+    if not ghosts or mode == "off" or app is None:
+        return "nothing"
+    if mode == "dry_run":
+        _say(log, f"driver (dry run) would remove {len(ghosts)} stale request(s) the host had removed")
+        return "dry_run"
+    try:
+        app._run_on_ui_thread(lambda: _apply_ghost_removal(app, list(ghosts), log))
+    except Exception:
+        return "failed"
+    return "scheduled"
 
 
 def _say(log, text):
@@ -305,7 +381,7 @@ def run_helper(helper: Path, pre: dict, rows: list, now: float) -> dict:
     return json.loads(lines[1])
 
 
-def run_check(rec, post: dict, log, helper: Path | None = None) -> str:
+def run_check(rec, post: dict, log, helper: Path | None = None, app=None) -> str:
     """One comparison. Returns clean / mismatch / skipped (for tests)."""
     global _clean_noted
     try:
@@ -324,6 +400,13 @@ def run_check(rec, post: dict, log, helper: Path | None = None) -> str:
             if first:
                 _say(log, "first check clean (the Rust queue rules reproduce the app's reconcile)")
             return "clean"
+        try:
+            settings = (object.__getattribute__(app, "__dict__").get("settings") or {}) if app is not None else {}
+            mode = driver_mode(settings)
+            if mode != "off":
+                drive(app, host_removed_ghosts(post, out["snapshot"]), mode, log)
+        except Exception:
+            pass
         path, a, r = diff
         key = f"{path}|{a}|{r}"
         with _lock:
