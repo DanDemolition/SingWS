@@ -57983,6 +57983,15 @@ class KaraokeApp(QWidget):
                 dialog.raise_()
                 dialog.activateWindow()
             _diag("[KARAFUN] returned focus to SingWS after KaraFun start action")
+            # Log-only: which app is really in front a moment later (the request above is not proof macOS honoured it).
+            def _log_front_after_return():
+                try:
+                    from AppKit import NSWorkspace
+                    front = NSWorkspace.sharedWorkspace().frontmostApplication()
+                    _diag(f"[KARAFUN] frontmost app 1.5s after the focus return: {str(front.localizedName() or '')!r}")
+                except Exception:
+                    pass
+            QTimer.singleShot(1500, _log_front_after_return)
         except Exception as exc:
             _diag(f"[KARAFUN] capture host activation failed: {exc}")
 
