@@ -4515,6 +4515,7 @@ DEFAULTS = {
     "karafun_native_double_click": False,   # Learned: System Events clicks only select the result on this Mac
     "karafun_auto_key_tempo": True,          # Set KaraFun key/tempo from the queue entry via its Playback menu
     "karafun_auto_queue_enabled": False, # Machine-local host automation; requires macOS Accessibility permission
+    "karafun_web_player": False,         # Experimental: play KaraFun songs through KaraFun's web player (Chrome, downloaded once) instead of the KaraFun Mac app (karafun_web_host.py)
     "karafun_accessibility_prompt_requested": False, # macOS trust prompt is requested once for an automation-enabled install
     "karafun_fast_start_enabled": True, # Skip slow renderer/probe passes; the completion monitor verifies playback in background
     "karafun_audio_output_follow_singws": True, # Pin KaraFun to SingWS's saved physical output instead of AirPlay/system default
@@ -25285,6 +25286,7 @@ class KaraokeApp(QWidget):
         # Ask from the signed SingWS process after its first window is visible;
         # waiting for the first KaraFun song is too late for a live handoff.
         QTimer.singleShot(3500, self._request_karafun_accessibility_on_first_launch)
+        QTimer.singleShot(8000, self._karafun_web_startup)
 
         # Build the rotation window while the app is idle, so its Qt Quick
         # startup cost is not paid on the first click during a show.
@@ -32327,6 +32329,59 @@ class KaraokeApp(QWidget):
 
         karafun_enable_cb.toggled.connect(_on_karafun_integration_toggled)
         v.addWidget(karafun_enable_cb)
+
+        v = _section_card(tab_karafun, "KaraFun web player (experimental)")
+        karafun_web_cb = QCheckBox("Use KaraFun's web player instead of the KaraFun app")
+        karafun_web_cb.setChecked(bool(self.settings.get("karafun_web_player", False)))
+        karafun_web_cb.setToolTip(
+            "Plays KaraFun songs through KaraFun's own web player in a Chrome with no window (Chrome for Testing is downloaded once, "
+            "about 200 MB, if Google Chrome is not installed). No KaraFun app and no screen scripting. You sign in to KaraFun once.")
+        karafun_web_cb.setEnabled(sys.platform == "darwin")
+        karafun_web_status = QLabel("")
+        karafun_web_status.setWordWrap(True)
+        karafun_web_btn = QPushButton("Set up / sign in")
+        karafun_web_btn.setToolTip("Gets the browser and the player ready, and opens KaraFun's sign-in in your browser if you are signed out")
+
+        def _refresh_karafun_web_status():
+            host = getattr(self, "_karafun_web", None)
+            if not bool(self.settings.get("karafun_web_player", False)):
+                text = "Off."
+            elif host is None or host.state[0] == "idle":
+                text = "Not started yet."
+            else:
+                text = host.state[1] or host.state[0]
+            karafun_web_status.setText(text)
+            karafun_web_btn.setEnabled(bool(self.settings.get("karafun_web_player", False)))
+
+        def _on_karafun_web_toggled(checked):
+            _save_karafun_choice("karafun_web_player", checked)
+            if checked:
+                self._karafun_web_startup()
+            else:
+                self._karafun_web_shutdown()
+            _refresh_karafun_web_status()
+
+        def _on_karafun_web_button():
+            try:
+                host = self._karafun_web_host()
+                if host.service is not None and host.state[0] == "sign_in" and host.service.web is not None:
+                    host.service.web.sign_in()
+                else:
+                    host.ensure_service()
+            except Exception as exc:
+                _diag(f"[KARAFUN-WEB] set-up button failed: {exc}")
+            _refresh_karafun_web_status()
+
+        karafun_web_cb.toggled.connect(_on_karafun_web_toggled)
+        karafun_web_btn.clicked.connect(_on_karafun_web_button)
+        v.addWidget(karafun_web_cb)
+        v.addWidget(karafun_web_status)
+        v.addWidget(karafun_web_btn)
+        _karafun_web_timer = QTimer(tab_karafun)
+        _karafun_web_timer.setInterval(1000)
+        _karafun_web_timer.timeout.connect(_refresh_karafun_web_status)
+        _karafun_web_timer.start()
+        _refresh_karafun_web_status()
 
         v = _section_card(tab_karafun, "Audio Output")
         karafun_audio_follow_cb = QCheckBox("Use SingWS's saved audio output")
@@ -52278,6 +52333,7 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
 
+        self._karafun_web_shutdown()
         # --- Stop network relays/polling cleanly ---
         _diag("[SHUTDOWN] stopping network transports")
         self._shutdown_network_transports()
@@ -58453,6 +58509,8 @@ class KaraokeApp(QWidget):
         One Key click is one semitone and one Tempo click is 1% (verified
         2026-09-28). Returns the (key, tempo_percent) KaraFun ends up at.
         """
+        if getattr(self, "_karafun_web_active", lambda: False)():
+            return self._karafun_web_host().apply_key_tempo(entry, target_key, target_tempo)
         cur_key = int(entry.get("karafun_key_current", 0) or 0)
         cur_tempo = int(entry.get("karafun_tempo_current", 100) or 100)
         key_delta = int(target_key) - cur_key
@@ -58549,6 +58607,8 @@ class KaraokeApp(QWidget):
         result lands within 5 seconds of the drop point. The target is kept clear
         of the very end so a seek can never finish the song by itself.
         """
+        if getattr(self, "_karafun_web_active", lambda: False)():
+            return bool(self._karafun_web_host().seek_to(target_sec))
         entry = self._karafun_active_entry()
         times = self._karafun_display_times()
         if entry is None or times is None or getattr(self, "_karafun_seek_running", False):
@@ -58623,6 +58683,9 @@ class KaraokeApp(QWidget):
         """Play/Pause button while a KaraFun song is active: toggle KaraFun itself."""
         entry = self._karafun_active_entry()
         if entry is None:
+            return
+        if getattr(self, "_karafun_web_active", lambda: False)():
+            self._karafun_web_host().toggle_pause()
             return
 
         def _work():
@@ -60757,6 +60820,39 @@ class KaraokeApp(QWidget):
 
         threading.Thread(target=_monitor_and_shadow, daemon=True, name="karafun-completion-monitor").start()
 
+    def _karafun_web_host(self):
+        """The KaraFun web-player host (karafun_web_host.py), made on first use."""
+        host = getattr(self, "_karafun_web", None)
+        if host is None:
+            import karafun_web_host
+            host = karafun_web_host.KaraFunWebHost(self, diag=_diag)
+            self._karafun_web = host
+        return host
+
+    def _karafun_web_active(self) -> bool:
+        """A KaraFun song is playing through the web player (the controls then go to it, not to the KaraFun app)."""
+        host = getattr(self, "_karafun_web", None)
+        try:
+            return host is not None and host.active()
+        except Exception:
+            return False
+
+    def _karafun_web_startup(self):
+        """With the web player switched on, get its browser and sign-in ready shortly after launch, so the first song is not slow."""
+        try:
+            if bool(self.settings.get("karafun_web_player", False)):
+                self._karafun_web_host().ensure_service()
+        except Exception as exc:
+            _diag(f"[KARAFUN-WEB] startup set-up failed: {exc}")
+
+    def _karafun_web_shutdown(self):
+        host = getattr(self, "_karafun_web", None)
+        if host is not None:
+            try:
+                host.shutdown()
+            except Exception:
+                pass
+
     def _fade_bg_for_external_karafun(self):
         try:
             self._bg_transition_gen = int(getattr(self, "_bg_transition_gen", 0)) + 1
@@ -60846,6 +60942,15 @@ class KaraokeApp(QWidget):
         automatic_playback = open_automatically and bool(
             self.settings.get("karafun_auto_queue_enabled", False)
         )
+        # The web player (karafun_web_host.py) plays a song that has a KaraFun id; anything else takes the KaraFun-app path as before.
+        web_playback = False
+        _web_song_path = str(self._song_info_primary_path(song_info) or "")
+        try:
+            web_playback = bool(self._karafun_web_host().can_start(entry, _web_song_path))
+        except Exception as exc:
+            _diag(f"[KARAFUN-WEB] could not decide: {exc}")
+        if web_playback:
+            automatic_playback = True      # no KaraFun app to open, no companion dialog: SingWS's own transport drives it
         try:
             if not automatic_playback:
                 self._fade_bg_for_external_karafun()
@@ -60875,7 +60980,13 @@ class KaraokeApp(QWidget):
             self._show_external_karafun_dialog(activate=True)
         else:
             self._karafun_show_key_tempo(0, 100)
-        if automatic_playback:
+        if web_playback:
+            try:
+                self._karafun_web_host().start(entry, key, tempo_percent, _web_song_path)
+            except Exception as exc:
+                _diag(f"[KARAFUN-WEB] start failed: {exc}")
+                self._set_karafun_entry_status(entry, "failed", message=f"KaraFun web player failed: {exc}")
+        elif automatic_playback:
             self._automate_karafun_search_and_play(entry, key=key, tempo_percent=tempo_percent)
         self.queue = self.queue.copy()
         QTimer.singleShot(0, self.update_queue_display)
@@ -61050,6 +61161,12 @@ class KaraokeApp(QWidget):
         if not isinstance(active, dict):
             return
         action = str(action or "").strip().lower()
+        try:  # a song played through the web player: stop it and take its picture off the audience screen (any end)
+            _web = getattr(self, "_karafun_web", None)
+            if _web is not None:
+                _web.on_finish()
+        except Exception as exc:
+            _diag(f"[KARAFUN-WEB] finish clean-up failed: {exc}")
         try:
             _sh = self._transport_shadow()
             if _sh is not None:

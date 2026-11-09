@@ -12,13 +12,13 @@ from unittest import mock
 import karafun_web
 
 
-def fake_zip(root: Path, name_ok=True) -> bytes:
+def fake_zip(root: Path, name_ok=True) -> bytes:  # name_ok: True = a program that names itself right, "wrong" = one that does not, False = none
     """A zip shaped like Chrome for Testing's (the app's program file inside chrome-<platform>/)."""
     src = root / "src"
     binary = src / f"chrome-{karafun_web._platform_key()}" / "Google Chrome for Testing.app" / "Contents" / "MacOS" / "Google Chrome for Testing"
-    if name_ok:
+    if name_ok:  # True or "wrong"
         binary.parent.mkdir(parents=True)
-        binary.write_text("#!/bin/sh\n")
+        binary.write_text("#!/bin/sh\necho Google Chrome for Testing 999.0.1\n" if name_ok is True else "#!/bin/sh\necho Something Else 1.0\n")
         binary.chmod(0o755)
     else:
         (src / "elsewhere").mkdir(parents=True)
@@ -38,7 +38,7 @@ class Response(io.BytesIO):
 
 def server(zip_bytes, length=None):
     index = {"channels": {"Stable": {"version": "999.0.1", "downloads": {"chrome": [
-        {"platform": "mac-arm64", "url": "https://example.invalid/a.zip"}, {"platform": "mac-x64", "url": "https://example.invalid/b.zip"}]}}}}
+        {"platform": "mac-arm64", "url": "https://storage.googleapis.com/x/a.zip"}, {"platform": "mac-x64", "url": "https://storage.googleapis.com/x/b.zip"}]}}}}
     def opener(url, timeout=None):
         return Response(json.dumps(index).encode()) if url.endswith(".json") else Response(zip_bytes, length)
     return opener
@@ -59,12 +59,12 @@ class BrowserTests(unittest.TestCase):
         data = fake_zip(self.root)
         seen = []
         with mock.patch.object(karafun_web, "find_chrome", return_value=None):
-            first = karafun_web.ensure_browser(lambda d, t: seen.append((d, t)), urlopen=server(data), verify=False)
+            first = karafun_web.ensure_browser(lambda d, t: seen.append((d, t)), urlopen=server(data), verify=True)
             self.assertTrue(first.is_file())
             self.assertIn("999.0.1", str(first))
             self.assertEqual(seen[-1][0], len(data))
             # the second time nothing is fetched
-            again = karafun_web.ensure_browser(urlopen=mock.Mock(side_effect=AssertionError("downloaded twice")), verify=False)
+            again = karafun_web.ensure_browser(urlopen=mock.Mock(side_effect=AssertionError("downloaded twice")), verify=True)
             self.assertEqual(again, first)
         leftovers = [p.name for p in karafun_web.browser_root().iterdir() if p.name.startswith(".download")]
         self.assertEqual(leftovers, [])
@@ -84,16 +84,24 @@ class BrowserTests(unittest.TestCase):
                 karafun_web.ensure_browser(urlopen=server(data), verify=False)
         self.assertIsNone(karafun_web.downloaded_chrome())
 
-    def test_a_bad_signature_installs_nothing(self):
-        data = fake_zip(self.root)
+    def test_a_program_that_does_not_name_itself_right_installs_nothing(self):
+        data = fake_zip(self.root, name_ok="wrong")
         with mock.patch.object(karafun_web, "find_chrome", return_value=None):
-            with self.assertRaises(RuntimeError):  # the fake program is not signed, so the real check must refuse it
+            with self.assertRaises(RuntimeError):
                 karafun_web.ensure_browser(urlopen=server(data), verify=True)
         self.assertIsNone(karafun_web.downloaded_chrome())
 
+    def test_only_googles_download_host_is_accepted(self):
+        index = {"channels": {"Stable": {"version": "1", "downloads": {"chrome": [
+            {"platform": karafun_web._platform_key(), "url": "https://example.invalid/a.zip"}]}}}}
+        opener = lambda url, timeout=None: Response(json.dumps(index).encode())
+        with mock.patch.object(karafun_web, "find_chrome", return_value=None):
+            with self.assertRaises(RuntimeError):
+                karafun_web.ensure_browser(urlopen=opener, verify=False)
+
     def test_only_https_downloads_are_accepted(self):
         index = {"channels": {"Stable": {"version": "1", "downloads": {"chrome": [
-            {"platform": karafun_web._platform_key(), "url": "http://example.invalid/a.zip"}]}}}}
+            {"platform": karafun_web._platform_key(), "url": "http://storage.googleapis.com/a.zip"}]}}}}
         opener = lambda url, timeout=None: Response(json.dumps(index).encode())
         with mock.patch.object(karafun_web, "find_chrome", return_value=None):
             with self.assertRaises(RuntimeError):

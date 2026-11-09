@@ -170,7 +170,8 @@ class SimplifiedSettingsTests(unittest.TestCase):
 
     def test_there_is_one_switch_and_no_launch_at_startup_setting(self):
         card = self.card()
-        self.assertEqual(card.count("QCheckBox("), 1)
+        # the master switch plus the experimental web-player switch (default off)
+        self.assertEqual(card.count("QCheckBox("), 2)
         self.assertIn('QCheckBox("Use KaraFun integration")', card)
         self.assertNotIn("Launch KaraFun when SingWS starts", SOURCE)
         self.assertNotIn("karafun_launch_at_startup", SOURCE)

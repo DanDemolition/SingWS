@@ -49,6 +49,8 @@ def find_helper() -> Optional[Path]:
 
 
 # ---- the browser: installed Chrome if there is one, else Chrome for Testing downloaded once into ~/SingWS
+# Chrome for Testing is published on these hosts only (the index says where each version is).
+_CFT_HOSTS = ("storage.googleapis.com", "edgedl.me.gvt1.com", "dl.google.com")
 _CFT_INDEX = "https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json"
 
 
@@ -79,9 +81,22 @@ def downloaded_chrome() -> Optional[Path]:
     return None
 
 
+def _default_open(url: str, timeout: float = 30):
+    """urlopen with the same root certificates the rest of SingWS uses (certifi): a Python without its certificates installed
+    (the python.org one, or a frozen app) cannot verify Google's otherwise."""
+    import ssl
+    import urllib.request
+    try:
+        import certifi
+        context = ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        context = ssl.create_default_context()
+    return urllib.request.urlopen(url, timeout=timeout, context=context)
+
+
 def ensure_browser(progress: Callable[[int, int], None] = lambda done, total: None, *, urlopen=None, verify: bool = True) -> Path:
     """The browser KaraFun's player runs in: an installed Google Chrome, else the Chrome for Testing in ~/SingWS (downloaded now if it is not
-    there yet: about 200 MB from Google's own site, signature checked, unpacked into a folder of its own and used only by SingWS).
+    there yet: about 200 MB from Google's own site, checked that it runs and is the version asked for, unpacked into a folder of its own and used only by SingWS).
     `progress(bytes_done, bytes_total)` is called while it downloads. Raises RuntimeError (nothing half-installed is left behind)."""
     installed = find_chrome()
     if installed is not None:
@@ -91,8 +106,7 @@ def ensure_browser(progress: Callable[[int, int], None] = lambda done, total: No
         return have
     import shutil
     import tempfile
-    import urllib.request
-    opener = urlopen or urllib.request.urlopen
+    opener = urlopen or _default_open
     try:
         with opener(_CFT_INDEX, timeout=30) as response:
             index = json.loads(response.read().decode("utf-8"))
@@ -101,8 +115,10 @@ def ensure_browser(progress: Callable[[int, int], None] = lambda done, total: No
         url = next(d["url"] for d in stable["downloads"]["chrome"] if d["platform"] == _platform_key())
     except Exception as error:
         raise RuntimeError(f"could not find a browser to download: {error}") from error
-    if not url.startswith("https://"):
-        raise RuntimeError("the browser download address is not https")
+    from urllib.parse import urlparse
+    host = urlparse(url).hostname or ""
+    if not url.startswith("https://") or host not in _CFT_HOSTS:
+        raise RuntimeError(f"the browser download address is not Google's ({host or url[:40]})")
     root = browser_root()
     root.mkdir(parents=True, exist_ok=True)
     work = Path(tempfile.mkdtemp(prefix=".download-", dir=root))
@@ -128,12 +144,17 @@ def ensure_browser(progress: Callable[[int, int], None] = lambda done, total: No
             raise RuntimeError("the browser could not be unpacked: " + (result.stderr or "").strip()[:200])
         archive.unlink()
         app = unpacked / f"chrome-{_platform_key()}" / "Google Chrome for Testing.app"
-        if verify:
-            check = subprocess.run(["/usr/bin/codesign", "--verify", "--deep", "--strict", str(app)], capture_output=True, text=True, timeout=120)
-            if check.returncode != 0:
-                raise RuntimeError("the downloaded browser's signature is not valid: " + (check.stderr or "").strip()[:200])
         if not _cft_binary(unpacked).is_file():
             raise RuntimeError("the downloaded browser has no program in it")
+        if verify:
+            # Chrome for Testing is not signed by Google (only ad-hoc), so the check is: Google's own download host, the size, and
+            # that the program runs and names itself and the version we asked for.
+            try:
+                said = subprocess.run([str(_cft_binary(unpacked)), "--version"], capture_output=True, text=True, timeout=60).stdout
+            except Exception as error:
+                raise RuntimeError(f"the downloaded browser would not run: {error}") from error
+            if "Google Chrome for Testing" not in said or version not in said:
+                raise RuntimeError("the downloaded browser is not the one asked for: " + said.strip()[:120])
         (unpacked / ".complete").write_text(version)
         final = root / version
         if final.exists():
