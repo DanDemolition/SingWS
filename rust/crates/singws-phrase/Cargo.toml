@@ -1,0 +1,17 @@
+[package]
+name = "singws-phrase"
+version = "0.1.0"
+edition = "2021"
+description = "Offline Rust port of phrase_detect.py's waveform-editor analysis: waveform peaks, RMS envelope, suggested start, tempo and beat grid, structural sections. numpy/scipy's float32 FFTs cannot be reproduced bit for bit, so the proof (tools/phrase_parity.py) is a tolerance one, with the agreement rate reported. Proof only: Python still runs the editor."
+publish = false
+
+[lib]
+name = "singws_phrase"
+path = "src/lib.rs"
+
+[[bin]]
+name = "singws-phrase"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = { version = "1.0.151", features = ["float_roundtrip", "preserve_order"] }

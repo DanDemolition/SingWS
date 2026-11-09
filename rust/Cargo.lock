@@ -2313,6 +2313,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "singws-phrase"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "singws-plan"
 version = "0.1.0"
 dependencies = [
