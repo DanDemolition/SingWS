@@ -13,6 +13,10 @@ CLI = os.environ.get("SINGWS_DBW_CLI") or dp.DBW_DEFAULT
 DB_CLI = os.environ.get("SINGWS_DB_CLI") or dp.DB_DEFAULT
 needs_cli = unittest.skipUnless(Path(CLI).exists() and Path(DB_CLI).exists(),
                                 "needs singws-dbw-cli and singws-db-cli (cargo build --release -p singws-dbw -p singws-db)")
+# The Rust crates bundle SQLite 3.50.x. A newer SQLite in the Python under test (3.53 in the 3.13 venvs) stores a REAL written to a TEXT column differently
+# (0.30000000000000004 instead of 0.3), a false failure of the differential, not a writer difference. Run this module under a Python that links 3.50.x (.venv).
+needs_matching_sqlite = unittest.skipUnless(sqlite3.sqlite_version.startswith("3.50."),
+                                            f"needs the SQLite the Rust crates bundle (3.50.x); this Python links {sqlite3.sqlite_version}: run it under .venv")
 
 
 @needs_cli
@@ -21,6 +25,7 @@ class WriterParityTests(unittest.TestCase):
         dp.failures.clear()
         dp.counts.clear()
 
+    @needs_matching_sqlite
     def test_the_whole_differential_is_clean_on_a_small_run(self):
         self.assertEqual(dp.main(["--skip-unicode", "--cases", "10", "--seed", "7", "--cli", CLI, "--db-cli", DB_CLI]), 0, dp.failures[:5])
         self.assertGreater(dp.counts.get("marker ops", 0), 0)

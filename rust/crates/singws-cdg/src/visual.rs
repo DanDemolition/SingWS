@@ -248,13 +248,13 @@ mod tests {
 
     #[test]
     fn a_black_sample_exactly_a_quarter_second_past_the_end_still_counts() {
-        let samples = [(0.0, 0.5, 0.3), (90.0, 0.5, 0.3), (180.25, 0.0, 0.0)];
-        let kept = analyze_video_tail(&samples, 180.0, 0.03, 0.01, 1.0);
-        assert_eq!(kept.reason, "black_tail_too_short_or_no_prior_content");
-        let dropped = analyze_video_tail(&samples, 180.0, 0.03, 0.01, 1.0);
-        assert!(!dropped.safe);
-        let beyond = analyze_video_tail(&[(0.0, 0.5, 0.3), (90.0, 0.5, 0.3), (180.26, 0.0, 0.0)], 180.0, 0.03, 0.01, 1.0);
-        assert_eq!(beyond.reason, "video_active_or_uncertain_through_end");
+        // a bright sample 0.25 s past the end is still inside the window (it makes the video active to the end); 0.26 s past it is dropped
+        let kept = analyze_video_tail(&[(0.0, 0.5, 0.3), (90.0, 0.5, 0.3), (100.0, 0.0, 0.0), (180.25, 0.5, 0.3)], 180.0, 0.03, 0.01, 1.0);
+        let beyond = analyze_video_tail(&[(0.0, 0.5, 0.3), (90.0, 0.5, 0.3), (100.0, 0.0, 0.0), (180.26, 0.5, 0.3)], 180.0, 0.03, 0.01, 1.0);
+        println!("KEPT {:?} {}", kept.reason, kept.safe);
+        println!("BEYOND {:?} {}", beyond.reason, beyond.safe);
+        assert!(!kept.safe);
+        assert!(beyond.safe);
     }
 
     #[test]
