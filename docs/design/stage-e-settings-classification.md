@@ -38,7 +38,6 @@ Result: ONE more key allowed (`karafun_include_online_search`, above). The other
 | `karaoke_normalize_enabled`, `bg_normalize_enabled`, `seamless_transitions_enabled` | refused | start or gate loudness workers / reset live hand-off state |
 | `karaoke_trim_verified_tail`, `karaoke_allow_early_silence_trim`, `end_silence_trim_enabled` | refused | one dialog switch sets all three together (`on_end_silence_toggled`), and `end_silence_trim_enabled` also gates the lead-silence prescan; one alone leaves the app in a state the dialog cannot produce |
 | `karafun_auto_queue_enabled`, `karafun_auto_key_tempo`, `karafun_dual_renderer_capture` | refused | one dialog switch sets all three (`_on_karafun_integration_toggled`); it drives KaraFun with Accessibility automation |
-| `karafun_launch_at_startup` | refused | launches another application at the next start |
 | `bg_video_enabled`, `bg_video_folder`, `bg_video_shuffle`, `lyrics_background_video_opacity` | refused | folder is a path; the handler restarts or stops the live background video |
 | `cdg_display_mode`, `cdg_stretch_fill`, `cdg_near_black_cleanup`, `cdg_near_black_threshold` | refused | the handlers invalidate the scaled frame of the audience and preview windows and repaint them |
 | `ticker_vfx_enabled`, `show_screen_vfx_enabled`, `rotation_vfx_enabled` | refused | read by live audience surfaces (`set_effects_enabled`, `set_show_vfx_enabled`) |

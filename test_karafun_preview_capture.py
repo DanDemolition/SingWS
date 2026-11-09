@@ -168,11 +168,13 @@ class SimplifiedSettingsTests(unittest.TestCase):
         i = SOURCE.index('v = _section_card(tab_karafun, "Playback",')
         return SOURCE[i:SOURCE.index('v = _section_card(tab_karafun, "Audio Output")')]
 
-    def test_there_are_exactly_two_switches(self):
+    def test_there_is_one_switch_and_no_launch_at_startup_setting(self):
         card = self.card()
-        self.assertEqual(card.count("QCheckBox("), 2)
+        self.assertEqual(card.count("QCheckBox("), 1)
         self.assertIn('QCheckBox("Use KaraFun integration")', card)
-        self.assertIn('QCheckBox("Launch KaraFun when SingWS starts")', card)
+        self.assertNotIn("Launch KaraFun when SingWS starts", SOURCE)
+        self.assertNotIn("karafun_launch_at_startup", SOURCE)
+        self.assertNotIn("_launch_karafun_at_startup", SOURCE)
 
     def test_the_master_switch_drives_search_start_key_tempo_and_capture(self):
         card = self.card()
@@ -183,11 +185,6 @@ class SimplifiedSettingsTests(unittest.TestCase):
     def test_capture_is_forced_on_at_launch_whatever_was_saved(self):
         self.assertIn('self.settings["karafun_dual_renderer_capture"] = True', SOURCE[SOURCE.index('self.settings["karaoke_engine"] = "mpv"'):][:900])
         self.assertIn('"karafun_dual_renderer_capture": True', SOURCE)
-
-    def test_launching_karafun_at_startup_needs_the_integration_on(self):
-        body = SOURCE[SOURCE.index("def _launch_karafun_at_startup(self):"):][:900]
-        self.assertIn('self.settings.get("karafun_launch_at_startup", True)', body)
-        self.assertIn('self.settings.get("karafun_auto_queue_enabled", False)', body)
 
     def test_the_removed_settings_and_code_are_really_gone(self):
         for gone in ("karafun_park_video_window", "karafun_capture_source", "karafun_dual_renderer_windows",

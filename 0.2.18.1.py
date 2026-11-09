@@ -4514,7 +4514,6 @@ DEFAULTS = {
     "karafun_dual_renderer_capture": True,  # The picture is always captured from KaraFun's preview pane (no UI switch; forced on at launch)
     "karafun_native_double_click": False,   # Learned: System Events clicks only select the result on this Mac
     "karafun_auto_key_tempo": True,          # Set KaraFun key/tempo from the queue entry via its Playback menu
-    "karafun_launch_at_startup": True,     # Launch KaraFun hidden when SingWS starts so the first song is not a cold start
     "karafun_auto_queue_enabled": False, # Machine-local host automation; requires macOS Accessibility permission
     "karafun_accessibility_prompt_requested": False, # macOS trust prompt is requested once for an automation-enabled install
     "karafun_fast_start_enabled": True, # Skip slow renderer/probe passes; the completion monitor verifies playback in background
@@ -25286,7 +25285,6 @@ class KaraokeApp(QWidget):
         # Ask from the signed SingWS process after its first window is visible;
         # waiting for the first KaraFun song is too late for a live handoff.
         QTimer.singleShot(3500, self._request_karafun_accessibility_on_first_launch)
-        QTimer.singleShot(6000, self._launch_karafun_at_startup)
 
         # Build the rotation window while the app is idle, so its Qt Quick
         # startup cost is not paid on the first click during a show.
@@ -32329,20 +32327,6 @@ class KaraokeApp(QWidget):
 
         karafun_enable_cb.toggled.connect(_on_karafun_integration_toggled)
         v.addWidget(karafun_enable_cb)
-        karafun_startup_cb = QCheckBox("Launch KaraFun when SingWS starts")
-        karafun_startup_cb.setChecked(bool(self.settings.get("karafun_launch_at_startup", True)))
-        karafun_startup_cb.setToolTip(
-            "Starts KaraFun in the background when SingWS opens, so the first KaraFun song of the night is not slowed by "
-            "a cold start. Only used while 'Use KaraFun integration' is on.")
-        karafun_startup_cb.setEnabled(sys.platform == "darwin")
-
-        def _on_karafun_startup_toggled(checked):
-            _save_karafun_choice("karafun_launch_at_startup", checked)
-            if checked:
-                self._launch_karafun_at_startup()
-
-        karafun_startup_cb.toggled.connect(_on_karafun_startup_toggled)
-        v.addWidget(karafun_startup_cb)
 
         v = _section_card(tab_karafun, "Audio Output")
         karafun_audio_follow_cb = QCheckBox("Use SingWS's saved audio output")
@@ -57218,35 +57202,6 @@ class KaraokeApp(QWidget):
                     "Open KaraFun, make sure it is signed in, then start the song again."
                 )
             time.sleep(0.5)
-
-    def _launch_karafun_at_startup(self):
-        """Start KaraFun hidden so the first KaraFun song is not a cold start.
-
-        A cold KaraFun added about 10s to the first search (2026-09-28: 17s
-        versus 6s warm). Opt-in, macOS only, skipped when it is already running.
-        """
-        if (sys.platform != "darwin" or not bool(self.settings.get("karafun_launch_at_startup", True))
-                or not bool(self.settings.get("karafun_auto_queue_enabled", False))):
-            return
-
-        def _launch():
-            try:
-                app_path = self._karafun_application_path()
-                if not app_path:
-                    _diag("[KARAFUN] startup launch skipped: KaraFun.app not found")
-                    return
-                if subprocess.run(["/usr/bin/pgrep", "-x", "KaraFun"],
-                                  capture_output=True, timeout=5).returncode == 0:
-                    _diag("[KARAFUN] startup launch skipped: already running")
-                    return
-                # -g keeps it in the background, -j launches it hidden.
-                completed = subprocess.run(["/usr/bin/open", "-g", "-j", str(app_path)],
-                                           capture_output=True, text=True, timeout=10)
-                _diag(f"[KARAFUN] launched hidden at startup rc={completed.returncode}")
-            except Exception as exc:
-                _diag(f"[KARAFUN] startup launch failed: {exc}")
-
-        threading.Thread(target=_launch, daemon=True, name="karafun-startup-launch").start()
 
     def _request_karafun_accessibility_on_first_launch(self):
         """Ask macOS for Accessibility trust once, after the main UI appears."""
