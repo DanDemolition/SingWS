@@ -86,6 +86,9 @@ def main(argv=None):
     Path(media).write_bytes(b"x" * 321)
     os.utime(media, (1_700_000_123, 1_700_000_123))
     real_sig = (1_700_000_123, 321)
+    media0 = os.path.join(work, "empty.mp3")
+    Path(media0).write_bytes(b"")
+    os.utime(media0, (0, 0))
     zips = {}
     for name, members in (("one", ["a.mp3"]), ("two", ["a.mp3", "b.mp3"]), ("none", ["a.cdg"]), ("dirmp3", ["d.mp3/"]), ("upper", ["A.MP3"])):
         p = os.path.join(work, f"{name}.zip")
@@ -106,9 +109,10 @@ def main(argv=None):
             cases.append((kind, seed, ns_out))
         elif kind in ("info", "gain_db"):
             has_file = r.random() < 0.8
-            path = media if has_file else os.path.join(work, "gone.mp3")
-            sig = real_sig if has_file else None
-            e = entry_for(r, real_sig)
+            zero = has_file and r.random() < 0.25
+            path = (media0 if zero else media) if has_file else os.path.join(work, "gone.mp3")
+            sig = ((0, 0) if zero else real_sig) if has_file else None
+            e = entry_for(r, sig or real_sig)
             ns["_loudness_cache"].clear()
             ns["_loudness_cache"][path] = e if r.random() < 0.97 else r.choice([None, [], "x"])
             ns["_loudness_cache_loaded"] = True
@@ -120,16 +124,17 @@ def main(argv=None):
             cases.append((kind, seed, out))
         elif kind == "failed":
             zname = r.choice(list(zips) + [None, None])
-            path = zips[zname] if zname else (media if r.random() < 0.8 else os.path.join(work, "gone.mp3"))
+            path = zips[zname] if zname else (media if r.random() < 0.6 else media0 if r.random() < 0.5 else os.path.join(work, "gone.mp3"))
             st = os.stat(path) if os.path.exists(path) else None
             sig = (int(st.st_mtime), int(st.st_size)) if st else None
             e = entry_for(r, sig or (1, 1))
-            e["failed"] = r.choice([True, True, True, False, 1, 0, None, "x"]) if r.random() < 0.9 else e.get("failed")
+            e["failed"] = r.choice([True, True, True, False, 1, 0, None, "x", [], {}, [1], {"a": 1}, 2.5, 0.0]) if r.random() < 0.9 else e.get("failed")
             e["failure_version"] = r.choice([3, 3, 2, 1, 0, 4, None, 2.5]) if r.random() < 0.85 else e.get("failure_version")
             e["reason"] = r.choice(["no measurable loudness", "Turbo helper failed: timeout", "ZIP does not contain exactly one readable MP3", "decode error", "", None, "turbo helper failed: x"])
             e = {k: v for k, v in e.items() if not (r.random() < 0.04)}
             ns["_loudness_cache"].clear()
-            ns["_loudness_cache"][path] = e
+            ns["_loudness_cache"][path] = e if r.random() < 0.95 else r.choice([None, [], "x", 5])
+            e = ns["_loudness_cache"][path]
             ns["_loudness_cache_loaded"] = True
             try:
                 out = ns["loudness_failed_cached"](path)
@@ -161,7 +166,7 @@ def main(argv=None):
             sep = r.choice(["\n", "\r\n", "\r", "\x0b", "\x0c", "\x1c", "\x85", " ", "\n\n"])
             cp = sep.join(lines) + r.choice(["", sep])
             fl = sep.join(lines[:2]) if r.random() < 0.4 else None
-            cache = r.choice([None, "", json.dumps({"/a.mp3": {"i": -20.0}, "/z": {"failed": True}}), "[]", "{bad", "   ", json.dumps({"/a.mp3": 5})])
+            cache = r.choice([None, "", json.dumps({"/a.mp3": {"i": -20.0}, "/z": {"failed": True}}), "[]", "{bad", "   ", json.dumps({"/a.mp3": 5}), '{"/a.mp3": {"i": NaN}}', '{"/a.mp3": {"i": Infinity}}', '{"/a.mp3": {"i": -Infinity, "n": NaN}}'])
             cps = [fl, cp if r.random() < 0.8 else None]
             for p, t in ((ns["LOUDNESS_CACHE_PATH"], cache), (ns["LOUDNESS_CHECKPOINT_PATH"].with_suffix(".jsonl.flushing"), cps[0]), (ns["LOUDNESS_CHECKPOINT_PATH"], cps[1])):
                 if p.exists():

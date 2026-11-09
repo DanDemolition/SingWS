@@ -248,3 +248,32 @@ pub fn replay(cache_text: Option<&str>, checkpoints: &[Option<&str>]) -> R<Map<S
     }
     Ok(cache)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_nan_loudness_is_declined_not_guessed() {
+        assert!(gain_from_lufs(f64::NAN, None).is_err());
+        assert!(gain_from_lufs(-14.0, Some(f64::NAN)).is_err());
+        assert_eq!(gain_from_lufs(-14.0, Some(-30.0)).unwrap(), -2.0);
+    }
+
+    #[test]
+    fn checkpoint_paths_given_as_numbers_follow_python_str() {
+        let cache = replay(None, &[Some("{\"path\": 5, \"entry\": {\"x\": 1}}\n{\"path\": 18446744073709551615, \"entry\": {\"z\": 3}}\n{\"path\": true, \"entry\": {}}")]).unwrap();
+        assert!(cache.contains_key("5") && cache.contains_key("18446744073709551615") && cache.contains_key("True"));
+        let too_big = replay(None, &[Some("{\"path\": 18446744073709551616, \"entry\": {}}")]);
+        assert!(too_big.is_err(), "a JSON integer beyond u64 is a float here: str() of it is not modelled");
+        let negative = replay(None, &[Some("{\"path\": -7, \"entry\": {}}")]).unwrap();
+        assert!(negative.contains_key("-7"));
+    }
+
+    #[test]
+    fn a_json_nan_literal_in_the_cache_file_is_declined_even_alone() {
+        assert!(replay(Some("{\"/a\": {\"i\": NaN}}"), &[]).is_err());
+        assert!(replay(Some("{\"/a\": {\"i\": Infinity}}"), &[]).is_err());
+        assert!(replay(Some("{bad"), &[]).unwrap().is_empty());
+    }
+}

@@ -31,7 +31,7 @@ def pkt(r, instruction=None, command=0x09):
 
 
 def stream(r):
-    kind = r.randrange(6)
+    kind = r.randrange(11)
     out = bytearray()
     if kind == 0:                                             # a song: lyrics lit tile by tile, then cleared, then a tail
         out += pkt(r, 0x01)
@@ -59,8 +59,57 @@ def stream(r):
         for row, col in ((0, 0), (17, 49), (17, 50), (18, 0), (31, 63), (0, 63), (16, 49)):
             out += bytes([0x09, 0x06, 0, 0, 2, 3, row, col]) + bytes([0x3F] * 12) + bytes(4)
         out += pkt(r, 0x01) + bytes(24 * r.randrange(0, 400))
-    else:
+    elif kind == 5:
         out += pkt(r, 0x01) + pkt(r, 0x06) + pkt(r, 0x01) + bytes(24 * r.randrange(250, 350))   # the 1.0 second boundary: 300 packets
+    elif kind == 6:                                           # tiles that do not change the screen (the colour already there), full or empty, XOR with zero
+        c = r.randrange(16)
+        out += bytes([0x09, 0x01, 0, 0, c]) + bytes(19)
+        for _ in range(r.randrange(1, 8)):
+            other = r.randrange(16)
+            instr = r.choice([0x06, 0x26])
+            bits = r.choice([0x3F, 0x00, 0x01, 0x20, 0x2A])
+            c0, c1 = r.choice([(other, c), (c, other), (c, c), (other, other)])
+            out += bytes([0x09, instr, 0, 0, c0, c1, r.randrange(0, 18), r.randrange(0, 50)]) + bytes([bits] * 12) + bytes(4)
+        out += bytes(24 * r.randrange(0, 500)) + pkt(r, 0x01) + bytes(24 * r.randrange(0, 400))
+    elif kind == 7:                                           # the whole screen painted tile by tile in one colour (uniform again), then maybe cleared
+        c = r.randrange(1, 16)
+        out += bytes([0x09, 0x01, 0, 0, 0]) + bytes(19)
+        for row in range(18):
+            for col in range(50):
+                out += bytes([0x09, 0x06, 0, 0, c, c, row, col]) + bytes([0x00] * 12) + bytes(4)
+        if r.random() < 0.5:
+            out += pkt(r, r.choice([0x14, 0x18, 0x1E, 0x1C]))
+        if r.random() < 0.5:
+            out += bytes([0x09, 0x01, 0, 0, r.randrange(16)]) + bytes(19)
+        out += bytes(24 * r.randrange(0, 500))
+    elif kind == 8:                                           # content, a scroll, then the screen made uniform by tiles (the ambiguity must be cleared)
+        c = r.randrange(1, 16)
+        out += bytes([0x09, 0x01, 0, 0, 0]) + bytes(19) + pkt(r, 0x06) + pkt(r, 0x14)
+        for row in range(18):
+            for col in range(50):
+                out += bytes([0x09, 0x06, 0, 0, c, c, row, col]) + bytes([0x3F] * 12) + bytes(4)
+        out += bytes(24 * r.randrange(300, 700))
+    elif kind == 9:                                           # palette loads: the two banks, identical payloads, repeated loads after a clear
+        payload = bytes(r.randrange(64) for _ in range(16))
+        out += bytes([0x09, 0x01, 0, 0, 0]) + bytes(19) + pkt(r, 0x06)
+        steps = r.choice([("lo", "hi", "lo"), ("hi", "lo"), ("lo", "lo"), ("hi", "hi", "lo", "hi")])
+        pre = r.random() < 0.5
+        if pre:
+            for st in steps:
+                out += bytes([0x09, 0x1E if st == "lo" else 0x1F, 0, 0]) + payload + bytes(4)
+        out += bytes([0x09, 0x01, 0, 0, 1]) + bytes(19)
+        for st in steps:
+            out += bytes([0x09, 0x1E if st == "lo" else 0x1F, 0, 0]) + (payload if r.random() < 0.7 else bytes(r.randrange(64) for _ in range(16))) + bytes(4)
+        out += bytes(24 * r.randrange(300, 700))
+    else:                                                     # a transparent colour defined before / after the clear, repeated
+        out += bytes([0x09, 0x01, 0, 0, 0]) + bytes(19) + pkt(r, 0x06)
+        c = r.randrange(16)
+        if r.random() < 0.5:
+            out += bytes([0x09, 0x1C, 0, 0, c]) + bytes(19)
+        out += bytes([0x09, 0x01, 0, 0, 1]) + bytes(19)
+        for _ in range(r.randrange(0, 3)):
+            out += bytes([0x09, 0x1C, 0, 0, r.choice([c, c, r.randrange(16)])]) + bytes(19) + bytes(24 * r.randrange(0, 5))
+        out += bytes(24 * r.randrange(300, 700))
     if r.random() < 0.2:
         out += bytes(r.randrange(1, 24))                       # a torn last packet
     return bytes(out)
@@ -74,23 +123,58 @@ def main(argv=None):
     cases = []
     for seed in range(a.seeds):
         r = random.Random(seed)
-        cases.append((f"seed {seed}", stream(r), r.choice([1.0, 1.0, 0.0, 0.5, 2.5, -1.0, 1.0 + 1e-9, 0.01])))
+        payload = stream(r)
+        minimum = r.choice([1.0, 1.0, 0.0, 0.5, 2.5, -1.0, 1.0 + 1e-9, 0.01])
+        if r.random() < 0.3:                                  # a minimum that is EXACTLY the blank tail the stream has (the >= edge), or one step either side
+            probe = ta.analyze_cdg_visual_bytes(payload, minimum_blank_tail_seconds=0.0)
+            if probe.safe_for_early_completion and probe.visual_end is not None:
+                tail = probe.duration - probe.visual_end
+                minimum = r.choice([tail, tail, tail + 1e-12, tail - 1e-12])
+        cases.append((f"seed {seed}", payload, minimum))
     for path in a.real:
         cases.append((path, Path(path).read_bytes(), 1.0))
     vcases = []
     for seed in range(a.seeds):
         r = random.Random(100000 + seed)
-        n = r.choice([0, 1, 2, 3, 5, 12, 40])
-        total = r.choice([0.0, 30.0, 180.0, 240.5, -1.0])
-        end = total if total > 0 else 100.0
+        total = r.choice([0.0, 0.5, 30.0, 180.0, 240.5, -1.0, float("nan"), float("inf")])
+        end = total if (total > 0 and total != float("inf")) else 100.0
+        black_max, static_max = r.choice([(0.03, 0.01), (0.03, 0.01), (0.1, 0.05), (0.0, 0.0)])
         samples = []
+        n = r.choice([0, 1, 2, 3, 5, 12, 40])
+        shape = r.randrange(5)
         for i in range(n):
-            t = r.choice([i * end / max(n, 1), r.uniform(-1, end + 1), end + 0.25, end + 0.26, 0.0])
-            black = r.random() < 0.5
-            samples.append((t, r.choice([0.0, 0.03, 0.031, 0.5]) if black else r.choice([0.2, 0.9, 0.03, 0.04]), r.choice([0.0, 0.01, 0.011, 0.3]) if r.random() < 0.6 else r.choice([0.0, 0.5])))
-        if r.random() < 0.15:
-            samples = [(s[0], 0.0, 0.0) for s in samples[: max(1, n // 2)]] + [(s[0] + end * 0.6, 0.0, 0.0) for s in samples]
-        vcases.append((f"video seed {seed}", samples, total, r.choice([1.0, 0.0, 0.5, -2.0, 2.0]), r.choice([(0.03, 0.01), (0.03, 0.01), (0.1, 0.05), (0.0, 0.0)])))
+            t = i * end / max(n, 1)
+            if shape == 0:                                    # active, then a static black tail
+                lit = i < n * 0.6
+            elif shape == 1:                                  # black from the start to the end (no prior content)
+                lit = False
+            elif shape == 2:                                  # lit to the end, static
+                lit = True
+            elif shape == 3:                                  # alternating
+                lit = i % 2 == 0
+            else:
+                lit = r.random() < 0.5
+            luma = r.choice([0.2, 0.9, 0.04]) if lit else r.choice([0.0, black_max, black_max + 0.001, 0.01])
+            diff = r.choice([0.3, 0.5]) if lit and r.random() < 0.5 else r.choice([0.0, static_max, static_max + 0.001])
+            samples.append((t, luma, diff))
+        tt = end if end > 0 else 1.0
+        if samples and r.random() < 0.3:                      # a sample exactly at total + 0.25, one beyond, one before zero, and non-finite ones
+            samples.append((tt + 0.25, r.choice([0.0, 0.5]), 0.0))
+        if samples and r.random() < 0.15:
+            samples.append((tt + 0.2500001, 0.0, 0.0))
+        if samples and r.random() < 0.15:
+            samples.append((-0.5, 0.0, 0.0))
+        if samples and r.random() < 0.2:
+            samples.append(r.choice([(float("nan"), 0.0, 0.0), (1.0, float("nan"), 0.0), (1.0, 0.0, float("inf")), (float("-inf"), 0.0, 0.0)]))
+        if r.random() < 0.1 and samples:
+            samples = [(t, l, d) for t, l, d in samples] + [samples[0]]          # a duplicate timestamp (the sort must stay stable)
+        minimum = r.choice([1.0, 0.0, 0.5, -2.0, 2.0])
+        if r.random() < 0.3:                                  # the minimum equal to the real black tail (the >= edge), or one step off
+            probe = ta.analyze_video_tail_samples([ta.VideoFrameSample(*x) for x in samples], duration=total, black_luma_max=black_max, static_difference_max=static_max, minimum_black_tail_seconds=0.0)
+            if probe.safe_for_early_completion and probe.visual_end is not None and total == total and total != float("inf"):
+                tail = total - probe.visual_end
+                minimum = r.choice([tail, tail, tail + 1e-12, tail - 1e-12])
+        vcases.append((f"video seed {seed}", samples, total, minimum, (black_max, static_max)))
     vlines = "\n".join(f"video {m} {t} {b} {s} {';'.join(f'{x},{y},{z}' for x, y, z in smp) or '-'}" for _, smp, t, m, (b, s) in vcases) + "\n"
     lines = "\n".join(f"{m} {b.hex() or '-'}" for _, b, m in cases) + "\n"
     out = subprocess.run([CLI], input=lines, capture_output=True, text=True)
