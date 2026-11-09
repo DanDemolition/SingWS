@@ -22,6 +22,12 @@ import phrase_detect as pd  # noqa: E402
 CLI = os.environ.get("CARGO_TARGET_DIR", os.path.expanduser("~/.cache/singws-rust-target-karafun")) + "/release/singws-pcm-cli"
 
 
+def hiss(r):
+    """A steady analogue hiss floor: usually tight enough (spread <= 3 dB, no louder than -46 dBFS) for the adaptive rule to accept it, sometimes just outside."""
+    lo = r.choice([-52.0, -50.0, -48.5, -47.0, -45.0])
+    return r.uniform(lo, lo + r.choice([0.5, 1.5, 2.5, 4.5]))
+
+
 def make_pcm(r, sr):
     window = max(1, sr // 10)
     n_windows = r.choice([0, 1, 2, 5, 12, 40, 60, 90, 150, 200, 260])
@@ -33,7 +39,7 @@ def make_pcm(r, sr):
             levels.append(music + r.uniform(-4, 2))
         elif kind == 1:                                 # music, then steady hiss (the adaptive-floor case)
             cut = int(n_windows * r.uniform(0.3, 0.9))
-            levels.append(music + r.uniform(-4, 2) if w < cut else r.uniform(-49, -43) if r.random() < 0.95 else r.uniform(-60, -35))
+            levels.append(music + r.uniform(-4, 2) if w < cut else hiss(r) if r.random() < 0.95 else r.uniform(-60, -35))
         elif kind == 2:                                 # music, then digital silence
             cut = int(n_windows * r.uniform(0.3, 0.95))
             levels.append(music + r.uniform(-4, 2) if w < cut else -120.0)

@@ -34,6 +34,12 @@ fn one(r: &Value) -> Value {
             Ok(f) => json!({"v": f}),
             Err(e) => json!({"declined": e}),
         },
+        "audio_path" => match singws_misc::resolve_karaoke_audio_path(&r["song_info"]) {
+            Ok(p) => json!({"v": p}),
+            Err(e) => json!({"declined": e}),
+        },
+        "track_row" => json!({"v": singws_misc::track_from_search_row(&r["row"])}),
+        "mp3_pair" => json!({"v": singws_misc::find_mp3_pair_for_cdg(r["path"].as_str().unwrap_or(""))}),
         other => json!({"declined": format!("unknown op {other}")}),
     }
 }

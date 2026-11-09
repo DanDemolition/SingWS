@@ -270,3 +270,132 @@ pub fn remote_request_timestamp(req: &Value) -> R<f64> {
     }
     Ok(0.0)
 }
+
+// ---- audio path of a queued karaoke entry
+/// `os.path.splitext(p)` (POSIX): the dot of the last component splits unless only dots precede it.
+fn splitext(p: &str) -> (String, String) {
+    let sep = p.rfind('/').map(|i| i as isize).unwrap_or(-1);
+    if let Some(dot) = p.rfind('.') {
+        if dot as isize > sep {
+            let chars: Vec<char> = p.chars().collect();
+            let byte_to_char = |b: usize| p[..b].chars().count();
+            let (start, dot_c) = ((sep + 1) as usize, byte_to_char(dot));
+            let mut i = start;
+            while i < dot_c {
+                if chars[i] != '.' {
+                    return (p[..dot].to_string(), p[dot..].to_string());
+                }
+                i += 1;
+            }
+        }
+    }
+    (p.to_string(), String::new())
+}
+
+fn py_str_text(v: &Value) -> R<String> {
+    match v {
+        Value::String(s) => Ok(s.clone()),
+        _ => Err("decline: str() of a value that is not text".into()),
+    }
+}
+
+/// `_resolve_karaoke_audio_path(song_info)`: the best audio path for a queued karaoke entry.
+pub fn resolve_karaoke_audio_path(song_info: &Value) -> R<String> {
+    let mut value = song_info.clone();
+    if let Value::Object(o) = &value {
+        value = o.get("song_info").cloned().unwrap_or(Value::Null);
+    }
+    if let Value::Array(a) = &value {
+        if a.is_empty() {
+            return Ok(String::new());
+        }
+        let first = py_str_text(&a[0])?;
+        if first.to_lowercase().ends_with(".cdg") {
+            if a.len() >= 2 {
+                return py_str_text(&a[1]);
+            }
+            return Ok(splitext(&first).0 + ".mp3");
+        }
+        return Ok(first);
+    }
+    let path = match &value {
+        Value::Null => String::new(),
+        Value::String(s) => s.clone(),
+        Value::Bool(false) => String::new(),
+        Value::Number(n) if n.as_f64() == Some(0.0) => String::new(),
+        Value::Object(o) if o.is_empty() => String::new(),
+        _ => return Err("decline: str() of a value that is not text".into()),
+    };
+    if path.is_empty() {
+        return Ok(String::new());
+    }
+    if path.to_lowercase().ends_with(".cdg") {
+        return Ok(splitext(&path).0 + ".mp3");
+    }
+    Ok(path)
+}
+
+/// `_track_from_search_row(row)`: the queue entry a search row becomes (Python `x or ""` keeps a truthy value as it is).
+pub fn track_from_search_row(row: &Value) -> Value {
+    let empty = serde_json::Map::new();
+    let r = row.as_object().unwrap_or(&empty);
+    let or = |keys: &[&str]| -> Value {
+        for k in keys {
+            if let Some(v) = r.get(*k) {
+                if truthy(Some(v)) {
+                    return v.clone();
+                }
+            }
+        }
+        Value::String(String::new())
+    };
+    let flag = |k: &str| Value::Bool(truthy(r.get(k)));
+    let disc = or(&["discid", "disc_id", "disc"]);
+    let mut o = serde_json::Map::new();
+    o.insert("artist".into(), or(&["artist"]));
+    o.insert("title".into(), or(&["title"]));
+    o.insert("discid".into(), disc.clone());
+    o.insert("disc_id".into(), disc);
+    o.insert("duration".into(), or(&["duration_secs", "duration"]));
+    o.insert("duration_estimated".into(), flag("duration_estimated"));
+    o.insert("duration_source".into(), or(&["duration_source"]));
+    o.insert("path".into(), or(&["path"]));
+    o.insert("type".into(), or(&["song_type", "type"]));
+    o.insert("display".into(), or(&["display"]));
+    o.insert("songid".into(), or(&["songid", "song_id", "id"]));
+    o.insert("provider".into(), { let v = or(&["provider"]); if v == Value::String(String::new()) { Value::String("local".into()) } else { v } });
+    o.insert("provider_track_id".into(), or(&["provider_track_id"]));
+    o.insert("provider_url".into(), or(&["provider_url"]));
+    o.insert("local_reference_path".into(), or(&["local_reference_path"]));
+    o.insert("authorization_requirement".into(), or(&["authorization_requirement"]));
+    o.insert("availability_status".into(), or(&["availability_status"]));
+    o.insert("karafun_catalog_only".into(), flag("karafun_catalog_only"));
+    Value::Object(o)
+}
+
+/// `_find_mp3_pair_for_cdg(cdg_path)`: the MP3 beside a CDG (same base name, exact or any case), else "".
+pub fn find_mp3_pair_for_cdg(cdg_path: &str) -> String {
+    let base = splitext(cdg_path).0;
+    for cand in [format!("{base}.mp3"), format!("{base}.MP3")] {
+        if std::path::Path::new(&cand).exists() {
+            return cand;
+        }
+    }
+    let p = std::path::Path::new(cdg_path);
+    let stem_l = p.file_stem().map(|s| s.to_string_lossy().to_lowercase()).unwrap_or_default();
+    let parent = p.parent().filter(|x| !x.as_os_str().is_empty()).unwrap_or(std::path::Path::new("."));
+    if let Ok(rd) = std::fs::read_dir(parent) {
+        for e in rd.flatten() {
+            let path = e.path();
+            if !path.is_file() {
+                continue;
+            }
+            let same_stem = path.file_stem().map(|s| s.to_string_lossy().to_lowercase()) == Some(stem_l.clone());
+            let is_mp3 = path.extension().map(|x| x.to_string_lossy().to_lowercase() == "mp3").unwrap_or(false);
+            if same_stem && is_mp3 {
+                return path.to_string_lossy().to_string();
+            }
+        }
+    }
+    String::new()
+}
