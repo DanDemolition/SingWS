@@ -92,7 +92,20 @@ fn finish_out(sc: &Scenario, w: &mut World, ok: bool, message: &str, entry: &Map
 }
 
 pub fn run(sc: &Scenario, answers: &[Value]) -> Outcome {
+    run_with(sc, answers, None)
+}
+
+/// Dev-Mac live run: the same method, every question answered by the real KaraFun (see live_main.rs).
+pub fn run_live(sc: &Scenario, live: Box<dyn FnMut(&str, &[Value]) -> Value>) -> Outcome {
+    run_with(sc, &[], Some(live))
+}
+
+fn run_with(sc: &Scenario, answers: &[Value], live: Option<Box<dyn FnMut(&str, &[Value]) -> Value>>) -> Outcome {
     let mut w = World::new(answers, sc.end_session_at);
+    if live.is_some() {
+        w.t0 = Some(std::time::Instant::now());
+    }
+    w.live = live;
     w.unified = true;
     w.native = setting(sc, "karafun_native_double_click", false);
     let mut entry = sc.entry.clone();

@@ -24,8 +24,8 @@ CLI = os.environ.get("CARGO_TARGET_DIR", os.path.expanduser("~/.cache/singws-rus
 
 def hiss(r):
     """A steady analogue hiss floor: usually tight enough (spread <= 3 dB, no louder than -46 dBFS) for the adaptive rule to accept it, sometimes just outside."""
-    lo = r.choice([-52.0, -50.0, -48.5, -47.0, -45.0])
-    return r.uniform(lo, lo + r.choice([0.5, 1.5, 2.5, 4.5]))
+    lo = r.choice([-52.0, -50.0, -48.5, -47.5, -45.0])
+    return r.uniform(lo, lo + r.choice([0.0, 0.5, 1.0, 1.5, 4.5]))
 
 
 def make_pcm(r, sr):
@@ -34,12 +34,15 @@ def make_pcm(r, sr):
     levels = []
     kind = r.randrange(7)
     music = r.uniform(-24, -8)
+    hlo, hw = r.choice([-52.0, -50.0, -48.5, -47.5, -45.0]), r.choice([0.0, 0.5, 1.0, 1.5, 4.5])   # ONE steady hiss floor per file
     for w in range(n_windows):
         if kind == 0:                                   # music to the end
             levels.append(music + r.uniform(-4, 2))
         elif kind == 1:                                 # music, then steady hiss (the adaptive-floor case)
             cut = int(n_windows * r.uniform(0.3, 0.9))
-            levels.append(music + r.uniform(-4, 2) if w < cut else hiss(r) if r.random() < 0.95 else r.uniform(-60, -35))
+            if n_windows >= 90 and r.random() < 0.8:
+                cut = min(cut, n_windows - r.randrange(25, 45))
+            levels.append(music + r.uniform(-4, 2) if w < cut else r.uniform(hlo, hlo + hw) if r.random() < 0.95 else r.uniform(-60, -35))
         elif kind == 2:                                 # music, then digital silence
             cut = int(n_windows * r.uniform(0.3, 0.95))
             levels.append(music + r.uniform(-4, 2) if w < cut else -120.0)

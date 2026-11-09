@@ -26,12 +26,15 @@ pub struct World<'a> {
     pub native: bool,
     /// the session dict's `host_focus_restored` key: None = never set
     pub session_restored: Option<bool>,
+    /// Live mode (dev Mac only): answers come from the real KaraFun, given the question and the calls recorded so far; sleeps really sleep and the clock follows the wall clock.
+    pub live: Option<Box<dyn FnMut(&str, &[Value]) -> Value>>,
+    pub t0: Option<std::time::Instant>,
 }
 
 impl<'a> World<'a> {
     pub fn new(answers: &'a [Value], end_session_at: Option<i64>) -> World<'a> {
         World { answers, pos: 0, calls: vec![], log: vec![], sleeps: vec![], t: 100.0, requires: 0, end_session_at, order_error: None, declined: None, unified: false,
-                bgm_scheduled: false, handoff_scheduled: false, event_flag: false, native: false, session_restored: None }
+                bgm_scheduled: false, handoff_scheduled: false, event_flag: false, native: false, session_restored: None, live: None, t0: None }
     }
     /// One read of the session object: counts, and says whether the session is still the current one.
     pub(crate) fn session_read(&mut self) -> bool {
@@ -42,7 +45,20 @@ impl<'a> World<'a> {
     pub(crate) fn session_current(&mut self) -> bool {
         if self.unified { self.session_read() } else { self.ask("session_current").as_bool().unwrap_or(false) }
     }
+    fn tick(&mut self) {
+        if let Some(t0) = self.t0 {
+            self.t = 100.0 + t0.elapsed().as_secs_f64();
+        }
+    }
     pub(crate) fn ask(&mut self, kind: &str) -> Value {
+        if let Some(mut f) = self.live.take() {
+            self.tick();
+            let v = f(kind, &self.calls);
+            self.live = Some(f);
+            self.pos += 1;
+            self.tick();
+            return v;
+        }
         let a = self.answers.get(self.pos).cloned();
         self.pos += 1;
         match a {
@@ -58,10 +74,22 @@ impl<'a> World<'a> {
         }
     }
     pub(crate) fn call(&mut self, name: &str, args: Vec<Value>, kw: Value) {
+        self.tick();
         self.calls.push(json!([name, args, kw]));
+        // live mode: side effects of app-side calls (the native double-click, raising the results window) happen for real
+        if let Some(mut f) = self.live.take() {
+            f(&format!("call:{name}"), &self.calls);
+            self.live = Some(f);
+            self.tick();
+        }
     }
     pub(crate) fn sleep(&mut self, s: f64) {
         self.sleeps.push(s);
+        if self.live.is_some() {
+            std::thread::sleep(std::time::Duration::from_secs_f64(s));
+            self.tick();
+            return;
+        }
         self.t += s;
     }
     pub(crate) fn require(&mut self) -> Result<(), String> {

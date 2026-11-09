@@ -1,4 +1,4 @@
-"""queue_state_shadow's driver (setting queue_state_driver, default off): it may only remove stale local copies of requests the host removed, through the host's own removal, and only
+"""queue_state_shadow's driver (setting queue_state_driver, default dry_run): it may only remove stale local copies of requests the host removed, through the host's own removal, and only
 when the Rust queue rules do not keep them. dry_run says what it would do; off does nothing."""
 import _test_profile  # noqa: F401
 import sys
@@ -64,7 +64,7 @@ class ModeTests(unittest.TestCase):
         self.assertEqual(qss.driver_mode({"queue_state_driver": "APPLY"}), "apply")
         self.assertEqual(qss.driver_mode({"queue_state_driver": "dry_run"}), "dry_run")
         self.assertEqual(qss.driver_mode({"queue_state_driver": "yes"}), "off")
-        self.assertIn('"queue_state_driver": "off"', (Path(__file__).parent / "0.2.18.1.py").read_text())
+        self.assertIn('"queue_state_driver": "dry_run"', (Path(__file__).parent / "0.2.18.1.py").read_text())
 
     def test_off_and_dry_run_touch_nothing(self):
         app, out = App([1, 2], removed=[2]), []

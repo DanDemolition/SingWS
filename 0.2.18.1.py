@@ -4385,7 +4385,7 @@ DEFAULTS = {
     # the rows the server sent, and [QUEUE-STATE-SHADOW] logs ONLY a structural difference from the queue the app actually ended up with (no names or titles). Python's queue is
     # always the one used; reconciles the Rust model does not cover (waitlist, duets, KaraFun, async intake, lock) are not checked.
     "queue_state_shadow": True,
-    "queue_state_driver": "off",   # off | dry_run | apply: with the shadow on, act on requests the host removed that the app's queue still holds (queue_state_shadow.py)
+    "queue_state_driver": "dry_run",   # off | dry_run | apply: with the shadow on, act on requests the host removed that the app's queue still holds (queue_state_shadow.py)
     # Stage E shadow: after the update check decides whether an update is available, a separate low-priority process (a Rust helper) is given the same manifest/release,
     # version and machine and [UPDATE-SHADOW] logs ONLY a different answer. The app's own decision is always the one used; the helper has no network or file code.
     "update_shadow": True,

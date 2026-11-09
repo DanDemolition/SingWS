@@ -50,7 +50,7 @@ def enabled(settings) -> bool:
 
 
 def driver_mode(settings) -> str:
-    """Setting ``queue_state_driver``: ``"off"`` (default), ``"dry_run"`` (log what it would do) or ``"apply"``. Anything else is off."""
+    """Setting ``queue_state_driver``: ``"off"``, ``"dry_run"`` (the app default: log what it would do) or ``"apply"``. Anything else is off."""
     mode = str((settings or {}).get("queue_state_driver", "off") or "off").strip().lower()
     return mode if mode in ("dry_run", "apply") else "off"
 

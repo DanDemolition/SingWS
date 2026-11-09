@@ -247,6 +247,17 @@ mod tests {
     }
 
     #[test]
+    fn a_black_sample_exactly_a_quarter_second_past_the_end_still_counts() {
+        let samples = [(0.0, 0.5, 0.3), (90.0, 0.5, 0.3), (180.25, 0.0, 0.0)];
+        let kept = analyze_video_tail(&samples, 180.0, 0.03, 0.01, 1.0);
+        assert_eq!(kept.reason, "black_tail_too_short_or_no_prior_content");
+        let dropped = analyze_video_tail(&samples, 180.0, 0.03, 0.01, 1.0);
+        assert!(!dropped.safe);
+        let beyond = analyze_video_tail(&[(0.0, 0.5, 0.3), (90.0, 0.5, 0.3), (180.26, 0.0, 0.0)], 180.0, 0.03, 0.01, 1.0);
+        assert_eq!(beyond.reason, "video_active_or_uncertain_through_end");
+    }
+
+    #[test]
     fn an_empty_file_proves_nothing() {
         assert_eq!(analyze_cdg_visual_bytes(&[], 1.0).reason, "empty_cdg");
     }

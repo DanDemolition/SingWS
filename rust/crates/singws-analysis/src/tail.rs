@@ -120,3 +120,87 @@ pub fn audible_through_end(samples: &[f32], sr: usize, window_seconds: f64, thre
     let level_db = 20.0 * l.max(r).max(1e-9).log10();
     level_db > threshold_db
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// stereo samples: `windows` windows of 100 frames at sr 1000, each at a constant amplitude
+    fn pcm(levels: &[f32]) -> Vec<f32> {
+        levels.iter().flat_map(|&a| std::iter::repeat(a).take(200)).collect()
+    }
+
+    fn db(a: f32) -> f64 {
+        20.0 * (a as f64).log10()
+    }
+
+    #[test]
+    fn percentile_and_median_follow_numpy() {
+        let v: Vec<f64> = (1..=10).map(|x| x as f64).collect();
+        assert_eq!(percentile(&v, 90.0), 9.1);
+        assert_eq!(percentile(&v, 10.0), 1.9);
+        assert!((percentile(&v, 95.0) - 9.55).abs() < 1e-12);
+        assert_eq!(percentile(&v, 0.0), 1.0);
+        assert_eq!(percentile(&v, 100.0), 10.0);
+        assert_eq!(percentile(&[5.0], 90.0), 5.0);
+        assert_eq!(median(&[3.0, 1.0, 2.0]), 2.0);
+        assert_eq!(median(&[4.0, 1.0, 3.0, 2.0]), 2.5);
+    }
+
+    #[test]
+    fn a_window_exactly_at_the_threshold_is_not_loud() {
+        let a = 0.5f32;
+        assert_eq!(lead_silence(&pcm(&[a, a, a, a, a, a, a]), 1000, db(a), 0.5), 0.0);
+        assert!(!audible_through_end(&pcm(&[a; 20]), 1000, 0.5, db(a)));
+        assert!(audible_through_end(&pcm(&[a; 20]), 1000, 0.5, db(a) - 0.001));
+        assert!((trailing_silence(&pcm(&[0.9, 0.9, 0.9, 0.9, 0.9, a]), 1000, db(a)).unwrap() - 0.1).abs() < 1e-12);
+    }
+
+    #[test]
+    fn the_lead_silence_is_clamped_to_ten_seconds() {
+        let mut levels = vec![0.0f32; 120];
+        levels.extend([0.5; 5]);
+        assert_eq!(lead_silence(&pcm(&levels), 1000, -50.0, 0.5), 10.0);
+    }
+
+    #[test]
+    fn a_two_sample_decode_is_shorter_than_one_window_not_empty() {
+        assert_eq!(trailing_silence(&[0.1, 0.1], 1000, -65.0), Err(ScanError::ShorterThanWindow));
+        assert_eq!(trailing_silence(&[], 1000, -65.0), Err(ScanError::NoFrames));
+        assert_eq!(trailing_silence(&[0.1], 1000, -65.0), Err(ScanError::NoFrames));
+    }
+
+    #[test]
+    fn a_steady_hiss_after_the_music_is_trailing_silence_by_the_adaptive_rule() {
+        let hiss = 0.003f32; // about -50 dBFS
+        let mut levels = vec![0.1f32; 40];
+        levels.extend(vec![hiss; 40]);
+        assert_eq!(trailing_silence(&pcm(&levels), 1000, -65.0).unwrap(), 4.0);
+    }
+
+    #[test]
+    fn the_adaptive_rule_needs_more_than_floor_plus_three_seconds_of_windows() {
+        let hiss = 0.003f32;
+        let mut levels = vec![0.1f32; 15];
+        levels.extend(vec![hiss; 35]); // exactly 50 windows: floor 20 + tail 30
+        assert_eq!(trailing_silence(&pcm(&levels), 1000, -65.0).unwrap(), 0.0);
+        let mut more = vec![0.1f32; 16];
+        more.extend(vec![hiss; 35]);
+        assert_eq!(trailing_silence(&pcm(&more), 1000, -65.0).unwrap(), 3.5);
+    }
+
+    #[test]
+    fn a_hiss_louder_than_minus_46_or_wobbling_or_too_close_to_the_music_is_not_dead_air() {
+        let mut loud_hiss = vec![0.1f32; 40];
+        loud_hiss.extend(vec![0.006f32; 40]); // about -44 dBFS
+        assert_eq!(trailing_silence(&pcm(&loud_hiss), 1000, -65.0).unwrap(), 0.0);
+        let mut quiet_music = vec![0.008f32; 40]; // about -42 dBFS, less than 12 dB above the floor
+        quiet_music.extend(vec![0.003f32; 40]);
+        assert_eq!(trailing_silence(&pcm(&quiet_music), 1000, -65.0).unwrap(), 0.0);
+        let mut wobble = vec![0.1f32; 40];
+        for i in 0..40 {
+            wobble.push(if i % 2 == 0 { 0.003 } else { 0.0015 }); // 6 dB apart
+        }
+        assert_eq!(trailing_silence(&pcm(&wobble), 1000, -65.0).unwrap(), 0.0);
+    }
+}
