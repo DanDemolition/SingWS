@@ -1,4 +1,5 @@
 """The karaoke disc / brand rules of 0.2.18.1.py vs the Rust singws-discbrand (tools/discbrand_parity.py)."""
+import _test_profile  # noqa: F401  (isolate SINGWS_HOME)
 import os
 import subprocess
 import sys
