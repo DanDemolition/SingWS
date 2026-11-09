@@ -75,6 +75,14 @@
             "singws_2026-11-07.log",
             "singws_2026-11-07.log.2026-11-07"
           ]
+        },
+        {
+          "date": "2026-11-09",
+          "label": "show 2026-11-08 intel 1.0.3.2 rebuild (queue driver dry_run)",
+          "logs": [
+            "singws_2026-11-08.log",
+            "singws_2026-11-08.log.2026-11-08"
+          ]
         }
       ]
     },
@@ -152,6 +160,14 @@
           "logs": [
             "singws_2026-11-07.log",
             "singws_2026-11-07.log.2026-11-07"
+          ]
+        },
+        {
+          "date": "2026-11-09",
+          "label": "show 2026-11-08 intel 1.0.3.2 rebuild (queue driver dry_run)",
+          "logs": [
+            "singws_2026-11-08.log",
+            "singws_2026-11-08.log.2026-11-08"
           ]
         }
       ]
@@ -231,6 +247,14 @@
             "singws_2026-11-07.log",
             "singws_2026-11-07.log.2026-11-07"
           ]
+        },
+        {
+          "date": "2026-11-09",
+          "label": "show 2026-11-08 intel 1.0.3.2 rebuild (queue driver dry_run)",
+          "logs": [
+            "singws_2026-11-08.log",
+            "singws_2026-11-08.log.2026-11-08"
+          ]
         }
       ]
     },
@@ -257,6 +281,14 @@
           "logs": [
             "singws_2026-11-07.log",
             "singws_2026-11-07.log.2026-11-07"
+          ]
+        },
+        {
+          "date": "2026-11-09",
+          "label": "show 2026-11-08 intel 1.0.3.2 rebuild (queue driver dry_run)",
+          "logs": [
+            "singws_2026-11-08.log",
+            "singws_2026-11-08.log.2026-11-08"
           ]
         }
       ]
@@ -336,6 +368,14 @@
             "singws_2026-11-07.log",
             "singws_2026-11-07.log.2026-11-07"
           ]
+        },
+        {
+          "date": "2026-11-09",
+          "label": "show 2026-11-08 intel 1.0.3.2 rebuild (queue driver dry_run)",
+          "logs": [
+            "singws_2026-11-08.log",
+            "singws_2026-11-08.log.2026-11-08"
+          ]
         }
       ]
     },
@@ -413,6 +453,14 @@
           "logs": [
             "singws_2026-11-07.log",
             "singws_2026-11-07.log.2026-11-07"
+          ]
+        },
+        {
+          "date": "2026-11-09",
+          "label": "show 2026-11-08 intel 1.0.3.2 rebuild (queue driver dry_run)",
+          "logs": [
+            "singws_2026-11-08.log",
+            "singws_2026-11-08.log.2026-11-08"
           ]
         }
       ]
@@ -492,6 +540,14 @@
             "singws_2026-11-07.log",
             "singws_2026-11-07.log.2026-11-07"
           ]
+        },
+        {
+          "date": "2026-11-09",
+          "label": "show 2026-11-08 intel 1.0.3.2 rebuild (queue driver dry_run)",
+          "logs": [
+            "singws_2026-11-08.log",
+            "singws_2026-11-08.log.2026-11-08"
+          ]
         }
       ]
     },
@@ -510,6 +566,14 @@
           "label": "dev Mac sessions 2026-10-26 (shell and phone dry run, KaraFun song)",
           "logs": [
             "singws_2026-10-26.log"
+          ]
+        },
+        {
+          "date": "2026-11-09",
+          "label": "show 2026-11-08 intel 1.0.3.2 rebuild (queue driver dry_run)",
+          "logs": [
+            "singws_2026-11-08.log",
+            "singws_2026-11-08.log.2026-11-08"
           ]
         }
       ]
@@ -546,6 +610,14 @@
             "singws_2026-11-07.log",
             "singws_2026-11-07.log.2026-11-07"
           ]
+        },
+        {
+          "date": "2026-11-09",
+          "label": "show 2026-11-08 intel 1.0.3.2 rebuild (queue driver dry_run)",
+          "logs": [
+            "singws_2026-11-08.log",
+            "singws_2026-11-08.log.2026-11-08"
+          ]
         }
       ]
     },
@@ -580,6 +652,14 @@
           "logs": [
             "singws_2026-11-07.log",
             "singws_2026-11-07.log.2026-11-07"
+          ]
+        },
+        {
+          "date": "2026-11-09",
+          "label": "show 2026-11-08 intel 1.0.3.2 rebuild (queue driver dry_run)",
+          "logs": [
+            "singws_2026-11-08.log",
+            "singws_2026-11-08.log.2026-11-08"
           ]
         }
       ]
@@ -616,6 +696,14 @@
             "singws_2026-11-07.log",
             "singws_2026-11-07.log.2026-11-07"
           ]
+        },
+        {
+          "date": "2026-11-09",
+          "label": "show 2026-11-08 intel 1.0.3.2 rebuild (queue driver dry_run)",
+          "logs": [
+            "singws_2026-11-08.log",
+            "singws_2026-11-08.log.2026-11-08"
+          ]
         }
       ]
     },
@@ -650,6 +738,14 @@
           "logs": [
             "singws_2026-11-07.log",
             "singws_2026-11-07.log.2026-11-07"
+          ]
+        },
+        {
+          "date": "2026-11-09",
+          "label": "show 2026-11-08 intel 1.0.3.2 rebuild (queue driver dry_run)",
+          "logs": [
+            "singws_2026-11-08.log",
+            "singws_2026-11-08.log.2026-11-08"
           ]
         }
       ]
@@ -686,6 +782,14 @@
             "singws_2026-11-07.log",
             "singws_2026-11-07.log.2026-11-07"
           ]
+        },
+        {
+          "date": "2026-11-09",
+          "label": "show 2026-11-08 intel 1.0.3.2 rebuild (queue driver dry_run)",
+          "logs": [
+            "singws_2026-11-08.log",
+            "singws_2026-11-08.log.2026-11-08"
+          ]
         }
       ]
     },
@@ -720,6 +824,14 @@
           "logs": [
             "singws_2026-11-07.log",
             "singws_2026-11-07.log.2026-11-07"
+          ]
+        },
+        {
+          "date": "2026-11-09",
+          "label": "show 2026-11-08 intel 1.0.3.2 rebuild (queue driver dry_run)",
+          "logs": [
+            "singws_2026-11-08.log",
+            "singws_2026-11-08.log.2026-11-08"
           ]
         }
       ]
@@ -756,6 +868,14 @@
             "singws_2026-11-07.log",
             "singws_2026-11-07.log.2026-11-07"
           ]
+        },
+        {
+          "date": "2026-11-09",
+          "label": "show 2026-11-08 intel 1.0.3.2 rebuild (queue driver dry_run)",
+          "logs": [
+            "singws_2026-11-08.log",
+            "singws_2026-11-08.log.2026-11-08"
+          ]
         }
       ]
     },
@@ -790,6 +910,14 @@
           "logs": [
             "singws_2026-11-07.log",
             "singws_2026-11-07.log.2026-11-07"
+          ]
+        },
+        {
+          "date": "2026-11-09",
+          "label": "show 2026-11-08 intel 1.0.3.2 rebuild (queue driver dry_run)",
+          "logs": [
+            "singws_2026-11-08.log",
+            "singws_2026-11-08.log.2026-11-08"
           ]
         }
       ]
@@ -826,6 +954,14 @@
             "singws_2026-11-07.log",
             "singws_2026-11-07.log.2026-11-07"
           ]
+        },
+        {
+          "date": "2026-11-09",
+          "label": "show 2026-11-08 intel 1.0.3.2 rebuild (queue driver dry_run)",
+          "logs": [
+            "singws_2026-11-08.log",
+            "singws_2026-11-08.log.2026-11-08"
+          ]
         }
       ]
     },
@@ -860,6 +996,14 @@
           "logs": [
             "singws_2026-11-07.log",
             "singws_2026-11-07.log.2026-11-07"
+          ]
+        },
+        {
+          "date": "2026-11-09",
+          "label": "show 2026-11-08 intel 1.0.3.2 rebuild (queue driver dry_run)",
+          "logs": [
+            "singws_2026-11-08.log",
+            "singws_2026-11-08.log.2026-11-08"
           ]
         }
       ]
@@ -896,6 +1040,14 @@
             "singws_2026-11-07.log",
             "singws_2026-11-07.log.2026-11-07"
           ]
+        },
+        {
+          "date": "2026-11-09",
+          "label": "show 2026-11-08 intel 1.0.3.2 rebuild (queue driver dry_run)",
+          "logs": [
+            "singws_2026-11-08.log",
+            "singws_2026-11-08.log.2026-11-08"
+          ]
         }
       ]
     },
@@ -930,6 +1082,14 @@
           "logs": [
             "singws_2026-11-07.log",
             "singws_2026-11-07.log.2026-11-07"
+          ]
+        },
+        {
+          "date": "2026-11-09",
+          "label": "show 2026-11-08 intel 1.0.3.2 rebuild (queue driver dry_run)",
+          "logs": [
+            "singws_2026-11-08.log",
+            "singws_2026-11-08.log.2026-11-08"
           ]
         }
       ]
@@ -979,6 +1139,14 @@
           "logs": [
             "singws_2026-11-07.log",
             "singws_2026-11-07.log.2026-11-07"
+          ]
+        },
+        {
+          "date": "2026-11-09",
+          "label": "show 2026-11-08 intel 1.0.3.2 rebuild (queue driver dry_run)",
+          "logs": [
+            "singws_2026-11-08.log",
+            "singws_2026-11-08.log.2026-11-08"
           ]
         }
       ]
@@ -1038,6 +1206,14 @@
             "singws_2026-11-07.log",
             "singws_2026-11-07.log.2026-11-07"
           ]
+        },
+        {
+          "date": "2026-11-09",
+          "label": "show 2026-11-08 intel 1.0.3.2 rebuild (queue driver dry_run)",
+          "logs": [
+            "singws_2026-11-08.log",
+            "singws_2026-11-08.log.2026-11-08"
+          ]
         }
       ]
     },
@@ -1096,6 +1272,14 @@
             "singws_2026-11-07.log",
             "singws_2026-11-07.log.2026-11-07"
           ]
+        },
+        {
+          "date": "2026-11-09",
+          "label": "show 2026-11-08 intel 1.0.3.2 rebuild (queue driver dry_run)",
+          "logs": [
+            "singws_2026-11-08.log",
+            "singws_2026-11-08.log.2026-11-08"
+          ]
         }
       ]
     },
@@ -1144,6 +1328,14 @@
           "logs": [
             "singws_2026-11-07.log",
             "singws_2026-11-07.log.2026-11-07"
+          ]
+        },
+        {
+          "date": "2026-11-09",
+          "label": "show 2026-11-08 intel 1.0.3.2 rebuild (queue driver dry_run)",
+          "logs": [
+            "singws_2026-11-08.log",
+            "singws_2026-11-08.log.2026-11-08"
           ]
         }
       ]
@@ -1194,6 +1386,14 @@
             "singws_2026-11-07.log",
             "singws_2026-11-07.log.2026-11-07"
           ]
+        },
+        {
+          "date": "2026-11-09",
+          "label": "show 2026-11-08 intel 1.0.3.2 rebuild (queue driver dry_run)",
+          "logs": [
+            "singws_2026-11-08.log",
+            "singws_2026-11-08.log.2026-11-08"
+          ]
         }
       ]
     },
@@ -1242,6 +1442,14 @@
           "logs": [
             "singws_2026-11-07.log",
             "singws_2026-11-07.log.2026-11-07"
+          ]
+        },
+        {
+          "date": "2026-11-09",
+          "label": "show 2026-11-08 intel 1.0.3.2 rebuild (queue driver dry_run)",
+          "logs": [
+            "singws_2026-11-08.log",
+            "singws_2026-11-08.log.2026-11-08"
           ]
         }
       ]
@@ -1301,6 +1509,14 @@
             "singws_2026-11-07.log",
             "singws_2026-11-07.log.2026-11-07"
           ]
+        },
+        {
+          "date": "2026-11-09",
+          "label": "show 2026-11-08 intel 1.0.3.2 rebuild (queue driver dry_run)",
+          "logs": [
+            "singws_2026-11-08.log",
+            "singws_2026-11-08.log.2026-11-08"
+          ]
         }
       ]
     },
@@ -1349,6 +1565,14 @@
           "logs": [
             "singws_2026-11-07.log",
             "singws_2026-11-07.log.2026-11-07"
+          ]
+        },
+        {
+          "date": "2026-11-09",
+          "label": "show 2026-11-08 intel 1.0.3.2 rebuild (queue driver dry_run)",
+          "logs": [
+            "singws_2026-11-08.log",
+            "singws_2026-11-08.log.2026-11-08"
           ]
         }
       ]
@@ -1407,6 +1631,14 @@
           "logs": [
             "singws_2026-11-07.log",
             "singws_2026-11-07.log.2026-11-07"
+          ]
+        },
+        {
+          "date": "2026-11-09",
+          "label": "show 2026-11-08 intel 1.0.3.2 rebuild (queue driver dry_run)",
+          "logs": [
+            "singws_2026-11-08.log",
+            "singws_2026-11-08.log.2026-11-08"
           ]
         }
       ]
@@ -1471,6 +1703,14 @@
             "singws_2026-11-07.log",
             "singws_2026-11-07.log.2026-11-07"
           ]
+        },
+        {
+          "date": "2026-11-09",
+          "label": "show 2026-11-08 intel 1.0.3.2 rebuild (queue driver dry_run)",
+          "logs": [
+            "singws_2026-11-08.log",
+            "singws_2026-11-08.log.2026-11-08"
+          ]
         }
       ]
     },
@@ -1534,6 +1774,14 @@
             "singws_2026-11-07.log",
             "singws_2026-11-07.log.2026-11-07"
           ]
+        },
+        {
+          "date": "2026-11-09",
+          "label": "show 2026-11-08 intel 1.0.3.2 rebuild (queue driver dry_run)",
+          "logs": [
+            "singws_2026-11-08.log",
+            "singws_2026-11-08.log.2026-11-08"
+          ]
         }
       ]
     },
@@ -1575,6 +1823,14 @@
           "logs": [
             "singws_2026-11-07.log",
             "singws_2026-11-07.log.2026-11-07"
+          ]
+        },
+        {
+          "date": "2026-11-09",
+          "label": "show 2026-11-08 intel 1.0.3.2 rebuild (queue driver dry_run)",
+          "logs": [
+            "singws_2026-11-08.log",
+            "singws_2026-11-08.log.2026-11-08"
           ]
         }
       ]
@@ -1668,6 +1924,14 @@
             "singws_2026-11-07.log",
             "singws_2026-11-07.log.2026-11-07"
           ]
+        },
+        {
+          "date": "2026-11-09",
+          "label": "show 2026-11-08 intel 1.0.3.2 rebuild (queue driver dry_run)",
+          "logs": [
+            "singws_2026-11-08.log",
+            "singws_2026-11-08.log.2026-11-08"
+          ]
         }
       ]
     },
@@ -1709,6 +1973,14 @@
           "logs": [
             "singws_2026-11-07.log",
             "singws_2026-11-07.log.2026-11-07"
+          ]
+        },
+        {
+          "date": "2026-11-09",
+          "label": "show 2026-11-08 intel 1.0.3.2 rebuild (queue driver dry_run)",
+          "logs": [
+            "singws_2026-11-08.log",
+            "singws_2026-11-08.log.2026-11-08"
           ]
         }
       ]
@@ -1759,6 +2031,14 @@
           "logs": [
             "singws_2026-11-07.log",
             "singws_2026-11-07.log.2026-11-07"
+          ]
+        },
+        {
+          "date": "2026-11-09",
+          "label": "show 2026-11-08 intel 1.0.3.2 rebuild (queue driver dry_run)",
+          "logs": [
+            "singws_2026-11-08.log",
+            "singws_2026-11-08.log.2026-11-08"
           ]
         }
       ]
@@ -1830,6 +2110,14 @@
             "singws_2026-11-07.log",
             "singws_2026-11-07.log.2026-11-07"
           ]
+        },
+        {
+          "date": "2026-11-09",
+          "label": "show 2026-11-08 intel 1.0.3.2 rebuild (queue driver dry_run)",
+          "logs": [
+            "singws_2026-11-08.log",
+            "singws_2026-11-08.log.2026-11-08"
+          ]
         }
       ]
     },
@@ -1886,6 +2174,14 @@
           "logs": [
             "singws_2026-11-07.log",
             "singws_2026-11-07.log.2026-11-07"
+          ]
+        },
+        {
+          "date": "2026-11-09",
+          "label": "show 2026-11-08 intel 1.0.3.2 rebuild (queue driver dry_run)",
+          "logs": [
+            "singws_2026-11-08.log",
+            "singws_2026-11-08.log.2026-11-08"
           ]
         }
       ]
@@ -1965,6 +2261,14 @@
             "singws_2026-11-07.log",
             "singws_2026-11-07.log.2026-11-07"
           ]
+        },
+        {
+          "date": "2026-11-09",
+          "label": "show 2026-11-08 intel 1.0.3.2 rebuild (queue driver dry_run)",
+          "logs": [
+            "singws_2026-11-08.log",
+            "singws_2026-11-08.log.2026-11-08"
+          ]
         }
       ]
     },
@@ -2035,6 +2339,14 @@
           "logs": [
             "singws_2026-11-07.log",
             "singws_2026-11-07.log.2026-11-07"
+          ]
+        },
+        {
+          "date": "2026-11-09",
+          "label": "show 2026-11-08 intel 1.0.3.2 rebuild (queue driver dry_run)",
+          "logs": [
+            "singws_2026-11-08.log",
+            "singws_2026-11-08.log.2026-11-08"
           ]
         }
       ]
@@ -2114,6 +2426,14 @@
             "singws_2026-11-07.log",
             "singws_2026-11-07.log.2026-11-07"
           ]
+        },
+        {
+          "date": "2026-11-09",
+          "label": "show 2026-11-08 intel 1.0.3.2 rebuild (queue driver dry_run)",
+          "logs": [
+            "singws_2026-11-08.log",
+            "singws_2026-11-08.log.2026-11-08"
+          ]
         }
       ]
     },
@@ -2191,6 +2511,14 @@
           "logs": [
             "singws_2026-11-07.log",
             "singws_2026-11-07.log.2026-11-07"
+          ]
+        },
+        {
+          "date": "2026-11-09",
+          "label": "show 2026-11-08 intel 1.0.3.2 rebuild (queue driver dry_run)",
+          "logs": [
+            "singws_2026-11-08.log",
+            "singws_2026-11-08.log.2026-11-08"
           ]
         }
       ]
@@ -2270,6 +2598,14 @@
             "singws_2026-11-07.log",
             "singws_2026-11-07.log.2026-11-07"
           ]
+        },
+        {
+          "date": "2026-11-09",
+          "label": "show 2026-11-08 intel 1.0.3.2 rebuild (queue driver dry_run)",
+          "logs": [
+            "singws_2026-11-08.log",
+            "singws_2026-11-08.log.2026-11-08"
+          ]
         }
       ]
     },
@@ -2319,6 +2655,14 @@
             "singws_2026-11-07.log",
             "singws_2026-11-07.log.2026-11-07"
           ]
+        },
+        {
+          "date": "2026-11-09",
+          "label": "show 2026-11-08 intel 1.0.3.2 rebuild (queue driver dry_run)",
+          "logs": [
+            "singws_2026-11-08.log",
+            "singws_2026-11-08.log.2026-11-08"
+          ]
         }
       ]
     },
@@ -2366,6 +2710,14 @@
             "singws_2026-11-07.log",
             "singws_2026-11-07.log.2026-11-07"
           ]
+        },
+        {
+          "date": "2026-11-09",
+          "label": "show 2026-11-08 intel 1.0.3.2 rebuild (queue driver dry_run)",
+          "logs": [
+            "singws_2026-11-08.log",
+            "singws_2026-11-08.log.2026-11-08"
+          ]
         }
       ]
     },
@@ -2392,6 +2744,14 @@
           "logs": [
             "singws_2026-11-07.log",
             "singws_2026-11-07.log.2026-11-07"
+          ]
+        },
+        {
+          "date": "2026-11-09",
+          "label": "show 2026-11-08 intel 1.0.3.2 rebuild (queue driver dry_run)",
+          "logs": [
+            "singws_2026-11-08.log",
+            "singws_2026-11-08.log.2026-11-08"
           ]
         }
       ]
@@ -2457,6 +2817,14 @@
             "singws_2026-11-07.log",
             "singws_2026-11-07.log.2026-11-07"
           ]
+        },
+        {
+          "date": "2026-11-09",
+          "label": "show 2026-11-08 intel 1.0.3.2 rebuild (queue driver dry_run)",
+          "logs": [
+            "singws_2026-11-08.log",
+            "singws_2026-11-08.log.2026-11-08"
+          ]
         }
       ]
     },
@@ -2513,6 +2881,14 @@
           "logs": [
             "singws_2026-11-07.log",
             "singws_2026-11-07.log.2026-11-07"
+          ]
+        },
+        {
+          "date": "2026-11-09",
+          "label": "show 2026-11-08 intel 1.0.3.2 rebuild (queue driver dry_run)",
+          "logs": [
+            "singws_2026-11-08.log",
+            "singws_2026-11-08.log.2026-11-08"
           ]
         }
       ]
@@ -2593,6 +2969,14 @@
             "singws_2026-11-07.log",
             "singws_2026-11-07.log.2026-11-07"
           ]
+        },
+        {
+          "date": "2026-11-09",
+          "label": "show 2026-11-08 intel 1.0.3.2 rebuild (queue driver dry_run)",
+          "logs": [
+            "singws_2026-11-08.log",
+            "singws_2026-11-08.log.2026-11-08"
+          ]
         }
       ]
     },
@@ -2663,6 +3047,14 @@
           "logs": [
             "singws_2026-11-07.log",
             "singws_2026-11-07.log.2026-11-07"
+          ]
+        },
+        {
+          "date": "2026-11-09",
+          "label": "show 2026-11-08 intel 1.0.3.2 rebuild (queue driver dry_run)",
+          "logs": [
+            "singws_2026-11-08.log",
+            "singws_2026-11-08.log.2026-11-08"
           ]
         }
       ]
@@ -2735,6 +3127,14 @@
             "singws_2026-11-07.log",
             "singws_2026-11-07.log.2026-11-07"
           ]
+        },
+        {
+          "date": "2026-11-09",
+          "label": "show 2026-11-08 intel 1.0.3.2 rebuild (queue driver dry_run)",
+          "logs": [
+            "singws_2026-11-08.log",
+            "singws_2026-11-08.log.2026-11-08"
+          ]
         }
       ]
     },
@@ -2784,6 +3184,14 @@
           "logs": [
             "singws_2026-11-07.log",
             "singws_2026-11-07.log.2026-11-07"
+          ]
+        },
+        {
+          "date": "2026-11-09",
+          "label": "show 2026-11-08 intel 1.0.3.2 rebuild (queue driver dry_run)",
+          "logs": [
+            "singws_2026-11-08.log",
+            "singws_2026-11-08.log.2026-11-08"
           ]
         }
       ]
