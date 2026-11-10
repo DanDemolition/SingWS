@@ -59,3 +59,86 @@ Either way the AUDIENCE windows (picture, ticker, rotation screen) stay native G
 - Size: replacing a 68k-line PyQt app is a multi-month rewrite whatever the toolkit; the logic ports are already the bulk of the safety work.
 - Rendering parity of the show-screen effects (QML shaders and particles) has not been tried on any other toolkit.
 - Rich text and emoji/GIF chat, drag-and-drop lists and the waveform editor have no obvious drop-in in the Rust toolkits.
+
+## Toolkit spike results (2026-11-10)
+
+Code: `rust/spikes/toolkit/` (own workspace, not a member of `rust/Cargo.toml`; nothing the app ships changes). One prototype, written twice: a hero card showing live playback state (re-read from `status_snapshot.json` every second), a Ticker tab with a checkbox (custom message on/off, re-rendered through `singws-uimodel::ticker`) and a Waitlist tab (sections and rows from `waitlist_snapshot.json` through `singws-uimodel::waitlist`). Synthetic fixtures. Both were run and looked at on screen (screenshots of Ticker and Waitlist tabs for Slint, Waitlist for Dioxus); the Waitlist text is identical in both and equal to the Qt shell's row text because it is the same Rust function. Tauri was NOT built: Dioxus desktop and Tauri both draw with `wry`/`tao` (same WKWebView), so the webview numbers below apply to both; Tauri only differs in tooling (JS-side frontend by default).
+
+Measured on the dev Mac (M1 Max, macOS 27, Rust 1.99, release, `strip`, thin LTO). Not measured: Intel Mac, Windows, startup of Dioxus (not timed), any long run.
+
+| | Slint 1.18.1 (winit + femtovg/software, accesskit) | Dioxus 0.7 desktop (wry/WKWebView) |
+|---|---|---|
+| Cold build, whole prototype (clean target; includes the 23 s shared `spike-core`, 40 crates, bundled SQLite) | 59 s wall (386 s CPU) | 40 s wall (252 s CPU) |
+| Crates in the dependency tree | 349 | 363 |
+| Release binary | 11.6 MB | 4.0 MB (the OS supplies the engine) |
+| Idle memory | 92 MB RSS, one process | 90 MB app + about 80 MB in WebKit helper processes (WebContent 38, GPU 26, Networking 16) = about 170 MB |
+| Idle CPU (1 s polling) | 0.1 % | 0.0 % (app); WebKit helpers not sampled |
+| Startup | 0.30 s from `main` to the event loop | window appeared within the 4 s wait; not timed |
+| Source | `.slint` markup + Rust glue (56 lines of markup + 30 of Rust for this page) | RSX in Rust + CSS (about 60 lines + 10 of CSS); needed no JavaScript |
+| Licence | GPLv3, or royalty-free desktop licence with attribution, or commercial; compatible with an open-source repo (check the final repo licence against GPLv3 or take the royalty-free terms) | MIT/Apache-2.0; wry/tao MIT/Apache-2.0 |
+| Accessibility | accesskit integrated (feature enabled; screen-reader behaviour NOT tested) | native WebKit/DOM accessibility, the strongest of the two for text lists and forms (not tested here) |
+| Windows | yes (winit; software or femtovg/skia renderers) | yes via WebView2 (Evergreen runtime, present on current Windows; installer must handle old machines) |
+| Embedded video surface | See below | See below |
+| Reuse of `singws-uimodel` | Direct in-process call from Rust; the page code is only layout | Direct when run as the desktop renderer (the vdom runs in the Rust process, as here). **NOT reusable if the UI is compiled to WebAssembly**: `singws-uimodel` pulls `rusqlite` (bundled C SQLite), `libc` and the file readers, so a wasm UI would need those view models split into a pure, wasm-clean crate or kept behind a Rust backend call |
+
+### Video surface and the audience windows (the hard question)
+- Today the audience picture is a native `NSView` made by the Rust video bridge (libmpv GL); rule 6 says surfaces stack in creation order. Neither toolkit removes that; both must be told to leave the video view alone.
+- **Slint:** the winit backend exposes the raw window handle, so the bridge can attach its NSView to the same `NSWindow`, as it does with Qt today. Slint also has a rendering-notifier hook to draw GL/wgpu under or over the UI and (unstable) wgpu texture import, so an in-process video texture inside a Slint scene is possible without a native child view. UI drawn by Slint is one opaque GPU layer: a transparent overlay (ticker over the picture) needs a transparent window plus a second native layer. NOT tried.
+- **Dioxus/Tauri:** a webview is itself a native `NSView`, so the picture and the page are two sibling views; the page can be transparent and sit above the video view (wry supports transparent webviews). Z-order is then exactly the creation-order problem the project already manages, and WKWebView compositing timing is outside our control. For animation-heavy audience effects (ticker scroll, particles) the webview is the less predictable surface for a live show (rule 4: must be looked at, and cannot be unit-tested). NOT tried.
+- Audience effects that are now QML shaders have no direct equivalent in either; Slint can run them in femtovg/GL only through the notifier, the webview through CSS/WebGL.
+
+### Findings that are not in the table
+- Both ports were quick because the logic is already in `singws-uimodel`: the toolkit-specific part of this page was about 60 to 90 lines. That supports the plan: the decision is cheap to reverse as long as no rules live in the UI layer.
+- Slint's build pulled a `compat-1-18` feature requirement (a forward-compatibility switch); trivial, but the project must pin the exact version.
+- The Dioxus prototype needed the `launch` feature; the default `desktop` feature set pulls more (router, fullstack) than a host UI needs.
+- A 4 MB vs 11.6 MB binary is not a deciding factor; the real difference is the second runtime (WebKit, WebView2) with its own processes, updates and quirks.
+
+### Recommendation
+1. **Host window (the 19 pages): Slint**, as the lean said. It is one process and one renderer on both macOS and Windows, the pages port from QML one for one, the licence fits an open-source repo, and it keeps the project "no browser at runtime". Its weaker points: smaller widget set (rich text/chat and big virtualised lists must be checked next), accessibility unproven, and the GPL/royalty-free choice must be recorded.
+2. **Keep Dioxus/Tauri as the fallback** if Slint's rich-text chat, drag-and-drop lists or screen-reader support prove inadequate. Its cost is the wasm-clean split of `singws-uimodel` (or running the vdom in the Rust process as the desktop renderer, which this spike shows works).
+3. **Audience windows stay native GPU surfaces owned by the video bridge**, whichever toolkit wins; settle ticker/effects there with a second spike (a transparent Slint overlay window vs wgpu directly over the picture) looked at on a real TV.
+4. Before committing: repeat the spike on the Intel Mac and on a Windows machine, add the Library list (virtualised, typo-tolerant search) and the chat view (rich text, GIFs) in Slint, and test accessibility with VoiceOver. None of that was done here.
+
+### Decision (operator, 2026-11-10): "go with your recommendation"
+The host-window toolkit is **Slint**; Dioxus/Tauri stays the fallback. Audience windows stay native GPU surfaces owned by the video bridge. Still open before any port starts: the Slint licence choice (GPLv3 vs royalty-free terms) recorded against the repo licence, and the follow-up checks in recommendation 4 (Intel Mac, Windows, virtualised Library list, rich-text chat, VoiceOver). Nothing in the shipped app changes yet; Qt Quick stays the interim UI.
+
+### Licence decision (operator, 2026-11-10)
+SingWS will be released under **GPLv3**, and uses **Slint under its GPLv3 terms** (no royalty-free attribution licence, no commercial licence). Still to do: add the `LICENSE` file and per-crate `license` fields when the repo is opened, and re-read Slint's current licence page then. The bundled libmpv/Signalsmith/other third-party licences need the same GPL-compatibility check before publication.
+
+## Slint follow-up checks (2026-11-10, after the decision)
+Code: same spike (`rust/spikes/toolkit/slint-proto`), new Library and Chat tabs. The other linked session (slint-trial) was told not to duplicate these three checks.
+
+**1. Library page: PASSED on screen (looked at it).** Virtualised `ListView` over a SYNTHETIC 130,000-row index (`genlib`, same columns the app's search reads; the real library is on the Intel Mac), searched through the real `singws-uimodel::search_with_fuzzy`, with a per-row "+" button (click handler wired, not clicked). Idle memory with 20,000 rows in the model: 114 MB (97 to 103 MB with a few thousand).
+
+| Query | Rows | Time |
+|---|---|---|
+| `queen` | 8,125 | 31 ms |
+| `valerie 99` | 507 | 17 ms |
+| `a` (capped at 20,000) | 20,000 | 98 ms |
+| `quen radyo` (typo-tolerant fallback) | 2,708 | 291 ms |
+| `zzzzqq` (no match, full fuzzy scan) | 0 | 363 ms (the 400 ms budget) |
+
+Search runs on the UI thread in the spike; the fuzzy cases should move to a worker thread in the real page. Typing into the search box was not exercised (the query was injected at start); text input in Slint's `LineEdit` is unverified for IME and emoji.
+
+**2. Rich-text chat: SEEN ON SCREEN (re-run with the screen free).** Looked at: colour emoji render correctly; bold, italic, strikethrough, a coloured word and a bullet list render; the link shows but in default blue, hard to read on the dark bubble (needs a theme colour); the still picture and the GIF show and the GIF frame changes between two captures. Rows in the picture bubble have extra empty height (layout to tune). Still unchecked: link clicks, text selection/copy, many GIFs at once. Earlier text of this item, kept for the facts: (it was) built before it was seen. The window was covered by another app when the screenshot was taken (the operator was using the screen), so this tab has only been compiled and run (95 MB, 1.6 to 4 % CPU with a 10 fps GIF timer), not looked at. What the code does and what Slint 1.18 offers:
+- `StyledText` (CommonMark subset: bold, italic, strike, inline code, links, lists, `<u>`, `<font color>`), fed from Rust with `StyledText::from_markdown` (currently through `slint::private_unstable_api`, i.e. not a stable API). Unsupported in it: images inside text, headings, tables, block quotes. So the Qt chat's HTML bubbles map to markdown plus separate `Image` elements; GIFs and pictures are separate elements below the text, which is how the chat already attaches them.
+- Pictures: `slint::Image` from RGBA pixel buffers (works).
+- Animated GIF: Slint has no animated-image element; the prototype decodes frames with the `image` crate and swaps the row's image from a `Timer` at 10 fps (a real GIF built and decoded in memory). A chat with many visible GIFs needs a shared timer and frame caching.
+- Colour emoji rendering, link clicking and text SELECTION/copy inside `StyledText` are unverified; text selection is not a documented feature of `Text`/`StyledText`.
+
+**3. Transparent ticker overlay over a playing picture: PASSED on this Mac's screen, with limits.** `overlay-proto`: a borderless, always-on-top, transparent Slint window (femtovg, 9.0 MB binary, 90 MB RSS, 4.6 to 5.9 % CPU while a 34 px ticker scrolls linearly) placed over the bottom strip of an `mpv` window playing a muted H.264 loop (mpv draws through its own GL surface, as libmpv does in the bridge). Screenshot: the video keeps playing and shows through the 70 %-black strip and its rounded corners; the lime "UP NEXT" tag is opaque; the ticker text scrolled across in the first capture. Limits, so this is NOT a pass for the real audience window: (a) it is a separate top-level window floating over mpv's window, not a child surface in the audience window, so the creation-order stacking rule (6) is not exercised, and an always-on-top window also floats over other apps; (b) mpv's own window, not the Rust video bridge; (c) not looked at on a TV or second display, and not on Intel (Intel GPU transparency and femtovg are untested); (d) mpv geometry is in physical pixels and Slint's in logical points: a position bug in my first run showed how easily the two frames disagree, so the real display code must use one frame. Slint's software renderer was not tried for the overlay.
+**4. VoiceOver, Intel Mac, Windows: NOT DONE.** Pending.
+
+Net: step 1 removes the biggest widget risk. Step 2 stays the open risk (emoji, selection, many GIFs); if it fails, that single page can be the one place a webview component is considered.
+
+## Slint port, slice 1: Ticker and Waitlist (2026-11-10)
+
+New crate `rust/ui-slint/singws-ui-slint` in its OWN workspace (`rust/ui-slint/`): adding slint (winit, femtovg) to `rust/Cargo.toml` would rewrite the shared `Cargo.lock` every shipped crate builds from. Build/test: `cd rust/ui-slint && cargo test` / `cargo build --release` (use a private `CARGO_TARGET_DIR`).
+Read-only ports of the Qt shell's `ticker_panel.rs`/`TickerPage.qml` and `waitlist_panel.rs`/`WaitlistPage.qml`: same files (`SINGWS_HOME` or `~/SingWS`), 3 s refresh, rules from `singws-uimodel` (`ticker::view`, `waitlist::sections_from_snapshot`), snapshot staleness status line included. Toolkit-free glue is in `ticker_page.rs` / `waitlist_page.rs` (6 unit tests, scratch dirs); UI is `ui/app.slint`. Key/tempo of a request is shown as a tag (read the way the app's Edit dialog reads it).
+Seen on screen (macOS, fixture data copied to a scratch dir): both tabs render correctly (numbered ticker text and singer list; waitlist section header, first-time-singer green row, key/tempo pill). `SINGWS_UI_TAB=1` opens on Waitlist.
+Not done: Add/Remove/Restore/Edit and the custom-message editor (need the app command channel, next slice), custom-message toggle in the ticker view, tab switching by mouse not exercised, Windows, Intel.
+
+### Slint port, slice 2: command channel and actions (2026-11-10)
+
+`control.rs` reuses `singws-control` (PIN login, relay client, command validation; same code the Qt shell uses) behind a small `Controller`; a connection bar (server, venue, host PIN, Connect/Disconnect) sits above the tabs and the PIN is never stored (server/venue go to the shell's `connection.json`). With the app online the Waitlist rows get Edit (overlay form: singer, title, artist, key -12..12, tempo -30..30) / Add / Remove (second press within 3 s confirms) / Restore, and the Ticker tab gets the custom-message editor (Save message / Show on ticker / Hide, `settings.set`). The app's answer shows in a banner. 11 unit tests (argument builders pass `validate_command`, refusals, not-connected error, saved connection holds no PIN).
+Seen on screen: both pages with the buttons and editor (`SINGWS_UI_FORCE_LIVE=1`, a layout-only switch; no connection made). NOT done: a real login and a real command against a server/app (needs the operator's PIN and a running app; the control crate's own tests cover the relay), clicking through the Edit form, Windows, Intel.
