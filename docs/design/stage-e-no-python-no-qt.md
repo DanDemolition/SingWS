@@ -130,3 +130,7 @@ Search runs on the UI thread in the spike; the fuzzy cases should move to a work
 **4. VoiceOver, Intel Mac, Windows: NOT DONE.** Pending.
 
 Net: step 1 removes the biggest widget risk. Step 2 stays the open risk (emoji, selection, many GIFs); if it fails, that single page can be the one place a webview component is considered.
+
+### Licence loose ends (2026-11-10)
+- `LICENSE` (GPLv3 text from gnu.org) added at the repo root. Per-crate `license = "GPL-3.0-only"` is set only in the spike crates; the ~38 existing crates still need it (a mechanical edit, left for when the repo is opened so the diff is reviewed once).
+- NOT done: the third-party GPL-compatibility check (bundled libmpv/FFmpeg build options, Signalsmith, KaraFun web helper's Chrome-for-Testing download, fonts/artwork) and a re-read of Slint's current licence page. Nothing is pushed.
