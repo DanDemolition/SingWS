@@ -101,3 +101,6 @@ Measured on the dev Mac (M1 Max, macOS 27, Rust 1.99, release, `strip`, thin LTO
 
 ### Decision (operator, 2026-11-10): "go with your recommendation"
 The host-window toolkit is **Slint**; Dioxus/Tauri stays the fallback. Audience windows stay native GPU surfaces owned by the video bridge. Still open before any port starts: the Slint licence choice (GPLv3 vs royalty-free terms) recorded against the repo licence, and the follow-up checks in recommendation 4 (Intel Mac, Windows, virtualised Library list, rich-text chat, VoiceOver). Nothing in the shipped app changes yet; Qt Quick stays the interim UI.
+
+### Licence decision (operator, 2026-11-10)
+SingWS will be released under **GPLv3**, and uses **Slint under its GPLv3 terms** (no royalty-free attribution licence, no commercial licence). Still to do: add the `LICENSE` file and per-crate `license` fields when the repo is opened, and re-read Slint's current licence page then. The bundled libmpv/Signalsmith/other third-party licences need the same GPL-compatibility check before publication.
