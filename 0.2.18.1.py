@@ -61273,10 +61273,11 @@ class KaraokeApp(QWidget):
         if not isinstance(active, dict):
             return
         action = str(action or "").strip().lower()
+        _web_song_ended = False
         try:  # a song played through the web player: stop it and take its picture off the audience screen (any end)
             _web = getattr(self, "_karafun_web", None)
             if _web is not None:
-                _web.on_finish()
+                _web_song_ended = bool(_web.on_finish())
         except Exception as exc:
             _diag(f"[KARAFUN-WEB] finish clean-up failed: {exc}")
         try:
@@ -61316,6 +61317,9 @@ class KaraokeApp(QWidget):
             pass
         self.karaoke_playing = False
         self._eta_hold_current_secs = 0
+        if _web_song_ended:
+            # Like the end of a normal song: clear the karaoke picture and bring the between-singers slideshow back with its fade.
+            self._show_idle_background_after_karaoke(reason="karafun_web_end", advance_slideshow=True)
         self._restore_show_screen_from_karafun()
 
         if action == "return_to_queue":

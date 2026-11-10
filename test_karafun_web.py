@@ -51,9 +51,22 @@ class BrowserTests(unittest.TestCase):
         patcher = mock.patch.dict(os.environ, {"SINGWS_HOME": str(self.root / "home")})
         patcher.start(); self.addCleanup(patcher.stop); self.addCleanup(self.tmp.cleanup)
 
-    def test_an_installed_chrome_is_used_and_nothing_is_downloaded(self):
+    def test_the_dedicated_browser_is_preferred_over_an_installed_chrome(self):
+        data = fake_zip(self.root)
         with mock.patch.object(karafun_web, "find_chrome", return_value=Path("/x/chrome")):
-            self.assertEqual(karafun_web.ensure_browser(urlopen=mock.Mock(side_effect=AssertionError("downloaded"))), Path("/x/chrome"))
+            got = karafun_web.ensure_browser(urlopen=server(data), verify=True)
+            self.assertIn("999.0.1", str(got))                     # SingWS's own copy, not the everyday Chrome
+            again = karafun_web.ensure_browser(urlopen=mock.Mock(side_effect=AssertionError("downloaded twice")), verify=True)
+            self.assertEqual(again, got)
+
+    def test_an_installed_chrome_is_only_the_fallback_when_the_download_is_not_possible(self):
+        def offline(url, timeout=None):
+            raise OSError("no internet")
+        with mock.patch.object(karafun_web, "find_chrome", return_value=Path("/x/chrome")):
+            self.assertEqual(karafun_web.ensure_browser(urlopen=offline), Path("/x/chrome"))
+        with mock.patch.object(karafun_web, "find_chrome", return_value=None):
+            with self.assertRaises(RuntimeError):
+                karafun_web.ensure_browser(urlopen=offline)
 
     def test_it_downloads_once_unpacks_checks_and_reuses(self):
         data = fake_zip(self.root)

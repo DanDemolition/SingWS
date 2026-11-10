@@ -56,6 +56,7 @@ class KaraFunWebHost:
         self._frame_timer = None
         self._frames_shown = False
         self._sat_at_end_since: Optional[float] = None
+        self._song_open = False          # a song was handed to the web player and has not been finished by the app yet
 
     # ---- settings and the service
     def enabled(self) -> bool:
@@ -132,6 +133,7 @@ class KaraFunWebHost:
                       "tempo": tempo, "at": time.monotonic(), "heard": False, "sent": False,
                       "active": getattr(app, "_active_external_karafun", None)}
         self._sat_at_end_since = None
+        self._song_open = True
         entry["karafun_pending_at"] = int(time.time())
         entry["karafun_key_current"], entry["karafun_tempo_current"] = 0, 100
         app._set_karafun_entry_status(entry, "launching", message="Starting KaraFun...")
@@ -352,18 +354,25 @@ class KaraFunWebHost:
         self._log(f"live key/tempo {int(target_key):+d}/{int(target_tempo)}%")
         return int(target_key), int(target_tempo)
 
-    def on_finish(self) -> None:
-        """Any end of the KaraFun song (complete, stop, return to queue): the player stops and the picture leaves the audience screen."""
-        if self.asked is None:
-            return
+    def on_finish(self) -> bool:
+        """Any end of the KaraFun song (complete, stop, return to queue): the player stops and the picture leaves the audience screen.
+
+        Returns True when a web-player song was open, so the app can bring its idle slideshow back. This must not depend on `asked`: a song that ends by itself
+        clears `asked` before the app's finish runs, and the picture stream and the player would otherwise be left running (the audience kept KaraFun's page).
+        """
+        was_open = self._song_open or self.asked is not None
+        self._song_open = False
         self.asked = None
         self._sat_at_end_since = None
+        if not was_open:
+            return False
         self._stop_frames()
         try:
             if self.service is not None and self.service.web is not None:
                 self.service.web.stop()
         except Exception:
             pass
+        return True
 
     # ---- the picture
     def _audience_size(self):

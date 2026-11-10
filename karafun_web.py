@@ -100,15 +100,23 @@ def _default_open(url: str, timeout: float = 30):
 
 
 def ensure_browser(progress: Callable[[int, int], None] = lambda done, total: None, *, urlopen=None, verify: bool = True) -> Path:
-    """The browser KaraFun's player runs in: an installed Google Chrome, else the Chrome for Testing in ~/SingWS (downloaded now if it is not
-    there yet: about 200 MB from Google's own site, checked that it runs and is the version asked for, unpacked into a folder of its own and used only by SingWS).
+    """The browser KaraFun's player runs in: SingWS's OWN Chrome for Testing in ~/SingWS (downloaded now if it is not there yet: about 200 MB from Google's
+    own site, checked that it runs and is the version asked for, unpacked into a folder of its own), so nothing you do in your everyday Chrome (quitting it,
+    scripting it, updating it) can reach the player. Only when that cannot be downloaded (offline) is an installed Google Chrome used instead.
     `progress(bytes_done, bytes_total)` is called while it downloads. Raises RuntimeError (nothing half-installed is left behind)."""
-    installed = find_chrome()
-    if installed is not None:
-        return installed
     have = downloaded_chrome()
     if have is not None:
         return have
+    installed = find_chrome()
+    try:
+        return _download_browser(progress, urlopen, verify)
+    except RuntimeError:
+        if installed is not None:
+            return installed
+        raise
+
+
+def _download_browser(progress, urlopen, verify) -> Path:
     import shutil
     import tempfile
     opener = urlopen or _default_open

@@ -229,6 +229,22 @@ class HostTests(unittest.TestCase):
         self.assertIn(("set_key", (-2,)), service.web.calls)
         self.assertIn(("set_tempo", (110,)), service.web.calls)
 
+    def test_a_song_that_ends_by_itself_still_stops_the_player_and_the_picture(self):
+        # _complete clears `asked` BEFORE the app's finish calls on_finish: the picture stream must still be stopped (the audience kept KaraFun's page).
+        app, entry, service, host = self._playing()
+        service.web.calls.clear()
+        host._handle(status(playing=False, position=129.5, duration=130.0))      # natural end -> _complete -> asked is None
+        self.assertIsNone(host.asked)
+        self.assertEqual(host.on_finish(), True)
+        self.assertIn(("stop", ()), service.web.calls)
+        host._stop_frames.assert_called()
+        self.assertEqual(host.on_finish(), False)                                # a second finish does nothing
+
+    def test_finish_without_a_web_song_says_so(self):
+        app, entry, service, host = make()
+        self.assertEqual(host.on_finish(), False)
+        host._stop_frames.assert_not_called()
+
     def test_finishing_stops_the_player_and_the_picture(self):
         app, entry, service, host = self._playing()
         service.web.calls.clear()
@@ -254,6 +270,8 @@ class HookSourceTests(unittest.TestCase):
     def test_finish_and_shutdown_and_start_are_hooked(self):
         finish = SOURCE[SOURCE.index("def _finish_external_karafun_playback"):][:1500]
         self.assertIn("_web.on_finish()", finish)
+        whole = SOURCE[SOURCE.index("def _finish_external_karafun_playback"):][:7000]
+        self.assertIn('self._show_idle_background_after_karaoke(reason="karafun_web_end", advance_slideshow=True)', whole)
         self.assertIn("self._karafun_web_shutdown()", SOURCE)
         start = SOURCE[SOURCE.index("def _start_external_karafun_playback"):][:9000]
         self.assertIn("web_playback", start)
