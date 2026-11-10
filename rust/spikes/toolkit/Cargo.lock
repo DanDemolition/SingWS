@@ -4878,6 +4878,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "overlay-proto"
+version = "0.0.0"
+dependencies = [
+ "slint",
+ "slint-build",
+ "spike-core",
+]
+
+[[package]]
 name = "owned_ttf_parser"
 version = "0.25.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

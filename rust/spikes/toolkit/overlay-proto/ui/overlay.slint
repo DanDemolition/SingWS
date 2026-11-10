@@ -1,0 +1,11 @@
+export component Overlay inherits Window {
+    no-frame: true; always-on-top: true; background: transparent;
+    in property <string> ticker-text;
+    in property <length> strip-w: 1280px;
+    Rectangle { background: #000000b0; border-radius: 14px; clip: true;
+        Text { text: ticker-text; color: white; font-size: 34px; font-weight: 700; vertical-alignment: center; height: parent.height;
+            x: strip-w; animate x { duration: 9s; iteration-count: -1; easing: linear; }
+            init => { self.x = -self.width; } }
+        Rectangle { x: 0; width: 170px; background: #b6ff3be0; Text { text: "UP NEXT"; color: #14101f; font-size: 22px; font-weight: 800; } }
+    }
+}
