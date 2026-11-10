@@ -2,6 +2,7 @@
 import _test_profile  # noqa: F401
 import sys
 import unittest
+from pathlib import Path
 from unittest import mock
 
 import karafun_credentials as creds
@@ -12,6 +13,13 @@ ACCOUNT = "singws-test-account@example.invalid"
 
 @unittest.skipUnless(sys.platform == "darwin", "macOS Keychain")
 class KeychainTests(unittest.TestCase):
+    """Uses its OWN Keychain service name: the real one holds the operator's saved login (a test run once wiped it)."""
+    def setUp(self):
+        patcher = mock.patch.object(creds, "SERVICE", "SingWS KaraFun account TEST ONLY")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        creds.delete(ACCOUNT)
+
     def tearDown(self):
         creds.delete(ACCOUNT)
 
@@ -41,6 +49,26 @@ class KeychainTests(unittest.TestCase):
         with mock.patch.object(creds.subprocess, "run", spy):
             creds.save(ACCOUNT, "uniquepasswordvalue")
         self.assertFalse(any("uniquepasswordvalue" in part or "uniquepasswordvalue".encode().hex() in part for cmd in seen for part in cmd))
+
+
+@unittest.skipUnless(sys.platform == "darwin", "macOS Keychain")
+class SaveKeepsOtherAccountsTests(unittest.TestCase):
+    def test_saving_one_account_does_not_delete_another(self):
+        with mock.patch.object(creds, "SERVICE", "SingWS KaraFun account TEST ONLY"):
+            other = "singws-test-other@example.invalid"
+            try:
+                creds.save(other, "other-password")
+                creds.save(ACCOUNT, "mine")
+                self.assertEqual(creds.load(other), "other-password")
+                self.assertEqual(creds.load(ACCOUNT), "mine")
+            finally:
+                creds.delete(other)
+                creds.delete(ACCOUNT)
+
+    def test_the_tests_never_use_the_real_service_name(self):
+        self.assertEqual(creds.SERVICE, "SingWS KaraFun account")      # (outside the patch) the real one is unchanged
+        src = Path(__file__).read_text(encoding="utf-8")
+        self.assertNotIn("creds." + "delete()", src)       # a no-argument delete removes EVERY saved login under the service
 
 
 class HostLoaderTests(unittest.TestCase):

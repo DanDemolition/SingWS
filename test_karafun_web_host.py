@@ -42,6 +42,7 @@ class FakeApp:
         entry["karafun_status"] = status
         self.statuses.append((status, message))
     def _karafun_active_entry(self): return self.entry
+    def _karafun_search_queries_for_entry(self, entry): return ["NOFX Linoleum", "Linoleum NOFX", "Linoleum", "NOFX"]
     def _show_processing_notification(self, text, level="info"): self.notes.append((level, text))
     def _schedule_save_data(self, ms): pass
     def update_queue_display(self): pass
@@ -97,7 +98,7 @@ class HostTests(unittest.TestCase):
     def test_start_plays_the_id_by_artist_and_title_when_ready(self):
         app, entry, service, host = make()
         self.assertTrue(host.start(entry, 2, 90))
-        self.assertIn(("play", (3241559, "NOFX Linoleum")), service.web.calls)
+        self.assertIn(("play", (3241559, "NOFX Linoleum", ["NOFX Linoleum", "Linoleum NOFX", "Linoleum", "NOFX"], "NOFX", "Linoleum")), service.web.calls)
         self.assertEqual(app.statuses[0], ("launching", "Starting KaraFun..."))
 
     def test_start_while_the_player_is_still_starting_plays_when_it_is_ready(self):
@@ -106,7 +107,7 @@ class HostTests(unittest.TestCase):
         self.assertEqual(service.web.calls, [])
         service.state = "ready"
         host._service_state("ready", "Signed in")
-        self.assertIn(("play", (3241559, "NOFX Linoleum")), service.web.calls)
+        self.assertIn(("play", (3241559, "NOFX Linoleum", ["NOFX Linoleum", "Linoleum NOFX", "Linoleum", "NOFX"], "NOFX", "Linoleum")), service.web.calls)
 
     def test_signing_in_waits_then_plays_when_ready(self):
         app, entry, service, host = make(state="sign_in")
@@ -115,7 +116,7 @@ class HostTests(unittest.TestCase):
         self.assertIsNotNone(host.asked)
         service.state = "ready"
         host._service_state("ready", "Signed in")
-        self.assertIn(("play", (3241559, "NOFX Linoleum")), service.web.calls)
+        self.assertIn(("play", (3241559, "NOFX Linoleum", ["NOFX Linoleum", "Linoleum NOFX", "Linoleum", "NOFX"], "NOFX", "Linoleum")), service.web.calls)
 
     def test_never_signing_in_fails_with_the_sign_in_message(self):
         app, entry, service, host = make(state="sign_in")

@@ -3,7 +3,7 @@
 //! Run: `singws-karafun-web [--profile DIR] [--chrome PATH]` (profile default: ~/SingWS/Chrome-KaraFun, which keeps the sign-in).
 //!
 //! stdin, one JSON object per line, `{"cmd": ...}`:
-//!   play {id, query}      search KaraFun for `query` ("Artist Title") and play song `id` now (KaraFun's own queue is emptied first)
+//!   play {id, query, queries?, artist?, title?}   search KaraFun for `query` ("Artist Title"; then the `queries` ladder) and play the song that matches (by `id`, else by title + artist like SingWS's own search); KaraFun's own queue is emptied first
 //!   pause | resume | stop
 //!   seek {seconds} | key {semitones} | tempo {percent} | volume {volume}   (volume 0-100)
 //!   login {email, password}   sign in with the account's own login form call (no browser); the password is never logged
@@ -44,9 +44,14 @@ fn script_for(line: &Value) -> Option<String> {
     Some(match line.get("cmd")?.as_str()? {
         "play" => {
             let id = line.get("id")?.as_u64()?;
-            // `query` is JSON already, so quotes in a title can't break out of the call.
+            // `query` and the rest are JSON already, so quotes in a title can't break out of the call.
             let query = line.get("query").filter(|q| q.is_string()).cloned().unwrap_or(Value::Null);
-            format!("singwsPlay({id}, {query})")
+            let extra = json!({
+                "queries": line.get("queries").filter(|q| q.is_array()).cloned().unwrap_or(json!([])),
+                "artist": line.get("artist").filter(|q| q.is_string()).cloned().unwrap_or(Value::Null),
+                "title": line.get("title").filter(|q| q.is_string()).cloned().unwrap_or(Value::Null),
+            });
+            format!("singwsPlay({id}, {query}, {extra})")
         }
         "pause" => "singwsPause()".into(),
         "resume" => "singwsResume()".into(),

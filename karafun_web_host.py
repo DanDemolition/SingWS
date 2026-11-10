@@ -129,7 +129,11 @@ class KaraFunWebHost:
             tempo = int(tempo_percent) if tempo_percent is not None else 100
         except (TypeError, ValueError):
             tempo = 100
-        self.asked = {"id": song_id, "entry": entry, "title": title, "query": f"{artist} {title}".strip(), "key": int(key or 0),
+        try:      # the app's own, proven query ladder (artist+title, title+artist, title, artist: cleaned of qualifiers)
+            ladder = list(app._karafun_search_queries_for_entry(entry))
+        except Exception:
+            ladder = []
+        self.asked = {"id": song_id, "entry": entry, "title": title, "artist": artist, "queries": ladder, "query": f"{artist} {title}".strip(), "key": int(key or 0),
                       "tempo": tempo, "at": time.monotonic(), "heard": False, "sent": False,
                       "active": getattr(app, "_active_external_karafun", None)}
         self._sat_at_end_since = None
@@ -154,7 +158,7 @@ class KaraFunWebHost:
             return
         asked["sent"] = True
         asked["sent_at"] = time.monotonic()
-        self.service.web.play(asked["id"], asked["query"])
+        self.service.web.play(asked["id"], asked["query"], asked.get("queries"), asked.get("artist", ""), asked.get("title", ""))
 
     def _arm_watchdog(self) -> None:
         asked = self.asked

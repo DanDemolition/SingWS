@@ -60,31 +60,64 @@
   // hearing the id it asked for.
   let alias = null;
   const norm = t => String(t || '').toLowerCase().normalize('NFKD').replace(/[^\p{L}\p{N}]+/gu, '');
-  const byName = (list, query) => {
-    const q = norm(query);
-    return list.find(r => norm(`${r.content.artist.name} ${r.content.title}`) === q)
-      || list.find(r => q.includes(norm(r.content.artist.name)) && q.includes(norm(r.content.title)));
+  // The matching rules of SingWS's own KaraFun search (the ones that worked with the KaraFun app): qualifiers such as "(live)", "[Remix]", "(Karaoke
+  // Version)" do not count in a title; "&" and "and" are the same; a title match needs its ARTIST confirmed, except when exactly one result has that
+  // title (the old "selected KaraFun title without artist confirmation" case).
+  const QUAL = /(karaoke|version|explicit|clean|remaster|live|feat\.?|ft\.?|remix|acoustic|radio edit|single|mix)/i;
+  const stripQualifiers = t => String(t || '').replace(/\(([^)]*)\)/g, (m, inner) => (QUAL.test(inner) ? ' ' : m)).replace(/\[([^\]]*)\]/g, (m, inner) => (QUAL.test(inner) ? ' ' : m));
+  const words = t => String(t || '').toLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g, '').replace(/&/g, ' and ').replace(/[’'`]/g, '').replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+  const titleKey = t => words(stripQualifiers(t)).replace(/\s+/g, '');
+  const artistWords = t => words(t).split(' ').filter(w => w.length >= 3 && !['and', 'the', 'feat', 'featuring'].includes(w));
+  const artistMatches = (have, want) => {
+    const h = words(have).replace(/\s+/g, ''), w = words(want).replace(/\s+/g, '');
+    if (!h || !w) return false;
+    if (h.includes(w) || w.includes(h)) return true;
+    const hw = artistWords(have);
+    return artistWords(want).some(x => hw.includes(x));
+  };
+  const choose = (list, id, wantArtist, wantTitle, query) => {
+    const byId = list.find(r => r.content.id === id);
+    if (byId) return byId;
+    if (wantTitle) {
+      const key = titleKey(wantTitle);
+      let same = list.filter(r => titleKey(r.content.title) === key);
+      // The version whose title is written exactly like the request first, the "(live)" ones after.
+      same = same.sort((x, y) => (words(y.content.title) === words(wantTitle)) - (words(x.content.title) === words(wantTitle)));
+      const confirmed = same.filter(r => artistMatches(r.content.artist.name, wantArtist));
+      if (confirmed.length) return confirmed[0];
+      if (same.length === 1) return same[0];
+      return null;
+    }
+    const q = words(query).replace(/\s+/g, '');
+    return list.find(r => words(`${r.content.artist.name} ${r.content.title}`).replace(/\s+/g, '') === q)
+      || list.find(r => q.includes(words(r.content.artist.name).replace(/\s+/g, '')) && q.includes(titleKey(r.content.title)));
   };
   const askedId = web => (alias && alias.web === web ? alias.asked : web);
-  window.singwsPlay = async (id, query) => {
+  window.singwsPlay = async (id, query, extra) => {
     // Black until this song plays: KaraFun's canvas still shows the last
     // song's lyrics while the new one is found and loaded.
     blankUntil(id);
     if (!connect()) return fail('Play', 'KaraFun is still starting');
+    extra = extra || {};
     let item = results.find(r => r.content.id === id);
-    if (!item && query) {
-      // As written first; then without punctuation, which KaraFun's search
-      // can trip on (it found nothing for "Alice in Chains Would?").
-      const plain = query.replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
-      for (const term of plain && plain !== query ? [query, plain] : [query]) {
+    // SingWS's own query ladder first (artist + title, title + artist, title, artist: cleaned of qualifiers, "&" as "and"), then the plain request.
+    const asked = [query, ...(Array.isArray(extra.queries) ? extra.queries : [])].filter(q => typeof q === 'string' && q.trim());
+    if (!item && asked.length) {
+      const terms = [];
+      for (const q of asked) {
+        // As written, then without punctuation, which KaraFun's search can trip on (it found nothing for "Alice in Chains Would?").
+        const plain = q.replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+        for (const t of [q, plain]) if (t && !terms.includes(t)) terms.push(t);
+      }
+      for (const term of terms) {
         try {
           // Right after a sign-in the player is still reloading its session and its search can answer nothing: ask again a few times.
           let list = await find(term);
           for (let again = 0; again < 3 && !list.length; again++) { post({ type: 'log', message: `search "${term}": no answer yet, asking again` }); await sleep(4000); list = await find(term); }
-          item = list.find(r => r.content.id === id) || byName(list, query);
+          item = choose(list, id, extra.artist || '', extra.title || '', query || term);
         } catch (error) { return fail('Play', error); }
         if (item) break;
-        post({ type: 'log', message: `search "${term}": song ${id} not among ${results.length} result(s) [${results.map(r => typeof r.content.id + ':' + r.content.id + ' ' + r.content.title).join('; ')}]` });
+        post({ type: 'log', message: `search "${term}": no match among ${results.length} result(s) [${results.map(r => `${(r.content.artist && r.content.artist.name) || ''} - ${r.content.title}`).join('; ')}]` });
       }
     }
     if (!item && query && !results.length) return fail('Play', `KaraFun's search found nothing for "${query}" (no internet? Settings → KaraFun account… → Reload KaraFun once it's back)`);

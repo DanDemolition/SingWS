@@ -265,9 +265,17 @@ class KaraFunWeb:
                 pass
 
     # ---- the player
-    def play(self, song_id: int, query: Optional[str] = None) -> None:
-        """Search KaraFun for `query` ("Artist Title") and play song `song_id` now (KaraFun's own queue is emptied first)."""
-        self.command("play", id=int(song_id), query=query)
+    def play(self, song_id: int, query: Optional[str] = None, queries=None, artist: str = "", title: str = "") -> None:
+        """Search KaraFun for `query` ("Artist Title"), then the `queries` ladder, and play the song that matches `song_id` or, failing that, `title` by `artist`
+        (qualifiers like "(live)" ignored, as in SingWS's own KaraFun search). KaraFun's own queue is emptied first."""
+        fields = {"id": int(song_id), "query": query}
+        if queries:
+            fields["queries"] = [str(q) for q in queries if str(q or "").strip()]
+        if artist:
+            fields["artist"] = str(artist)
+        if title:
+            fields["title"] = str(title)
+        self.command("play", **fields)
 
     def pause(self) -> None: self.command("pause")
     def resume(self) -> None: self.command("resume")

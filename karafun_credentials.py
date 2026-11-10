@@ -22,7 +22,7 @@ def save(email: str, password: str) -> bool:
     email, password = str(email or "").strip(), str(password or "")
     if not available() or not email or not password or any(c in email for c in "\"\\\n\r"):
         return False
-    delete()
+    delete(email)          # replace THIS account only: never touch another saved login (a no-argument delete wiped them all)
     # Stored as "h:<hex of the password>" (plain ASCII), because `security ... -w` prints anything non-ASCII back as hex, which would be ambiguous.
     hexed = ("h:" + password.encode("utf-8").hex()).encode("ascii").hex()
     code, out = _run(f'add-generic-password -a "{email}" -s "{SERVICE}" -X {hexed}\n')
