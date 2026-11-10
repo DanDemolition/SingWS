@@ -61,6 +61,18 @@ component SearchBox inherits Rectangle {
     if input.text == "" : Text { x: 14px; height: parent.height; vertical-alignment: center; text: placeholder; color: Theme.label; font-size: 14px; }
 }
 
+component Btn inherits Rectangle {
+    in property <string> label;
+    in property <color> tone: Theme.card;
+    in property <bool> enabled: true;
+    callback clicked;
+    height: 32px; border-radius: 6px; background: ta.pressed ? tone.darker(0.3) : tone; opacity: enabled ? 1 : 0.45;
+    border-width: 1px; border-color: Theme.card-border;
+    accessible-role: button; accessible-label: label; accessible-enabled: enabled;
+    HorizontalLayout { padding-left: 14px; padding-right: 14px; Text { text: label; color: #ffffff; font-size: 13px; vertical-alignment: center; } }
+    ta := TouchArea { enabled: root.enabled; clicked => { root.clicked(); } }
+}
+
 component PageTitle inherits Text { color: Theme.text; font-size: 15px; font-weight: 600; }
 
 export component App inherits Window {
@@ -88,6 +100,11 @@ export component App inherits Window {
     callback h-search(string); callback h-pick(string); callback h-song-search(string);
     in property <string> set-status; in property <[SettingItem]> set-rows;
     callback set-search(string);
+    // controls (live)
+    in-out property <string> c-url; in-out property <string> c-user;
+    in property <string> c-status; in property <bool> c-enabled; in property <bool> c-logged-in; in property <string> c-login-error;
+    in property <string> c-now; in property <string> c-clock; in property <bool> c-playing; in property <string> c-result; in property <string> c-result-kind;
+    callback c-connect(string, string, string); callback c-disconnect(); callback c-send(string, string); callback c-changed();
 
     VerticalLayout {
         padding: 12px; spacing: 10px;
@@ -99,6 +116,7 @@ export component App inherits Window {
             TabButton { label: "Rotation"; width: 80px; selected: root.tab == 3; clicked => { root.tab = 3; } }
             TabButton { label: "Singer history"; width: 110px; selected: root.tab == 4; clicked => { root.tab = 4; } }
             TabButton { label: "Settings"; width: 80px; selected: root.tab == 5; clicked => { root.tab = 5; } }
+            TabButton { label: "Controls"; width: 80px; selected: root.tab == 6; clicked => { root.tab = 6; } }
         }
 
         if root.tab == 0 : VerticalLayout {
@@ -294,6 +312,45 @@ export component App inherits Window {
                             Text { text: r.key; color: Theme.text-row; font-size: 13px; width: 300px; vertical-alignment: center; overflow: elide; }
                             Text { text: r.value; color: r.hidden ? Theme.warn : #ffffff; font-italic: r.hidden; font-size: 13px; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; }
                         }
+                    }
+                }
+            }
+        }
+
+        if root.tab == 6 : VerticalLayout {
+            spacing: 10px; alignment: start;
+            PageTitle { text: c-enabled ? "CONTROLS" : "CONTROLS (not connected to the app)"; }
+            Text { text: c-status; color: Theme.text-dim; font-size: 12px; wrap: word-wrap; }
+            if !c-logged-in : VerticalLayout {
+                spacing: 8px;
+                Text { text: "CONNECT"; color: Theme.label; font-size: 10px; letter-spacing: 1.2px; }
+                url-box := SearchBox { placeholder: "Server address (https://…)"; text: root.c-url; edited(t) => { root.c-url = t; } }
+                user-box := SearchBox { placeholder: "Venue name"; text: root.c-user; edited(t) => { root.c-user = t; } }
+                pin-box := SearchBox { placeholder: "Host PIN"; password: true; accepted => { root.c-connect(url-box.text, user-box.text, pin-box.text); pin-box.text = ""; } }
+                HorizontalLayout { alignment: start;
+                    Btn { label: "Connect"; tone: Theme.accent; clicked => { root.c-connect(url-box.text, user-box.text, pin-box.text); pin-box.text = ""; } }
+                }
+                if c-login-error != "" : Text { text: c-login-error; color: #ff8a8a; font-size: 13px; wrap: word-wrap; }
+            }
+            if c-logged-in : HorizontalLayout { alignment: start; Btn { label: "Disconnect"; clicked => { root.c-disconnect(); } } }
+            if c-result != "" : Rectangle {
+                height: res.preferred-height + 14px; border-radius: 8px;
+                background: c-result-kind == "ok" ? #12301f : c-result-kind == "warn" ? #33290f : #3a1414;
+                accessible-role: text; accessible-label: c-result;
+                res := Text { x: 7px; y: 7px; width: parent.width - 14px; text: c-result; color: #ffffff; font-size: 13px; wrap: word-wrap; }
+            }
+            Rectangle {
+                border-radius: 10px; background: Theme.card; border-width: 1px; border-color: Theme.card-border; height: now-col.preferred-height;
+                now-col := VerticalLayout {
+                    padding: 10px; spacing: 6px;
+                    Text { text: c-now; color: #ffffff; font-size: 15px; font-weight: 600; overflow: elide; }
+                    Text { text: c-clock; color: Theme.text-dim; font-size: 12px; }
+                    HorizontalLayout {
+                        spacing: 6px; alignment: start;
+                        Btn { label: "Restart"; enabled: c-enabled; clicked => { root.c-send("Restart", "restart"); } }
+                        Btn { label: c-playing ? "Pause" : "Play"; tone: Theme.accent; enabled: c-enabled; clicked => { root.c-send("Play/pause", "play_pause"); } }
+                        Btn { label: "Next"; enabled: c-enabled; clicked => { root.c-send("Next", "skip"); } }
+                        Btn { label: "Stop"; tone: #5a1f2a; enabled: c-enabled; clicked => { root.c-send("Stop", "stop"); } }
                     }
                 }
             }

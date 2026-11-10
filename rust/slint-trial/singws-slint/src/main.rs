@@ -1,6 +1,6 @@
 slint::include_modules!();
 use slint::{ModelRc, SharedString, VecModel};
-use singws_slint::panels;
+use singws_slint::{control, panels};
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::{Duration, SystemTime};
@@ -9,6 +9,13 @@ use std::time::{Duration, SystemTime};
 struct Ui { singer_search: String, selected: String, song_query: String, setting_query: String }
 
 fn now_epoch() -> i64 { SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0) }
+
+fn apply_control(app: &App, c: &control::Control) {
+    let v = c.view();
+    app.set_c_status(v.status.into()); app.set_c_enabled(v.enabled); app.set_c_login_error(v.login_error.into());
+    app.set_c_now(v.now.into()); app.set_c_clock(v.clock.into()); app.set_c_playing(v.playing); app.set_c_result(v.result_text.into()); app.set_c_result_kind(v.result_kind.into());
+    app.set_c_logged_in(v.logged_in);
+}
 
 fn apply(app: &App, dir: &str, ui: &mut Ui) {
     let t = panels::ticker_view(dir);
@@ -59,6 +66,20 @@ fn main() {
         app.$on(move |t| { u.borrow_mut().$field = t.to_string(); if let Some(a) = w.upgrade() { apply(&a, &d, &mut u.borrow_mut()); } });
     }}; }
     hook!(on_h_search, singer_search); hook!(on_h_pick, selected); hook!(on_h_song_search, song_query); hook!(on_set_search, setting_query);
+    // controls: PIN login + transport through singws-control (the PIN goes to the client and is cleared from the box)
+    let ctl = Rc::new(RefCell::new(control::Control::new()));
+    let (url, user) = control::load_saved();
+    app.set_c_url(url.into()); app.set_c_user(user.into());
+    apply_control(&app, &ctl.borrow());
+    { let (w, c) = (app.as_weak(), ctl.clone());
+      app.on_c_connect(move |u, n, pin| {
+          let w2 = w.clone();
+          c.borrow_mut().connect(&u, &n, &pin, move || { let w3 = w2.clone(); let _ = slint::invoke_from_event_loop(move || { if let Some(a) = w3.upgrade() { a.invoke_c_changed(); } }); });
+          if let Some(a) = w.upgrade() { apply_control(&a, &c.borrow()); }
+      }); }
+    { let (w, c) = (app.as_weak(), ctl.clone()); app.on_c_disconnect(move || { c.borrow_mut().disconnect(); if let Some(a) = w.upgrade() { apply_control(&a, &c.borrow()); } }); }
+    { let (w, c) = (app.as_weak(), ctl.clone()); app.on_c_send(move |label, cmd| { c.borrow().send(&label, &cmd); if let Some(a) = w.upgrade() { apply_control(&a, &c.borrow()); } }); }
+    { let (w, c) = (app.as_weak(), ctl.clone()); app.on_c_changed(move || { if let Some(a) = w.upgrade() { apply_control(&a, &c.borrow()); } }); }
     // the Qt shell's pages refresh every 3 s while visible
     let timer = slint::Timer::default();
     let (weak, d, u) = (app.as_weak(), dir.clone(), ui.clone());
