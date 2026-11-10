@@ -87,6 +87,13 @@ Legend. **Rust coverage**: *owns* = Rust is the implementation in the production
 
 *Effort: XL.* Largest macOS-specific block; cannot be proven by parity tools (oracle is the live KaraFun UI); the fallback is a thin Rust process-boundary (keep the scripts as text, run them through an `NSAppleScript`/`osascript` host) which is S–M for the runner but the *flow* (search ladder, activation, monitor) is still L.
 
+### 1.3b KaraFun web player (added 2026-11-10)
+
+The KaraFun web player (setting `karafun_web_player`, off by default, shipped in 1.0.3.3) is a second way to run KaraFun with no KaraFun app and no screen scripting.
+Its browser driver is already Rust (`singws-karafun-web`); its app logic is ~1,100 lines of Python (`karafun_web.py`, `karafun_web_host.py`, `karafun_credentials.py`,
+`karafun_top100.py`). Plan, milestones W1-W7 and gates: `stage-e-karafun-web-rust-plan.md`. This is much smaller and more provable than 1.3 because its oracle is
+Python code, not the live KaraFun UI. Not started.
+
 ### 1.4 Library: scan, index, search, loudness/transition analysis
 
 | Item | Where | Size |
