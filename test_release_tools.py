@@ -162,14 +162,14 @@ class PackagingSpecTests(unittest.TestCase):
         self.assertNotIn("mpv_playback.py", spec + build)
         self.assertNotIn("python_karaoke_transport", spec + build)
 
-    def test_release_specs_include_karafun_apple_events_authorization(self):
-        entitlements = Path("SingWS.entitlements").read_text(encoding="utf-8")
-        self.assertIn("com.apple.security.automation.apple-events", entitlements)
+    def test_release_specs_use_the_entitlements_file_and_no_longer_ask_for_karafun_permissions(self):
         for spec in ("SingWS-arm64.spec", "SingWS-x86_64.spec"):
             with self.subTest(spec=spec):
                 source = Path(spec).read_text(encoding="utf-8")
-                self.assertIn("NSAppleEventsUsageDescription", source)
                 self.assertIn("entitlements_file=str(project_root / 'SingWS.entitlements')", source)
+                # KaraFun plays in the web player: no Apple-events or screen-recording permission text
+                self.assertNotIn("NSAppleEventsUsageDescription", source)
+                self.assertNotIn("NSScreenCaptureUsageDescription", source)
 
     def test_release_specs_bundle_requests_tls_support(self):
         for spec in ("SingWS-arm64.spec", "SingWS-x86_64.spec"):

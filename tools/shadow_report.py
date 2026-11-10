@@ -71,8 +71,8 @@ SETTING_KEYS = {
     "START-DRIVE": ("start_drive", False),
     "SHELL-COMMANDS": ("shell_commands", False),  # a string setting: "dry_run" or "apply" means on
 }
-DRIVE_REQUIRED = {"karafun_end", "media_end"}
-DRIVE_OPTIONAL = {"watchdog"}
+DRIVE_REQUIRED = {"media_end"}
+DRIVE_OPTIONAL = {"watchdog", "karafun_end"}      # (the KaraFun-app monitor that wrote these is gone; old logs still carry them)
 
 _HINTS = {
     "get": "let the app poll the server (any network-connected session does)",

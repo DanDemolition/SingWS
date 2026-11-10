@@ -323,9 +323,7 @@ class RealFormatTests(unittest.TestCase):
         app = (root / "0.2.18.1.py").read_text(encoding="utf-8")
         for tag in ("SETTINGS-SHADOW", "QUEUE-SHADOW", "PLAN-SHADOW", "TRANSPORT-SHADOW"):
             self.assertIn(f"[{tag}] enabled available=", app, f"the app no longer logs the {tag} 'enabled' line")
-        self.assertIn("[TRANSPORT-DRIVE] decision=karafun_end", app)
         self.assertIn("[TRANSPORT-DRIVE] decision=media_end", app)
-        self.assertIn("[TRANSPORT-DRIVE] decision=watchdog", app)
         self.assertIn("disagreement={int(disagreed)}", app)
 
 
