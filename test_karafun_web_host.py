@@ -34,7 +34,7 @@ class FakeService:
 
 class FakeApp:
     def __init__(self):
-        self.settings = {"karafun_web_player": True}
+        self.settings = {"karafun_provider_enabled": True}
         self.entry = None
         self.statuses, self.notes, self.finished, self.faded, self.shown_kt = [], [], [], [], []
         self._active_external_karafun = {"entry": None}
@@ -86,16 +86,20 @@ class IdTests(unittest.TestCase):
 
 @unittest.skipUnless(sys.platform == "darwin", "the web player is macOS only")
 class HostTests(unittest.TestCase):
-    def test_off_means_the_app_path_handles_it(self):
-        app, entry, service, host = make()
-        app.settings["karafun_web_player"] = False
-        self.assertFalse(host.can_start(entry))
-        self.assertFalse(host.start(entry, 0, 100))
-
-    def test_a_song_without_a_kafun_id_is_left_to_the_app_path(self):
+    def test_a_song_added_by_hand_without_an_id_is_played_by_title_and_artist(self):
         app, entry, service, host = make()
         entry.pop("provider_track_id")
+        app._is_external_karafun_entry = lambda e: True
+        self.assertTrue(host.can_start(entry))
+        self.assertTrue(host.start(entry, 0, 100))
+        self.assertIn(("play", (0, "NOFX Linoleum", ["NOFX Linoleum", "Linoleum NOFX", "Linoleum", "NOFX"], "NOFX", "Linoleum")), service.web.calls)
+
+    def test_something_that_is_not_a_karafun_song_is_refused(self):
+        app, entry, service, host = make()
+        entry.pop("provider_track_id")
+        app._is_external_karafun_entry = lambda e: False
         self.assertFalse(host.can_start(entry))
+        self.assertFalse(host.start(entry, 0, 100))
 
     def test_start_plays_the_id_by_artist_and_title_when_ready(self):
         app, entry, service, host = make()
@@ -359,13 +363,17 @@ class HostTests(unittest.TestCase):
 
 class HookSourceTests(unittest.TestCase):
     """The hooks in 0.2.18.1.py: each starts with the web player's own check, and the setting is off by default."""
-    def test_setting_default_off(self):
-        self.assertRegex(SOURCE, r'"karafun_web_player": False,')
+    def test_the_old_kafun_app_path_and_its_settings_are_gone(self):
+        for gone in ("_automate_karafun_search_and_play", "_start_karafun_completion_monitor", "_run_karafun_applescript_sync", "_handoff_show_screen_to_karafun"):
+            self.assertNotIn(gone, SOURCE, gone)
+        # the two retired settings are named ONCE, in the list that removes them from saved profiles
+        self.assertEqual(SOURCE.count('"karafun_web_player"'), 1)
+        self.assertEqual(SOURCE.count('"karafun_auto_queue_enabled"'), 1)
 
     def test_every_control_hook_checks_the_web_player_first(self):
         for name, marker in (("def _toggle_karafun_playback(self):", "_karafun_web_active"),
                              ("def _karafun_seek_to(self, target_sec: float) -> bool:", "_karafun_web_active"),
-                             ("def _karafun_apply_key_tempo(self, entry: dict, target_key: int, target_tempo: int):", "_karafun_web_active")):
+                             ("def _karafun_apply_key_tempo(self, entry: dict, target_key: int, target_tempo: int):", "_karafun_web_host().apply_key_tempo")):
             body = SOURCE[SOURCE.index(name):][:2200]
             self.assertIn(marker, body, name)
 
@@ -376,12 +384,8 @@ class HookSourceTests(unittest.TestCase):
         self.assertIn('self._show_idle_background_after_karaoke(reason="karafun_web_end", advance_slideshow=True)', whole)
         self.assertIn("self._karafun_web_shutdown()", SOURCE)
         start = SOURCE[SOURCE.index("def _start_external_karafun_playback"):][:9000]
-        self.assertIn("web_playback", start)
-        self.assertIn("elif automatic_playback:", start)
-
-    def test_the_proven_automation_function_is_untouched_by_web_code(self):
-        body = SOURCE[SOURCE.index("def _automate_karafun_search_and_play"):SOURCE.index("def _start_karafun_completion_monitor")]
-        self.assertNotIn("karafun_web", body)
+        self.assertIn("self._karafun_web_host().start(", start)
+        self.assertNotIn("automatic_playback", start)       # no second way to start a KaraFun song
 
 
 if __name__ == "__main__":

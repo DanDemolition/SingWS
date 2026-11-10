@@ -1,8 +1,5 @@
-SingWS — First-Run macOS Permissions
-=====================================
-
-SingWS needs a few macOS permissions to control KaraFun and display its video
-inside the SingWS show and host screens.
+SingWS — First-Run Notes
+========================
 
 INSTALL
 -------
@@ -11,33 +8,27 @@ INSTALL
 2. Double-click “Open Me First” in this installer window.
 3. Launch SingWS from Applications.
 
-ALLOW THE REQUIRED PERMISSIONS
-------------------------------
+KARAFUN
+-------
 
-Open System Settings > Privacy & Security, then enable SingWS in:
+KaraFun songs play in KaraFun's own web player, inside a hidden browser that
+belongs to SingWS. You do NOT need the KaraFun app, and SingWS needs no
+Accessibility or Screen Recording permission for it.
 
-• Device Control and Data Access
-  This may be named Accessibility on older macOS versions.
-  It allows SingWS to search for and start songs in KaraFun.
+The first time, SingWS downloads that browser once (about 200 MB), so the Mac
+needs internet then. Open Settings > KaraFun, save your KaraFun email and
+password (they are kept in the macOS Keychain, not in any file), and the player
+signs itself in.
 
-• Screen & System Audio Recording
-  This allows SingWS to capture KaraFun's Dual Renderer video for the show
-  display and host preview.
+OTHER PERMISSION
+----------------
 
 • Location Services
   Choose Allow While Using the App when SingWS asks. This lets SingWS set the
   venue location used for request signups.
 
-After changing these permissions, quit SingWS completely and reopen it before
-testing KaraFun playback.
-
-If SingWS is missing from a permission list, open SingWS and use the related
-feature once so macOS adds it, then return to Privacy & Security.
-
 UPDATES
 -------
 
 Install later SingWS updates normally. Builds signed with the same SingWS
-identity should retain these permissions. You should not need to remove and
-re-add SingWS for every update.
-
+identity keep their permissions.

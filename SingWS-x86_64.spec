@@ -17,10 +17,6 @@ brew_root = Path("/opt/homebrew") if machine in {"arm64", "aarch64"} else Path("
 
 extra_datas = [(str(project_root / "assets" / "rotation-stage-purple.png"), "assets")]
 binaries = []
-capture_dylib = project_root / "native" / "karafun_capture" / "libsingws_karafun_capture.dylib"
-if capture_dylib.is_file() and "x86_64" in subprocess.getoutput(f"/usr/bin/lipo -archs '{capture_dylib}'"):
-    binaries.append((str(capture_dylib), "."))
-
 # Rust master-DSP library (rust/build_dsp.sh). Optional: without it the app falls back to the Python processor.
 dsp_dylib = project_root / "native" / "singws_dsp" / "x86_64" / "libsingws_dsp_ffi.dylib"
 if dsp_dylib.is_file() and "x86_64" in subprocess.getoutput(f"/usr/bin/lipo -archs '{dsp_dylib}'"):
@@ -68,12 +64,7 @@ if settingsmig_bin.is_file() and "x86_64" in subprocess.getoutput(f"/usr/bin/lip
 songend_bin = project_root / "native" / "singws_songend" / "x86_64" / "singws-songend"
 if songend_bin.is_file() and "x86_64" in subprocess.getoutput(f"/usr/bin/lipo -archs '{songend_bin}'"):
     binaries.append((str(songend_bin), "."))
-# Rust KaraFun search script builder (rust/build_karafun.sh). Optional: without it karafun_script_shadow is silently skipped.
-karafun_bin = project_root / "native" / "singws_karafun" / "x86_64" / "singws-karafun"
-if karafun_bin.is_file() and "x86_64" in subprocess.getoutput(f"/usr/bin/lipo -archs '{karafun_bin}'"):
-    binaries.append((str(karafun_bin), "."))
-
-# Rust KaraFun web player driver (rust/build_karafun_web.sh). Optional: without it the karafun_web_player setting cannot start the player.
+# Rust KaraFun web player driver (rust/build_karafun_web.sh). Required for KaraFun songs: they all play in the web player.
 karafun_web_bin = project_root / "native" / "singws_karafun_web" / "x86_64" / "singws-karafun-web"
 if karafun_web_bin.is_file() and "x86_64" in subprocess.getoutput(f"/usr/bin/lipo -archs '{karafun_web_bin}'"):
     binaries.append((str(karafun_web_bin), "."))
@@ -118,14 +109,10 @@ for helper in (
     "relay_msg_shadow.py",
     "settings_migrate_shadow.py",
     "songend_shadow.py",
-    "karafun_script_shadow.py",
     "karafun_web.py",
     "karafun_web_host.py",
     "karafun_credentials.py",
     "karafun_top100.py",
-    "karafun_monitor_shadow.py",
-    "karafun_flow_shadow.py",
-    "karafun_builder_shadow.py",
     "net_slice_shadow.py",
     "queue_state_shadow.py",
     "update_shadow.py",
@@ -136,7 +123,6 @@ for helper in (
     "native_memory.py",
     "system_snapshot.py",
     "mac_keep_awake.py",
-    "karafun_capture.py",
 ):
     helper_path = project_root / helper
     if helper_path.exists():
@@ -259,14 +245,10 @@ a = Analysis(
         'relay_msg_shadow',
         'settings_migrate_shadow',
         'songend_shadow',
-        'karafun_script_shadow',
         'karafun_web',
         'karafun_web_host',
         'karafun_credentials',
         'karafun_top100',
-        'karafun_monitor_shadow',
-        'karafun_flow_shadow',
-        'karafun_builder_shadow',
         'net_slice_shadow',
         'queue_state_shadow',
         'update_shadow',
@@ -407,16 +389,10 @@ app = BUNDLE(
     info_plist={
         'CFBundleName': 'SingWS',
         'CFBundleDisplayName': 'SingWS',
-        'CFBundleShortVersionString': '1.0.3.3',
-        'CFBundleVersion': '1.0.3.3',
+        'CFBundleShortVersionString': '1.0.3.4',
+        'CFBundleVersion': '1.0.3.4',
         'LSMinimumSystemVersion': '12.3',
         'NSHighResolutionCapable': True,
-        'NSAppleEventsUsageDescription': (
-            "SingWS uses System Events to find, queue, and control songs in the KaraFun application."
-        ),
-        'NSScreenCaptureUsageDescription': (
-            "SingWS captures KaraFun's Dual Renderer to show lyrics within the audience display."
-        ),
         'NSLocationWhenInUseUsageDescription': (
             "SingWS uses this Mac's location to set venue coordinates for request signups."
         ),

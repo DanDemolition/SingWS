@@ -73,7 +73,7 @@ Legend. **Rust coverage**: *owns* = Rust is the implementation in the production
 
 *Effort: L–XL.* The decisions are mostly captured; the execution glue, ordering and timing are not, and the A5 start-drive session owns the nearest part of it.
 
-### 1.3 KaraFun automation (AppleScript / Accessibility / ScreenCaptureKit)
+### 1.3 KaraFun automation (AppleScript / Accessibility / ScreenCaptureKit) — REMOVED 2026-11-10 (every song plays in the web player; see 1.3b)
 
 | Item | Where | Size |
 |---|---|---|

@@ -110,12 +110,13 @@ class StatusSnapshot(unittest.TestCase):
 
     def install_probes(self, app, f):
         app._safe_local_audio_output_name = lambda: f["local_name"]
-        app._karafun_application_path = lambda: Path(f["karafun"]) if f["karafun"] else None
         app._header_qr_url = lambda: f["qr"]
         app._mpv_output_host = object() if f["output"] else None
         app._mpv_preview_host = object() if f["preview"] else None
         app.video_window = mock.MagicMock(ticker=object() if f["ticker"] else None)
-        return [mock.patch.object(self.singws, "scan_background_video_folder", lambda folder: list(f["bg"])),
+        import karafun_web
+        return [mock.patch.object(karafun_web, "downloaded_chrome", lambda: Path(f["karafun"]) if f["karafun"] else None),
+                mock.patch.object(self.singws, "scan_background_video_folder", lambda folder: list(f["bg"])),
                 mock.patch.object(self.singws.QApplication, "screens", staticmethod(lambda: [object()] * f["screens"])),
                 mock.patch.object(self.singws, "datetime", FixedDT)]
 

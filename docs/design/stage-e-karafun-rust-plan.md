@@ -1,3 +1,7 @@
+> **OBSOLETE (2026-11-10).** The KaraFun Mac-app automation this plan ported to Rust was REMOVED: every KaraFun song now plays in the web player. The Rust crate `singws-karafun`,
+> its parity/mutation tools, the shadows and the old Python methods are deleted (git history keeps them; the last commit that has them is the one before "Remove the KaraFun-app path").
+> See `stage-e-karafun-web-rust-plan.md` for what replaces it.
+
 # KaraFun automation in Rust: state and plan (2026-11-06)
 
 Goal: the Rust shell can search, start, monitor and end a KaraFun song without Python, proven the way every other port was: Python is the oracle,

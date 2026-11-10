@@ -14,7 +14,6 @@ python3 tools/check_native_libs_fresh.py --arch arm64 --require || { echo "!! th
 ./rust/build_relaymsg.sh || echo "!! could not build the singws-relaymsg helper; relay_msg_shadow will be skipped in this build"
 ./rust/build_settingsmig.sh || echo "!! could not build the singws-settingsmig helper; settings_migrate_shadow will be skipped in this build"
 ./rust/build_songend.sh || echo "!! could not build the singws-songend helper; the opt-in songend_shadow will be skipped in this build"
-./rust/build_karafun.sh || echo "!! could not build the singws-karafun helper; karafun_script_shadow will be skipped in this build"
 ./rust/build_karafun_web.sh || echo "!! could not build the singws-karafun-web helper; the karafun_web_player setting will not work in this build"
 ./rust/build_scan.sh || echo "!! could not build the singws-scan-cli helper; the scan shadow will report helper-not-found in this build"
 
@@ -58,8 +57,6 @@ security find-identity -v -p codesigning | grep -Fq "\"$CODE_SIGN_IDENTITY\"" ||
     exit 1
 }
 
-# Bundle the optional ScreenCaptureKit renderer bridge with this build.
-zsh native/karafun_capture/build_capture.sh arm64
 
 : "${SINGWS_MPV_FRAMEWORKS:=$(pwd)/native/mpv_runtime/artifacts/arm64/Frameworks}"
 export SINGWS_MPV_FRAMEWORKS

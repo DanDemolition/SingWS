@@ -1657,29 +1657,7 @@ class PerformanceSafetyTests(unittest.TestCase):
             self.singws.VideoWindow._tick_ticker_surface_guard(fake)
         fake._raise_ticker_surface.assert_called_once()
 
-    def test_karafun_focus_restore_respects_other_foreground_apps(self):
-        qt = self.singws.Qt
-        frontmost = types.SimpleNamespace(localizedName=lambda: "Safari")
-        workspace = types.SimpleNamespace(sharedWorkspace=lambda: types.SimpleNamespace(
-            frontmostApplication=lambda: frontmost))
-        with mock.patch.object(self.singws.QApplication, "applicationState",
-                               return_value=qt.ApplicationState.ApplicationInactive), \
-             mock.patch.object(self.singws.sys, "platform", "darwin"), \
-             mock.patch.dict(sys.modules, {"AppKit": types.SimpleNamespace(NSWorkspace=workspace)}):
-            self.assertFalse(self.singws.KaraokeApp._can_restore_host_focus_after_karafun(None))
-            frontmost.localizedName = lambda: "KaraFun"
-            self.assertTrue(self.singws.KaraokeApp._can_restore_host_focus_after_karafun(None))
 
-    def test_delayed_focus_restore_does_not_activate_background_host(self):
-        fake = types.SimpleNamespace(
-            activateWindow=mock.Mock(),
-            _can_restore_host_focus_after_karafun=lambda: False,
-        )
-        with mock.patch.object(self.singws.QApplication, "applicationState",
-                               return_value=self.singws.Qt.ApplicationState.ApplicationInactive):
-            self.singws.KaraokeApp._activate_host_if_foreground(fake)
-            self.singws.KaraokeApp._activate_host_window_after_karafun(fake, attempt=1)
-        fake.activateWindow.assert_not_called()
 
     def test_rotation_announcement_is_separate_and_venue_scoped(self):
         ticker_start = MAIN_SOURCE.index("class RotationAnnouncementTicker(QWidget)")

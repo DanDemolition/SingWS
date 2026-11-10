@@ -62,7 +62,9 @@ class KaraFunWebHost:
 
     # ---- settings and the service
     def enabled(self) -> bool:
-        return sys.platform == "darwin" and bool(self.app.settings.get("karafun_web_player", False))
+        """The web player is the only way KaraFun songs play (macOS for now)."""
+        return sys.platform == "darwin"
+
 
     def _diag(self, text: str) -> None:
         try:
@@ -155,11 +157,21 @@ class KaraFunWebHost:
         self._arm_watchdog()
 
     # ---- a song
+    def _song_id(self, entry, song_path: str = "") -> Optional[int]:
+        """The KaraFun id of the song, or 0 for a KaraFun song added by hand with no id (the page then finds it by title and artist); None if it is not a KaraFun song."""
+        song_id = song_id_from_entry(entry, song_path)
+        if song_id is not None:
+            return song_id
+        try:
+            return 0 if self.app._is_external_karafun_entry(entry) else None
+        except Exception:
+            return None
+
     def can_start(self, entry, song_path: str = "") -> bool:
-        return self.enabled() and song_id_from_entry(entry, song_path) is not None
+        return self.enabled() and self._song_id(entry, song_path) is not None
 
     def start(self, entry: dict, key: int = 0, tempo_percent=None, song_path: str = "") -> bool:
-        song_id = song_id_from_entry(entry, song_path)
+        song_id = self._song_id(entry, song_path)
         if not self.enabled() or song_id is None:
             return False
         app = self.app

@@ -122,11 +122,6 @@ class KaraFunDurationEstimateTests(unittest.TestCase):
         self.assertEqual(restored["duration"], 222)
         self.assertFalse(restored.get("duration_estimated", False))
 
-    def test_rotation_estimate_is_not_used_as_playback_completion_watchdog(self):
-        source = Path("0.2.18.1.py").read_text(encoding="utf-8")
-        monitor = source[source.index("def _start_karafun_completion_monitor"):]
-        monitor = monitor[:monitor.index("def _finish_external_karafun_playback")]
-        self.assertIn('0 if bool(entry.get("duration_estimated", False))', monitor)
 
 
 if __name__ == "__main__":

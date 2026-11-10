@@ -1662,53 +1662,11 @@ class KaraFunWrongSongTests(unittest.TestCase):
     def setUpClass(cls):
         cls.singws = load_main_module()
 
-    def test_window_not_ready_errors_are_transient(self):
-        transient = self.singws.KaraokeApp._is_karafun_ui_not_ready_error
-        for message in (
-            'Can\u2019t get splitter group 1 of window "Discover" of application process "KaraFun". Invalid index.',
-            'Can\u2019t get item 2 of every window of application process "KaraFun". Invalid index.',
-            "NSAppleScriptErrorNumber = \"-1719\"",
-        ):
-            self.assertTrue(transient(message), f"should be treated as transient: {message[:60]}")
 
-    def test_permission_errors_are_not_treated_as_transient(self):
-        """These must still abort and prompt, never spin on a retry."""
-        transient = self.singws.KaraokeApp._is_karafun_ui_not_ready_error
-        self.assertFalse(transient("NSAppleScriptErrorNumber = -1743 not authorized to send apple events"))
-        self.assertFalse(transient("osascript is not allowed assistive access (-25211)"))
-        self.assertFalse(transient(""))
 
-    def test_a_transient_error_retries_the_same_query(self):
-        source = inspect.getsource(self.singws.KaraokeApp._automate_karafun_search_and_play)
-        self.assertIn("_is_karafun_ui_not_ready_error", source)
-        self.assertIn("ui_retry", source)
-        self.assertIn("retrying same query", source)
 
-    def test_search_script_matches_the_artist_row_when_the_artist_is_known(self):
-        app = make_app(self.singws)
-        script = "\n".join(self.singws.KaraokeApp._karafun_search_script(
-            app, query="Memory", safe_title="Memory", safe_artist="Sugarcult", require_exact_title=True,
-        ))
-        self.assertIn("Sugarcult", script, "the artist must reach the matcher")
-        self.assertIn("artistMatched", script)
-        self.assertIn('return "FOUND|"', script)
-        self.assertIn('return "TITLE_ONLY|"', script,
-                      "a title-only hit must be reported as the weaker verdict")
 
-    def test_script_is_unchanged_when_no_artist_is_known(self):
-        app = make_app(self.singws)
-        script = "\n".join(self.singws.KaraokeApp._karafun_search_script(
-            app, query="Memory", safe_title="Memory", require_exact_title=True,
-        ))
-        self.assertNotIn("artistMatched", script)
-        self.assertNotIn("TITLE_ONLY", script)
-        self.assertIn('return "FOUND|"', script)
 
-    def test_an_artistless_query_only_accepts_an_artist_verified_row(self):
-        source = inspect.getsource(self.singws.KaraokeApp._automate_karafun_search_and_play)
-        self.assertIn("query_has_artist", source)
-        self.assertIn('accepted = {"FOUND"}', source)
-        self.assertIn("artist_unconfirmed", source)
 
     def test_the_queries_still_run_specific_to_general(self):
         app = make_app(self.singws)
@@ -1719,59 +1677,6 @@ class KaraFunWrongSongTests(unittest.TestCase):
         self.assertLess(queries.index("Sugarcult Memory"), queries.index("Memory"))
 
 
-class KaraFunCompletionClockTests(unittest.TestCase):
-    """Background music came up ~30s before the song ended.
-
-    The duration fallback counted from the handoff, but KaraFun spent ~45s
-    launching, handing off the renderer and going fullscreen before a note
-    played, so the clock hit zero mid-outro, the rotation advanced and the BG
-    deck started over the ending.
-    """
-
-    @classmethod
-    def setUpClass(cls):
-        cls.singws = load_main_module()
-        cls.source = inspect.getsource(cls.singws.KaraokeApp._start_karafun_completion_monitor)
-
-    def test_the_fallback_counts_from_confirmed_playback(self):
-        self.assertIn("playback_confirmed_at", self.source)
-        self.assertIn("fallback_origin = playback_clock_origin if playback_clock_origin is not None else started",
-                      self.source)
-
-    def test_an_explicit_post_handoff_play_keeps_its_exact_start_clock(self):
-        self.assertIn('if bool(entry.get("karafun_playback_clock_started_at"))', self.source)
-        self.assertIn("playback_clock_origin = (", self.source)
-
-    def test_the_fallback_clock_cannot_rebase_itself(self):
-        """The fallback's own countdown is not evidence that playback began."""
-        self.assertIn("if not remaining_from_fallback:", self.source)
-        body = self.source[self.source.index("if not remaining_from_fallback:"):]
-        self.assertIn("_confirm_playback()", body[:160])
-
-    def test_real_playback_signals_do_rebase(self):
-        self.assertIn("if playing_hint_count >= 2:", self.source)
-        self.assertIn("_confirm_playback()", self.source)
-
-    def test_the_launch_overhead_is_logged(self):
-        self.assertIn("duration fallback rebased", self.source)
-
-    def test_replaying_the_2026_08_16_timeline_no_longer_completes_early(self):
-        """235s song; KaraFun took 45s to start. It must not complete at 235s."""
-        started = 0.0
-        fallback_duration = 235
-        playback_confirmed_at = 45.0  # first playing=1 reading in the log
-
-        def remaining_at(now, origin):
-            return fallback_duration - int(now - origin)
-
-        # Old behaviour: counted from the handoff.
-        self.assertLessEqual(remaining_at(233.0, started), 5,
-                             "old clock reached the completion threshold at ~233s")
-        # New behaviour: the same instant still has most of the outro left.
-        self.assertGreater(remaining_at(233.0, playback_confirmed_at), 5)
-        self.assertEqual(remaining_at(233.0, playback_confirmed_at), 47)
-        # And it does still complete, 45s later.
-        self.assertLessEqual(remaining_at(278.0, playback_confirmed_at), 5)
 
 
 class BackgroundMusicSoundboardHandoffTests(unittest.TestCase):
@@ -1874,47 +1779,6 @@ class BackgroundMusicSoundboardHandoffTests(unittest.TestCase):
         self.assertIn("self._verify_bg_resume_started(gen)", self.media_end)
 
 
-class TickerSurfaceReassertTests(unittest.TestCase):
-    """The ticker vanished again after a KaraFun song returned the show screen.
-
-    The ticker and the mpv hosts are native child views: they stack by creation
-    order, not by the Qt widget tree, so raising the show window can bury a
-    ticker that is still updating. Only the mpv-reveal and rotation-open paths
-    re-raised it; every KaraFun restore path called vw.raise_() and did not.
-    Closing and reopening the show screen was the operator's manual repair.
-    """
-
-    @classmethod
-    def setUpClass(cls):
-        cls.singws = load_main_module()
-        cls.restore = inspect.getsource(cls.singws.KaraokeApp._restore_show_screen_from_karafun)
-
-    def test_every_karafun_restore_path_reasserts_the_ticker(self):
-        raises = self.restore.count("vw.raise_()")
-        reasserts = self.restore.count("_schedule_show_ticker_reassert")
-        self.assertGreaterEqual(raises, 2, "sanity: the restore still raises the show window")
-        self.assertGreaterEqual(
-            reasserts, raises,
-            "every path that raises the show window must re-raise the ticker",
-        )
-
-    def test_the_already_fullscreen_path_reasserts_too(self):
-        """This path returns early without raising, and still re-orders surfaces."""
-        body = self.restore[self.restore.index("if vw.isFullScreen():"):]
-        head = body[:body.index("return")]
-        self.assertIn("_schedule_show_ticker_reassert", head)
-
-    def test_the_fullscreen_ladder_runs_longer_than_a_plain_reveal(self):
-        self.assertIn("delays=(0, 120, 400, 900)", self.restore)
-
-    def test_the_reassert_scheduler_is_shared(self):
-        source = inspect.getsource(self.singws.KaraokeApp._schedule_show_ticker_reassert)
-        self.assertIn("QTimer.singleShot", source)
-        self.assertIn("_reassert_show_ticker_surface", source)
-        reveal = inspect.getsource(self.singws.KaraokeApp._set_native_video_hosts_visible) \
-            if hasattr(self.singws.KaraokeApp, "_set_native_video_hosts_visible") else ""
-        if reveal:
-            self.assertIn("_schedule_show_ticker_reassert", reveal)
 
 
 class LoudnessScanPlaybackHoldTests(unittest.TestCase):
@@ -2280,132 +2144,6 @@ class WaitlistAutomaticPromotionTests(unittest.TestCase):
         self.assertNotIn("promoted phone replacement into preserved slot", source)
 
 
-class KaraFunAutoStartRecoveryTests(unittest.TestCase):
-    """2026-08-16 01:07: Los Enanitos Verdes never auto-started.
-
-    The search succeeded (FOUND, correct 03:42 duration) and the result was
-    activated. Then, with fast start on, the code did not probe KaraFun at all
-    -- it hard-coded "PLAYING", logged 'play click skipped already playing',
-    and skipped both the play click and the 12-attempt verify loop. KaraFun was
-    not playing: 15s later the monitor read idle=1 playing=0, and it stayed
-    that way until the operator pressed play 32s in.
-    """
-
-    @classmethod
-    def setUpClass(cls):
-        cls.singws = load_main_module()
-        cls.monitor = (inspect.getsource(cls.singws.KaraokeApp._start_karafun_completion_monitor)
-                       + inspect.getsource(cls.singws.KaraokeApp._karafun_monitor_probe_script))  # the probe script is a builder now
-        cls.automation = inspect.getsource(cls.singws.KaraokeApp._automate_karafun_search_and_play)
-
-    def test_fast_start_records_that_playback_was_only_assumed(self):
-        self.assertIn('entry["karafun_playback_assumed"] = not bool(', self.automation)
-        self.assertIn("monitor will verify", self.automation)
-
-    def test_the_play_control_is_shared_not_inlined(self):
-        """The monitor needs the same press the automation path uses."""
-        self.assertTrue(hasattr(self.singws.KaraokeApp, "_karafun_press_play_control"))
-        press = inspect.getsource(self.singws.KaraokeApp._karafun_press_play_control) + inspect.getsource(self.singws.KaraokeApp._karafun_press_play_script)
-        self.assertIn("_macos_native_mouse_click", press)
-        self.assertIn('"PLAY|"', press)
-        self.assertIn("_karafun_press_play_control()", self.automation)
-
-    def test_managed_handoff_starts_the_selected_result_not_the_disabled_player(self):
-        self.assertTrue(hasattr(self.singws.KaraokeApp, "_karafun_activate_result_for_playback"))
-        activate = inspect.getsource(
-            self.singws.KaraokeApp._karafun_activate_result_for_playback
-        )
-        resolver = inspect.getsource(self.singws.KaraokeApp._karafun_search_script)
-        self.assertIn("resolve_only=True", activate)
-        self.assertIn('starts with "Results for "', resolver)
-        self.assertIn('perform action "AXRaise" of mainWindow', resolver)
-        self.assertIn("_macos_native_double_click", activate)
-        self.assertIn("_karafun_activate_result_for_playback(", self.automation)
-
-    def test_managed_start_verifies_idle_without_repeating_result_click(self):
-        self.assertTrue(hasattr(self.singws.KaraokeApp, "_karafun_playback_menu_state"))
-        state_probe = inspect.getsource(
-            self.singws.KaraokeApp._karafun_playback_menu_state
-        ) + inspect.getsource(self.singws.KaraokeApp._karafun_playback_menu_state_script)
-        self.assertIn('menu bar item "Playback"', state_probe)
-        self.assertIn('playbackToggleName is "pause"', state_probe)
-        self.assertIn('playbackToggleName is "play"', state_probe)
-        self.assertIn('managed_start_state = self._karafun_playback_menu_state()', self.automation)
-        self.assertIn('if managed_start_state == "IDLE":', self.automation)
-        # Three call sites, but never more than one runs per song: two are the arms of a single
-        # if/else in the managed path (raise the results window first, or not), the third is the
-        # non-managed path.
-        self.assertEqual(self.automation.count('_karafun_activate_result_for_playback('), 3)
-        self.assertIn("idle result loaded; explicit Play sent", self.automation)
-
-    def test_fast_start_does_not_replace_observed_managed_state_with_playing(self):
-        self.assertIn(
-            'managed_start_state if managed_handoff else "PLAYING"',
-            self.automation,
-        )
-        self.assertIn('initial_probe_state == "UNKNOWN"', self.automation)
-        self.assertIn("managed playback state unknown; deferring to monitor", self.automation)
-
-    def test_the_monitor_recovers_without_restarting_the_matched_result(self):
-        self.assertIn("playback_assumed", self.monitor)
-        self.assertIn("recovery_pressed", self.monitor)
-        self.assertIn("karafun_result_activation_point", self.automation)
-        self.assertNotIn("_karafun_activate_result_for_playback", self.monitor)
-        self.assertIn("_karafun_press_play_control()", self.monitor)
-        self.assertIn("playback never started after", self.monitor)
-
-    def test_monitor_reads_playback_menu_when_fullscreen_hides_control_window(self):
-        self.assertIn('menu bar item "Playback"', self.monitor)
-        self.assertIn('playbackToggleName is "pause"', self.monitor)
-        self.assertIn('return "STATE|PLAYING"', self.monitor)
-        self.assertLess(
-            self.monitor.index('menu bar item "Playback"'),
-            self.monitor.index('if (count of windows) is 0 then return ""'),
-        )
-
-    def test_monitor_reads_only_the_player_panel_not_the_whole_window(self):
-        """Regression 2026-09-29: at the end of every song the monitor walked KaraFun's whole window
-        (every search-result row), taking 11-31 s, so the end - and the background music - came that
-        late. It must read just the main split group's direct children, falling back to the full walk
-        only if there is no split group."""
-        self.assertIn("'if (role of topElement as text) is \"AXSplitGroup\" then',", self.monitor)
-        self.assertIn("'set elems to UI elements of topElement',", self.monitor)
-        fast = self.monitor.index("AXSplitGroup")
-        full = self.monitor.index("set elems to entire contents of mainWindow")
-        self.assertLess(fast, full)                       # fast path first, full walk only as the fallback
-        self.assertIn("if (count of elems) is 0 then", self.monitor)
-
-    def test_recovery_presses_only_once(self):
-        """A repeated press would toggle play/pause and silence a playing song."""
-        self.assertIn("recovery_pressed = True", self.monitor)
-        idx = self.monitor.index("recovery_pressed = True")
-        guard = self.monitor[:idx]
-        self.assertIn("not recovery_pressed", guard[-400:])
-
-    def test_recovery_does_not_fire_once_playback_is_confirmed_or_reporting_playing(self):
-        idx = self.monitor.index("recovery_pressed = True")
-        guard = self.monitor[:idx]
-        self.assertIn("playback_confirmed_at is None", guard[-400:])
-        # The first live poll arrives around 14 seconds. Re-activating the
-        # result despite its PLAYING state restarts an already audible song.
-        self.assertIn("not playing_reported", guard[-400:])
-
-    def test_recovery_is_skipped_entirely_when_play_was_actually_clicked(self):
-        """Only the fast-start path assumes; the slow path really clicks play."""
-        idx = self.monitor.index("recovery_pressed = True")
-        self.assertIn("playback_assumed", self.monitor[:idx][-400:])
-
-    def test_the_operator_is_warned_when_recovery_also_fails(self):
-        self.assertIn("KaraFun is not playing this song", self.monitor)
-        self.assertIn("notify=True", self.monitor)
-        self.assertIn("KARAFUN_PLAYBACK_ALERT_DELAY_S", self.monitor)
-
-    def test_the_delays_leave_room_for_a_slow_start(self):
-        """KaraFun took ~19s from activation to playing in the working cases."""
-        app = self.singws.KaraokeApp
-        self.assertGreaterEqual(app.KARAFUN_PLAYBACK_RECOVERY_DELAY_S, 10.0)
-        self.assertLess(app.KARAFUN_PLAYBACK_RECOVERY_DELAY_S, app.KARAFUN_PLAYBACK_ALERT_DELAY_S)
-        self.assertLessEqual(app.KARAFUN_PLAYBACK_ALERT_DELAY_S, 60.0)
 
 
 class PostShowAnalysisSafetyTests(unittest.TestCase):

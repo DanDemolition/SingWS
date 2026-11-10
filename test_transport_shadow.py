@@ -304,34 +304,9 @@ class AppWiringGuardTests(unittest.TestCase):
         self.assertIn('self.settings["transport_shadow_default_on_migrated"] = True', block)
         self.assertIn("log-only observation", block)
 
-    def test_the_monitor_feeds_the_expected_end_under_the_same_condition_as_the_python_rule(self):
-        feed = self.src.index('_sh.observe(_sid, "expected_end")')
-        guard = self.src.rindex("if expected_end_reached:", 0, feed)
-        self.assertLess(feed - guard, 80)
-        self.assertLess(feed, self.src.index('_sh.observe(_sid, "idle")', feed))  # evidence first, then the idle reading
-        self.assertIn("(clock_near_end or expected_end_reached or (", self.src)  # the Python rule it mirrors
 
-    def test_hooks_present(self):
-        for needle in ('_sh.start(True, _dur or None, source="karafun")', '_sh.observe(_sid, "idle")',
-                       "_sh.app_auto_complete(", "_sh.app_finished(",
-                       '_sh.start(False, duration_seconds or None, source=f"native:{mode}")',
-                       "_sh.note_seek(", '"media_end"', "_sh.app_stopped(", '"watchdog"'):
-            self.assertIn(needle, self.src)
 
-    def test_the_monitor_feeds_the_explicit_end_under_the_same_condition_as_the_python_rule(self):
-        rule = self.src.index("ended_reported and bool(getattr(self, \"_karafun_capture_session\", False))")
-        hook = self.src.index('_sh.observe(_sid, "explicit_end")')
-        self.assertIn('if ended_reported and bool(getattr(self, "_karafun_capture_session", False)):', self.src[hook - 200:hook])
-        self.assertLess(hook, self.src.index('_sh.observe(_sid, "idle")', hook - 400), "evidence is reported before the idle reading")
-        self.assertGreater(rule, 0)
 
-    def test_drive_is_default_on_and_python_wins_disagreements(self):
-        self.assertIn('"transport_drive": True', self.src)
-        start = self.src.index('if bool((getattr(self, "settings", None) or {}).get("transport_drive", False))')
-        block = self.src[start:start + 2200]
-        self.assertIn("select_drive_decision(", block)
-        self.assertIn("should_complete = python_should_complete", block)
-        self.assertIn("[TRANSPORT-DRIVE] decision=karafun_end", block)
 
     def test_media_end_drive_is_its_own_flag_and_python_wins(self):
         self.assertIn('"transport_drive_media_end": True', self.src)  # on by default since 2026-10-25 (Python still wins every disagreement)
@@ -342,14 +317,6 @@ class AppWiringGuardTests(unittest.TestCase):
         self.assertIn("[TRANSPORT-DRIVE] decision=media_end", block)
         self.assertIn("python_should_end = not (stop_active or handoff_active)", self.src)
 
-    def test_watchdog_drive_is_its_own_flag_and_python_wins(self):
-        self.assertIn('"transport_drive_watchdog": True', self.src)  # on by default since 2026-10-25 (Python still wins every disagreement)
-        start = self.src.index('if bool((getattr(self, "settings", None) or {}).get("transport_drive_watchdog", False))')
-        block = self.src[start:start + 1500]
-        self.assertIn("select_drive_decision(", block)
-        self.assertIn("should_warn = python_should_warn", block)
-        self.assertIn("[TRANSPORT-DRIVE] decision=watchdog", block)
-        self.assertIn('expect="WarnOperator"', self.src)
 
     def test_specs_bundle_the_module(self):
         for spec in ("SingWS-arm64.spec", "SingWS-x86_64.spec"):
