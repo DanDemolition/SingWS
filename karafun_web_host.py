@@ -377,9 +377,9 @@ class KaraFunWebHost:
             app._set_mpv_hosts_visible(False)   # a retained mpv view can cover Qt's painted audience and preview
         except Exception:
             pass
-        width, height = self._audience_size()
+        # Always captured at full HD: a smaller window was blown up to the TV and looked pixelated; Qt scales it down where the window is smaller.
         self.service.web.audience(True)
-        self.service.web.start_screencast(width, height)
+        self.service.web.start_screencast(1920, 1080, 92)
         if self._frame_timer is None:
             self._frame_timer = QTimer(app)
             self._frame_timer.setInterval(FRAME_INTERVAL_MS)
