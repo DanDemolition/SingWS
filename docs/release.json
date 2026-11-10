@@ -1,23 +1,23 @@
 {
   "name": "SingWS",
-  "version": "1.0.2.8",
-  "release_date": "2026-11-01",
+  "version": "1.0.3.2",
+  "release_date": "2026-11-09",
   "repository": "DanDemolition/SingWS",
   "release_url": "https://github.com/DanDemolition/SingWS/releases/latest",
   "downloads": {
     "mac_arm64": {
       "label": "Apple Silicon Mac",
-      "filename": "SingWS-1.0.2.8-arm64-installer.dmg",
-      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-1.0.2.8-arm64-installer.dmg",
-      "size": "126 MB",
-      "sha256": "c589d0ecf812345fbda35133f0258a24ecca5e322739339eb90eb5592858d20d"
+      "filename": "SingWS-1.0.3.2-arm64-installer.dmg",
+      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-1.0.3.2-arm64-installer.dmg",
+      "size": "129 MB",
+      "sha256": "927e984188e48c924011b8b6974f561e3b91fb5fe9c7cc43fd8f3042e9fb1761"
     },
     "mac_x86_64": {
       "label": "Intel Mac (macOS 12.3+)",
-      "filename": "SingWS-1.0.2.8-x86_64-installer.dmg",
-      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-1.0.2.8-x86_64-installer.dmg",
-      "size": "154 MB",
-      "sha256": "a5416039334567490023479a16e75d0cae1377d636f715ffb03f4e6b6915d4c0"
+      "filename": "SingWS-1.0.3.2-x86_64-installer.dmg",
+      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-1.0.3.2-x86_64-installer.dmg",
+      "size": "156 MB",
+      "sha256": "cf248e5391d1669966cb454dff8b3ab86a21e792c50547ddd8919e2627ca56a9"
     }
   }
 }
