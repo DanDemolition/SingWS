@@ -205,7 +205,7 @@ class KaraFunWeb:
         except Exception:
             pass
         try:
-            proc.wait(timeout=5)
+            proc.wait(timeout=10)
         except Exception:
             proc.kill()
             try:

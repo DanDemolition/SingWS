@@ -106,6 +106,12 @@ impl Chrome {
 impl Drop for Chrome {
     fn drop(&mut self) {
         self.link.write(5, "Browser.close", json!({}), None);
+        // Let Chrome quit by itself first: it saves the sign-in cookies on the way out.
+        let t0 = Instant::now();
+        while t0.elapsed() < Duration::from_secs(5) {
+            if matches!(self.child.try_wait(), Ok(Some(_))) { return; }
+            std::thread::sleep(Duration::from_millis(100));
+        }
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
