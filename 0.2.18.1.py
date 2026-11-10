@@ -4264,6 +4264,7 @@ DEFAULTS = {
     # bridge). Any problem loading the Rust one, or creating its renderer for a song, falls back to Objective-C. Read once at launch.
     # NOT yet run on a physical Intel Mac: set "objc" there if it misbehaves.
     "video_bridge": "rust",
+    "video_bridge_fallback": True,   # False = Rust only: a renderer failure retries once, then the song has no picture and says so (never a silent switch)
     "key_engine": "signalsmith",
     # Who plays the KARAOKE sound: "rust" (default: the Rust audio engine plays the sound, with key/tempo by Signalsmith and the exact master
     # chain; mpv keeps the picture and its audio clock) or "mpv" (mpv plays audio and picture, the way back). Read per song; any trouble
@@ -22775,7 +22776,15 @@ class KaraokeApp(QWidget):
         try:
             # Which bridge library mpv_playback_iina loads (first song). Never overrides an explicit env choice.
             _video_bridge = str(self.settings.get("video_bridge", "rust") or "rust").strip().lower()
-            os.environ.setdefault("SINGWS_VIDEO_BRIDGE", "objc" if _video_bridge == "objc" else "rust")
+            if _video_bridge == "objc":
+                # One-way migration: the Objective-C bridge is retired as a choice (it stays only as the logged fallback).
+                self.settings["video_bridge"] = "rust"
+                _diag("[VIDEO-BRIDGE] saved video_bridge=objc migrated to rust")
+            os.environ.setdefault("SINGWS_VIDEO_BRIDGE", "rust")
+            os.environ.setdefault("SINGWS_VIDEO_BRIDGE_FALLBACK",
+                                  "1" if bool(self.settings.get("video_bridge_fallback", True)) else "0")
+            import mpv_playback_iina as _mpv_iina
+            _mpv_iina.set_operator_notifier(lambda text: QTimer.singleShot(0, lambda: self._show_video_bridge_notice(text)))
         except Exception:
             pass
         try:
@@ -28213,6 +28222,18 @@ class KaraokeApp(QWidget):
         elif voice is not None:
             _diag("[KARAOKE-RUST] the Rust audio engine plays this song; mpv keeps the picture and its clock")
         return voice
+
+    def _show_video_bridge_notice(self, text: str) -> None:
+        """Non-modal, on the GUI thread: tell the operator about a video engine fallback or failure."""
+        try:
+            self.status_label.setText(text)
+            box = QMessageBox(QMessageBox.Icon.Warning, "Video engine", text, QMessageBox.StandardButton.Ok, self)
+            box.setWindowModality(Qt.WindowModality.NonModal)
+            box.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+            box.show()
+            self._video_bridge_notice_box = box
+        except Exception:
+            pass
 
     @_perf_timed("ui_songstart_transport_setup")
     def _start_mpv_karaoke_transport(

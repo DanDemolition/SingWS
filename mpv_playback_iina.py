@@ -105,7 +105,7 @@ def _open_bridge_library():
     """(ctypes library, "objc" | "rust", note). SINGWS_VIDEO_BRIDGE=rust (set at launch from the `video_bridge` setting) asks for the Rust
     bridge; ANY problem with it (missing file, will not load, missing exports) falls back to the Objective-C one with the reason in `note`."""
     note = ""
-    if os.environ.get("SINGWS_VIDEO_BRIDGE", "objc").strip().lower() == "rust":
+    if os.environ.get("SINGWS_VIDEO_BRIDGE", "rust").strip().lower() == "rust":
         path = _rust_bridge_path()
         if path is None:
             note = "the Rust video bridge library was not found"
@@ -211,12 +211,40 @@ def _log_bridge_choice_once(api, log) -> None:
     try:
         if api.kind == "rust":
             log(f"[VIDEO-BRIDGE] using the Rust video bridge ({api.note})")
-        elif api.note:
-            log(f"[VIDEO-BRIDGE] using the Objective-C bridge: {api.note}")
         else:
-            log("[VIDEO-BRIDGE] using the Objective-C bridge")
+            msg = "Video engine fallback used: the Rust video bridge could not be loaded" + (f" ({api.note})" if api.note else "") + \
+                  "; the old Objective-C bridge is in use. Please report this."
+            _notify_operator(msg, log)
     except Exception:
         pass
+
+
+_operator_notifier = None
+
+
+def set_operator_notifier(fn) -> None:
+    """The host registers a callable(str) that shows the operator a message (called from any thread; it must hand off to the GUI thread)."""
+    global _operator_notifier
+    _operator_notifier = fn
+
+
+def _notify_operator(message: str, log=None) -> None:
+    if log is not None:
+        try:
+            log(f"[VIDEO-BRIDGE] ERROR {message}")
+        except Exception:
+            pass
+    fn = _operator_notifier
+    if fn is not None:
+        try:
+            fn(message)
+        except Exception:
+            pass
+
+
+def _fallback_allowed() -> bool:
+    """`video_bridge_fallback` (default on) reaches here as SINGWS_VIDEO_BRIDGE_FALLBACK=0 when the operator switched it off."""
+    return os.environ.get("SINGWS_VIDEO_BRIDGE_FALLBACK", "1").strip().lower() not in {"0", "false", "no", "off"}
 
 
 def _fallback_to_objc(log=None) -> "_BridgeApi":
@@ -231,10 +259,8 @@ def _fallback_to_objc(log=None) -> "_BridgeApi":
         api = _bridge_api
     if log is not None:
         _install_bridge_log(api, log)
-        try:
-            log("[VIDEO-BRIDGE] the Rust video bridge could not create a renderer; using the Objective-C bridge for the rest of the session")
-        except Exception:
-            pass
+    _notify_operator("Video engine fallback used: the Rust video bridge could not create a renderer, so the old Objective-C bridge "
+                     "is drawing the picture for the rest of this session. Please report this.", log)
     return api
 
 
@@ -336,7 +362,17 @@ class MpvPlaybackPlugin:
                 else:
                     handle = self.api.lib.singws_bridge_create(
                         self._output_id, self._preview_id, source_b, audio_b)
-                    if not handle and getattr(self.api, "kind", "objc") == "rust":
+                    if not handle and getattr(self.api, "kind", "objc") == "rust" and not _fallback_allowed():
+                        # Rust-only mode: retry creating the core once, then fail visibly; never switch bridges silently.
+                        self.log("[VIDEO-BRIDGE] ERROR the Rust video bridge could not create a renderer; retrying once")
+                        handle = self.api.lib.singws_bridge_create(
+                            self._output_id, self._preview_id, source_b, audio_b)
+                        if not handle:
+                            msg = ("No picture: the video engine could not start for this song (the Rust video bridge failed twice and "
+                                   "the fallback is switched off).")
+                            _notify_operator(msg, self.log)
+                            raise RuntimeError(msg)
+                    elif not handle and getattr(self.api, "kind", "objc") == "rust":
                         # Never leave a show with a black screen because the newer bridge could not start: retry this song on the
                         # Objective-C bridge (the Rust one is gone for the rest of the session).
                         self.api = _fallback_to_objc(self.log)
