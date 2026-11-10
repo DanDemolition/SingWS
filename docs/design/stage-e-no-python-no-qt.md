@@ -38,10 +38,22 @@ own and order those surfaces (rule 6); rendering and layout cannot be validated 
 3. **Run a toolkit spike before choosing**: one page (the Library page) and one audience window (the ticker over a playing picture) in the top two candidates, looked at on screen on both Macs; measure idle CPU, startup time, text input, and the stacking behaviour.
 4. **Swap the toolkit last**, page by page, behind a switch, with the Qt shell kept until every page is rehearsed.
 
-## Decisions for the operator (not made here)
-- Is a Windows version a goal? (It decides native AppKit vs a cross-platform toolkit.)
-- Licence appetite for the toolkit (GPL, royalty-free, commercial).
-- Is "Rust plus a webview" acceptable, or must the UI itself be Rust?
+## Decisions made by the operator (2026-11-10)
+- **Windows is a goal, for sure.** So the UI toolkit must be cross-platform; native-AppKit-only is out (Win32/WinUI beside it would mean two UIs).
+- **The project is to be open source.** So licence terms that are GPL-compatible or permissive are fine; this removes "commercial licence" as a blocker. (Still to check: Slint's GPLv3 / royalty-free terms against the repo's own licence.)
+- **Webview question:** a webview UI CAN be written in Rust. The UI code is compiled to WebAssembly (Leptos, Yew, Dioxus) and shown in the OS webview (WKWebView on macOS, WebView2 on Windows); Tauri or Dioxus desktop wrap it, with a Rust backend. There is no Python and no Qt, and the UI source is 100% Rust, but the thing that draws it is the operating system's browser engine (itself not Rust), and a thin JavaScript glue layer (generated) exists. It counts as "Rust only" for the source tree, not for the runtime.
+
+## Updated shortlist for the spike (not a choice yet)
+| Candidate | Source is Rust | Draws with | Windows | Fit for SingWS |
+|---|---|---|---|---|
+| **Slint** | yes (`.slint` markup + Rust) | its own renderer (GPU or software), no webview | yes | closest to QML: the 19 pages port one by one; no browser dependency; licence terms to confirm |
+| **Dioxus or Tauri + Leptos** | yes (Rust to WebAssembly) | the OS webview | yes (needs WebView2, present on current Windows) | fastest UI building and reuses web styling; but two engines differ (WKWebView vs WebView2), and webview text/animation timing is less predictable for a live show |
+| **iced** | yes | wgpu | yes | pure Rust; a rewrite rather than a port; weaker rich-text/list widgets |
+| egui | yes | wgpu/glow | yes | good for host tools, not for the polished show UI |
+
+Either way the AUDIENCE windows (picture, ticker, rotation screen) stay native GPU surfaces owned by Rust (the video bridge already is), with the ticker and effects drawn on top by the chosen toolkit or by wgpu directly; the webview/toolkit question is mainly about the HOST window (the 19 pages).
+
+**Lean (unproven):** spike Slint first (closest port of the existing QML pages, no webview), with Dioxus/Tauri as the comparison. Run the spike on both Macs and on a Windows machine before deciding.
 
 ## Honest unknowns
 - Size: replacing a 68k-line PyQt app is a multi-month rewrite whatever the toolkit; the logic ports are already the bulk of the safety work.
