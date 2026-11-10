@@ -324,6 +324,7 @@ class MpvPlaybackPlugin:
         self._dsp_chain = ""
         self._video_offset_ms = 0
         self._shadow_audio = False
+        self.picture_failed = False
 
     def attach(self, preview_widget, output_widget) -> bool:
         try:
@@ -346,6 +347,7 @@ class MpvPlaybackPlugin:
     def loadSingWSMedia(self, source, audio_path=None, autoplay=True,
                         semitones=0, tempo_percent=100) -> bool:
         with self._lock:
+            self.picture_failed = False
             try:
                 # libmpv requires the process numeric locale to use a dot as
                 # the decimal separator. QApplication can restore the user's
@@ -371,6 +373,7 @@ class MpvPlaybackPlugin:
                             msg = ("No picture: the video engine could not start for this song (the Rust video bridge failed twice and "
                                    "the fallback is switched off).")
                             _notify_operator(msg, self.log)
+                            self.picture_failed = True
                             raise RuntimeError(msg)
                     elif not handle and getattr(self.api, "kind", "objc") == "rust":
                         # Never leave a show with a black screen because the newer bridge could not start: retry this song on the
