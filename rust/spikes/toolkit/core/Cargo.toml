@@ -1,0 +1,8 @@
+[package]
+name = "spike-core"
+version = "0.0.0"
+edition = "2024"
+publish = false
+[dependencies]
+singws-uimodel = { path = "../../../crates/singws-uimodel" }
+serde_json = "1"

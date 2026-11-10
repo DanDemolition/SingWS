@@ -59,3 +59,42 @@ Either way the AUDIENCE windows (picture, ticker, rotation screen) stay native G
 - Size: replacing a 68k-line PyQt app is a multi-month rewrite whatever the toolkit; the logic ports are already the bulk of the safety work.
 - Rendering parity of the show-screen effects (QML shaders and particles) has not been tried on any other toolkit.
 - Rich text and emoji/GIF chat, drag-and-drop lists and the waveform editor have no obvious drop-in in the Rust toolkits.
+
+## Toolkit spike results (2026-11-10)
+
+Code: `rust/spikes/toolkit/` (own workspace, not a member of `rust/Cargo.toml`; nothing the app ships changes). One prototype, written twice: a hero card showing live playback state (re-read from `status_snapshot.json` every second), a Ticker tab with a checkbox (custom message on/off, re-rendered through `singws-uimodel::ticker`) and a Waitlist tab (sections and rows from `waitlist_snapshot.json` through `singws-uimodel::waitlist`). Synthetic fixtures. Both were run and looked at on screen (screenshots of Ticker and Waitlist tabs for Slint, Waitlist for Dioxus); the Waitlist text is identical in both and equal to the Qt shell's row text because it is the same Rust function. Tauri was NOT built: Dioxus desktop and Tauri both draw with `wry`/`tao` (same WKWebView), so the webview numbers below apply to both; Tauri only differs in tooling (JS-side frontend by default).
+
+Measured on the dev Mac (M1 Max, macOS 27, Rust 1.99, release, `strip`, thin LTO). Not measured: Intel Mac, Windows, startup of Dioxus (not timed), any long run.
+
+| | Slint 1.18.1 (winit + femtovg/software, accesskit) | Dioxus 0.7 desktop (wry/WKWebView) |
+|---|---|---|
+| Cold build, whole prototype (clean target; includes the 23 s shared `spike-core`, 40 crates, bundled SQLite) | 59 s wall (386 s CPU) | 40 s wall (252 s CPU) |
+| Crates in the dependency tree | 349 | 363 |
+| Release binary | 11.6 MB | 4.0 MB (the OS supplies the engine) |
+| Idle memory | 92 MB RSS, one process | 90 MB app + about 80 MB in WebKit helper processes (WebContent 38, GPU 26, Networking 16) = about 170 MB |
+| Idle CPU (1 s polling) | 0.1 % | 0.0 % (app); WebKit helpers not sampled |
+| Startup | 0.30 s from `main` to the event loop | window appeared within the 4 s wait; not timed |
+| Source | `.slint` markup + Rust glue (56 lines of markup + 30 of Rust for this page) | RSX in Rust + CSS (about 60 lines + 10 of CSS); needed no JavaScript |
+| Licence | GPLv3, or royalty-free desktop licence with attribution, or commercial; compatible with an open-source repo (check the final repo licence against GPLv3 or take the royalty-free terms) | MIT/Apache-2.0; wry/tao MIT/Apache-2.0 |
+| Accessibility | accesskit integrated (feature enabled; screen-reader behaviour NOT tested) | native WebKit/DOM accessibility, the strongest of the two for text lists and forms (not tested here) |
+| Windows | yes (winit; software or femtovg/skia renderers) | yes via WebView2 (Evergreen runtime, present on current Windows; installer must handle old machines) |
+| Embedded video surface | See below | See below |
+| Reuse of `singws-uimodel` | Direct in-process call from Rust; the page code is only layout | Direct when run as the desktop renderer (the vdom runs in the Rust process, as here). **NOT reusable if the UI is compiled to WebAssembly**: `singws-uimodel` pulls `rusqlite` (bundled C SQLite), `libc` and the file readers, so a wasm UI would need those view models split into a pure, wasm-clean crate or kept behind a Rust backend call |
+
+### Video surface and the audience windows (the hard question)
+- Today the audience picture is a native `NSView` made by the Rust video bridge (libmpv GL); rule 6 says surfaces stack in creation order. Neither toolkit removes that; both must be told to leave the video view alone.
+- **Slint:** the winit backend exposes the raw window handle, so the bridge can attach its NSView to the same `NSWindow`, as it does with Qt today. Slint also has a rendering-notifier hook to draw GL/wgpu under or over the UI and (unstable) wgpu texture import, so an in-process video texture inside a Slint scene is possible without a native child view. UI drawn by Slint is one opaque GPU layer: a transparent overlay (ticker over the picture) needs a transparent window plus a second native layer. NOT tried.
+- **Dioxus/Tauri:** a webview is itself a native `NSView`, so the picture and the page are two sibling views; the page can be transparent and sit above the video view (wry supports transparent webviews). Z-order is then exactly the creation-order problem the project already manages, and WKWebView compositing timing is outside our control. For animation-heavy audience effects (ticker scroll, particles) the webview is the less predictable surface for a live show (rule 4: must be looked at, and cannot be unit-tested). NOT tried.
+- Audience effects that are now QML shaders have no direct equivalent in either; Slint can run them in femtovg/GL only through the notifier, the webview through CSS/WebGL.
+
+### Findings that are not in the table
+- Both ports were quick because the logic is already in `singws-uimodel`: the toolkit-specific part of this page was about 60 to 90 lines. That supports the plan: the decision is cheap to reverse as long as no rules live in the UI layer.
+- Slint's build pulled a `compat-1-18` feature requirement (a forward-compatibility switch); trivial, but the project must pin the exact version.
+- The Dioxus prototype needed the `launch` feature; the default `desktop` feature set pulls more (router, fullstack) than a host UI needs.
+- A 4 MB vs 11.6 MB binary is not a deciding factor; the real difference is the second runtime (WebKit, WebView2) with its own processes, updates and quirks.
+
+### Recommendation
+1. **Host window (the 19 pages): Slint**, as the lean said. It is one process and one renderer on both macOS and Windows, the pages port from QML one for one, the licence fits an open-source repo, and it keeps the project "no browser at runtime". Its weaker points: smaller widget set (rich text/chat and big virtualised lists must be checked next), accessibility unproven, and the GPL/royalty-free choice must be recorded.
+2. **Keep Dioxus/Tauri as the fallback** if Slint's rich-text chat, drag-and-drop lists or screen-reader support prove inadequate. Its cost is the wasm-clean split of `singws-uimodel` (or running the vdom in the Rust process as the desktop renderer, which this spike shows works).
+3. **Audience windows stay native GPU surfaces owned by the video bridge**, whichever toolkit wins; settle ticker/effects there with a second spike (a transparent Slint overlay window vs wgpu directly over the picture) looked at on a real TV.
+4. Before committing: repeat the spike on the Intel Mac and on a Windows machine, add the Library list (virtualised, typo-tolerant search) and the chat view (rich text, GIFs) in Slint, and test accessibility with VoiceOver. None of that was done here.

@@ -1,0 +1,49 @@
+import { Button, CheckBox, TabWidget, ListView, ScrollView } from "std-widgets.slint";
+export struct RowData { status: string, text: string }
+export struct SectionData { title: string, rows: [RowData] }
+export component App inherits Window {
+    title: "SingWS toolkit spike (Slint)";
+    preferred-width: 900px; preferred-height: 600px;
+    background: #14101f;
+    in property <string> ticker-text;
+    in property <[SectionData]> sections;
+    in property <string> waitlist-status;
+    in property <string> hero-kicker; in property <string> hero-singer; in property <string> hero-sub; in property <string> hero-left;
+    in-out property <bool> custom-on: true;
+    in property <int> start-tab: 0;
+    callback custom-toggled(bool);
+    VerticalLayout {
+        padding: 12px; spacing: 10px;
+        Rectangle {
+            background: #2a1f4d; border-radius: 14px; height: 90px;
+            VerticalLayout { padding: 12px; spacing: 2px;
+                Text { text: hero-kicker; color: #b6ff3b; font-size: 12px; font-weight: 800; }
+                Text { text: hero-singer; color: white; font-size: 26px; font-weight: 800; }
+                HorizontalLayout { Text { text: hero-sub; color: #cfc6ee; font-size: 14px; horizontal-stretch: 1; } Text { text: hero-left; color: #b6ff3b; font-size: 18px; font-weight: 800; } }
+            }
+        }
+        TabWidget { current-index: root.start-tab;
+            Tab { title: "Ticker";
+                VerticalLayout { padding: 10px; spacing: 10px;
+                    CheckBox { text: "Show the custom message"; checked <=> root.custom-on; toggled => { root.custom-toggled(self.checked); } }
+                    Rectangle { background: #0b0816; border-radius: 8px; height: 56px; clip: true;
+                        Text { text: ticker-text; color: white; font-size: 22px; x: 10px; vertical-alignment: center; height: parent.height; } }
+                }
+            }
+            Tab { title: "Waitlist";
+                VerticalLayout { spacing: 6px; padding: 10px;
+                    Text { text: waitlist-status; color: #cfc6ee; }
+                    ListView {
+                        for sec in sections : VerticalLayout { spacing: 4px;
+                            Text { text: sec.title; color: #b6ff3b; font-size: 15px; font-weight: 800; }
+                            for r in sec.rows : Rectangle { background: #231a3d; border-radius: 10px; height: 74px;
+                                HorizontalLayout { padding: 8px; spacing: 10px;
+                                    Text { text: r.status; color: #b6ff3b; width: 130px; font-size: 12px; }
+                                    Text { text: r.text; color: white; font-size: 12px; wrap: word-wrap; horizontal-stretch: 1; } } }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
