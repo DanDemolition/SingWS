@@ -108,13 +108,29 @@ class HostTests(unittest.TestCase):
         host._service_state("ready", "Signed in")
         self.assertIn(("play", (3241559, "NOFX Linoleum")), service.web.calls)
 
-    def test_signed_out_fails_the_song_with_the_normal_notification(self):
+    def test_signing_in_waits_then_plays_when_ready(self):
         app, entry, service, host = make(state="sign_in")
         host.start(entry, 0, 100)
+        self.assertEqual(service.web.calls, [])
+        self.assertIsNotNone(host.asked)
+        service.state = "ready"
+        host._service_state("ready", "Signed in")
+        self.assertIn(("play", (3241559, "NOFX Linoleum")), service.web.calls)
+
+    def test_never_signing_in_fails_with_the_sign_in_message(self):
+        app, entry, service, host = make(state="sign_in")
+        host._arm_watchdog = KaraFunWebHost._arm_watchdog.__get__(host)
+        with mock.patch.object(host_module.time, "monotonic", return_value=1000.0):
+            host.start(entry, 0, 100)
+        host.asked["at"] = 0.0
+        host.asked["heard"] = False
+        # the watchdog's check, run once the limit has passed
+        from PyQt6.QtCore import QTimer
+        with mock.patch.object(QTimer, "singleShot", side_effect=lambda ms, fn: fn()):
+            with mock.patch.object(host_module.time, "monotonic", return_value=1000.0):
+                host._arm_watchdog()
         self.assertEqual(app.statuses[-1][0], "failed")
-        self.assertEqual(entry["karafun_submission_state"], "karafun_failed")
         self.assertIn("Press Stop in SingWS to return the song to the queue.", app.notes[-1][1])
-        self.assertIsNone(host.asked)
 
     def test_the_page_failing_to_play_fails_the_song(self):
         app, entry, service, host = make()

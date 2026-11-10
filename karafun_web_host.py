@@ -102,8 +102,9 @@ class KaraFunWebHost:
             return
         if state == "ready" and not asked.get("sent"):
             self._send_play()
-        elif state in ("error", "sign_in"):
-            self._fail(detail if state == "error" else "KaraFun's web player is not signed in: sign in to KaraFun in your browser (Settings > KaraFun)")
+        elif state == "error":
+            self._fail(detail)
+        # "sign_in" is also what the player says for the few seconds before it has logged itself in from its saved profile: wait for "ready"
 
     # ---- a song
     def can_start(self, entry, song_path: str = "") -> bool:
@@ -131,11 +132,9 @@ class KaraFunWebHost:
         state = self.service.state
         if state == "ready":
             self._send_play()
-        elif state == "sign_in":
-            self._fail("KaraFun's web player is not signed in: sign in to KaraFun in your browser (Settings > KaraFun)")
         elif state == "error":
             self._fail(self.state[1] or "KaraFun's web player could not start")
-        # preparing / starting: played as soon as it is ready (_state_changed), or failed after 30 s (_follow's watchdog timer)
+        # preparing / starting / sign_in (logging itself in): played as soon as it is ready (_state_changed), or failed after 30 s (_follow's watchdog timer)
         self._arm_watchdog()
         return True
 
@@ -156,7 +155,10 @@ class KaraFunWebHost:
         def _check():
             if self.asked is asked and not asked["heard"]:
                 if time.monotonic() - asked["at"] >= NEVER_STARTED_AFTER_S:
-                    self._fail("KaraFun's web player never started the song")
+                    if self.service is not None and self.service.state == "sign_in":
+                        self._fail("KaraFun's web player is not signed in: sign in to KaraFun in your browser (Settings > KaraFun)")
+                    else:
+                        self._fail("KaraFun's web player never started the song")
                 else:
                     QTimer.singleShot(1000, _check)
         QTimer.singleShot(1000, _check)
