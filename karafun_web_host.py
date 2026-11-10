@@ -23,6 +23,8 @@ import time
 from typing import Optional
 
 NEVER_STARTED_AFTER_S = 60.0
+RECOVER_START_WITHIN_S = 150.0     # a restarted player may need to sign itself in again before it plays
+MAX_RECOVERIES = 3
 SAT_AT_END_S = 2.5
 END_MARGIN_S = 1.5
 SEEK_END_GUARD_S = 8.0
@@ -107,13 +109,50 @@ class KaraFunWebHost:
 
     def _state_changed(self, state: str, detail: str) -> None:
         asked = self.asked
-        if asked is None or asked.get("heard"):
+        if asked is None:
+            return
+        if state == "error" and asked.get("heard") and self._song_open:
+            self._recover(detail)              # the player went away DURING the song: restart it and carry on
+            return
+        if asked.get("heard"):
             return
         if state == "ready" and not asked.get("sent"):
             self._send_play()
         elif state == "error":
             self._fail(detail)
         # "sign_in" is also what the player says for the few seconds before it has logged itself in from its saved profile: wait for "ready"
+
+    def _recover(self, why: str) -> None:
+        """The player's browser died while a song was playing (closed by hand, crashed, killed). Restart it and resume the song where it was, with the
+        key and tempo it had; give up (the normal failed-song path) after MAX_RECOVERIES. Never starts a second song: it replays the SAME one."""
+        asked = self.asked
+        if asked is None:
+            return
+        entry = self._entry_current()
+        tries = int(asked.get("recoveries", 0))
+        if entry is None or tries >= MAX_RECOVERIES or self.service is None:
+            self._fail(f"KaraFun's player stopped and could not be restarted ({why})")
+            return
+        resume = float(asked.get("last_position") or 0.0)
+        asked.update({"recoveries": tries + 1, "heard": False, "sent": False, "resume_at": resume, "at": time.monotonic(),
+                      "limit": RECOVER_START_WITHIN_S})
+        asked["key"] = int(entry.get("karafun_key_current", asked["key"]) or 0)
+        asked["tempo"] = int(entry.get("karafun_tempo_current", asked["tempo"]) or 100)
+        self._sat_at_end_since = None
+        self._log(f"the player stopped during the song ({why}); restarting it and resuming at {resume:.0f}s (attempt {tries + 1}/{MAX_RECOVERIES})")
+        self._stop_frames()
+        try:
+            self.app._set_karafun_entry_status(entry, "launching", message="Restarting KaraFun's player...")
+            self.app._show_processing_notification("KaraFun's player stopped: restarting it and resuming the song.", level="warning")
+        except Exception:
+            pass
+        try:
+            self.service.stop()
+            self.service.start()
+        except Exception as error:
+            self._fail(f"KaraFun's player could not be restarted: {error}")
+            return
+        self._arm_watchdog()
 
     # ---- a song
     def can_start(self, entry, song_path: str = "") -> bool:
@@ -168,7 +207,14 @@ class KaraFunWebHost:
 
         def _check():
             if self.asked is asked and not asked["heard"]:
-                if time.monotonic() - asked["at"] >= NEVER_STARTED_AFTER_S:
+                if time.monotonic() - asked["at"] >= asked.get("limit", NEVER_STARTED_AFTER_S):
+                    s = self.status or {}
+                    if (s.get("song") or {}).get("id") == asked["id"] and (s.get("playing") or s.get("moving")):
+                        entry = self._entry_current()
+                        if entry is not None:         # it IS playing: the start was just not noticed in time; treat it as started, never fail a song that is sounding
+                            self._log("the song was playing but its start was not noticed; treating it as started")
+                            self._started(entry, asked, float(s.get("position") or 0.0), float(s.get("duration") or 0.0))
+                            return
                     if self.service is not None and self.service.state == "sign_in":
                         self._fail("KaraFun's web player is not signed in: sign in to KaraFun in your browser (Settings > KaraFun)")
                     else:
@@ -185,11 +231,30 @@ class KaraFunWebHost:
             return None
         return asked["entry"]
 
+    def _stop_stray(self) -> None:
+        now = time.monotonic()
+        if now - getattr(self, "_stray_stopped_at", 0.0) < 4.0:
+            return
+        self._stray_stopped_at = now
+        self._log("the player was playing a song SingWS did not ask for; stopped it")
+        try:
+            if self.service is not None and self.service.web is not None:
+                self.service.web.stop()
+        except Exception:
+            pass
+
+    def _last_status_summary(self) -> str:
+        s = self.status or {}
+        song = s.get("song") or {}
+        return (f"last status: playing={s.get('playing')} moving={s.get('moving')} state={s.get('state')} song_id={song.get('id')} "
+                f"position={s.get('position')} duration={s.get('duration')} queue={s.get('queue')}")
+
     def _fail(self, why: str) -> None:
         asked, self.asked = self.asked, None
         if asked is None:
             return
         entry = asked["entry"]
+        self._log(f"giving up on the song: {why[:120]} | {self._last_status_summary()}")
         self._stop_frames()
         try:
             if self.service is not None and self.service.web is not None:
@@ -215,6 +280,8 @@ class KaraFunWebHost:
         kind = message.get("type")
         if kind == "status":
             self.status = message
+            if self.asked is None and not self._song_open and (message.get("playing") or message.get("moving")):
+                self._stop_stray()          # audio nobody asked for (KaraFun's own queue starting itself): never leave it playing under the show
             self._follow()
         elif kind == "error":
             text = str(message.get("message") or "")
@@ -235,7 +302,7 @@ class KaraFunWebHost:
         status = self.status
         song = status.get("song") or {}
         current = song.get("id")
-        playing = bool(status.get("playing"))
+        playing = bool(status.get("playing") or status.get("moving"))      # the page's own state can lag or miss; a position that moves IS playing
         try:
             position, duration = float(status.get("position") or 0.0), float(status.get("duration") or 0.0)
         except (TypeError, ValueError):
@@ -246,6 +313,8 @@ class KaraFunWebHost:
             return
         # The display clock follows the player (the seek bar and time left read these entry fields).
         now = time.monotonic()
+        if position > 0:
+            asked["last_position"] = position
         if duration > 0:
             entry["karafun_display_duration"] = duration
         if playing:
@@ -301,6 +370,11 @@ class KaraFunWebHost:
                 web.set_tempo(asked["tempo"])
         entry["karafun_key_current"], entry["karafun_tempo_current"] = asked["key"], asked["tempo"]
         app._karafun_show_key_tempo(asked["key"], asked["tempo"])
+        resume = float(asked.pop("resume_at", 0.0) or 0.0)
+        if resume > 3.0 and web is not None:
+            target = max(0.0, min(resume, (duration - SEEK_END_GUARD_S) if duration > 0 else resume))
+            web.seek(target)
+            self._log(f"resumed the song at {target:.0f}s after restarting the player")
         self._start_frames()
         app._show_processing_notification(f"KaraFun queued and started: {asked['title']}", level="success")
 

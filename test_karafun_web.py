@@ -59,14 +59,14 @@ class BrowserTests(unittest.TestCase):
             again = karafun_web.ensure_browser(urlopen=mock.Mock(side_effect=AssertionError("downloaded twice")), verify=True)
             self.assertEqual(again, got)
 
-    def test_an_installed_chrome_is_only_the_fallback_when_the_download_is_not_possible(self):
+    def test_the_installed_chrome_is_never_used_even_when_the_download_fails(self):
         def offline(url, timeout=None):
             raise OSError("no internet")
-        with mock.patch.object(karafun_web, "find_chrome", return_value=Path("/x/chrome")):
-            self.assertEqual(karafun_web.ensure_browser(urlopen=offline), Path("/x/chrome"))
-        with mock.patch.object(karafun_web, "find_chrome", return_value=None):
-            with self.assertRaises(RuntimeError):
+        with mock.patch.object(karafun_web, "find_chrome", return_value=Path("/x/chrome")) as finder:
+            with self.assertRaises(RuntimeError) as ctx:
                 karafun_web.ensure_browser(urlopen=offline)
+            self.assertIn("internet needed once", str(ctx.exception))
+            finder.assert_not_called()                              # the everyday Chrome is not even looked at
 
     def test_it_downloads_once_unpacks_checks_and_reuses(self):
         data = fake_zip(self.root)
@@ -257,6 +257,21 @@ class ServiceTests(unittest.TestCase):
         self.go(service)
         self.signed_out(service, 60)
         self.assertEqual(holder["web"].signed_in_called, 1)
+
+    def test_a_browser_that_dies_is_an_error_state_but_our_own_stop_is_not(self):
+        service, states, holder = self.make()
+        self.go(service)
+        service._message({"type": "status", "signedIn": True, "plan": "Pro"})
+        self.assertEqual(states[-1][0], "ready")
+        service._message({"type": "error", "message": "Chrome stopped"})
+        self.assertEqual(states[-1], ("error", "The player's browser stopped"))
+        service2, states2, holder2 = self.make()
+        self.go(service2)
+        service2._message({"type": "status", "signedIn": True, "plan": "Pro"})
+        service2.stop()                                              # clears `web` first, as the real stop does
+        n = len(states2)
+        service2._message({"type": "error", "message": "Chrome stopped"})
+        self.assertEqual(len(states2), n)                            # the helper's goodbye after OUR stop is not an error
 
     def test_the_players_messages_still_reach_the_host(self):
         got = []

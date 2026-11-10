@@ -26,8 +26,10 @@ class FakeService:
         self.state = state
         self.web = FakeWeb()
         self.started = 0
+        self.stopped = 0
     def start(self): self.started += 1
-    def stop(self): self.state = "idle"
+    def stop(self):
+        self.state = "idle"; self.stopped += 1
 
 
 class FakeApp:
@@ -240,6 +242,105 @@ class HostTests(unittest.TestCase):
         self.assertIn(("stop", ()), service.web.calls)
         host._stop_frames.assert_called()
         self.assertEqual(host.on_finish(), False)                                # a second finish does nothing
+
+    def test_the_browser_dying_mid_song_restarts_the_player_and_resumes_the_song(self):
+        app, entry, service, host = self._playing()
+        host._handle(status(position=95.0, duration=130.0))                    # playing, 95 s in
+        entry["karafun_key_current"], entry["karafun_tempo_current"] = -2, 110   # the operator changed them live
+        service.web.calls.clear()
+        service.state = "error"
+        host._service_state("error", "The player's browser stopped")
+        self.assertEqual((service.stopped, service.started), (1, 1))            # restarted, once
+        self.assertEqual(app.statuses[-1], ("launching", "Restarting KaraFun's player..."))
+        self.assertIn("restarting it", app.notes[-1][1])
+        self.assertIsNotNone(host.asked)                                         # the SAME song is still open: nothing was finished or failed
+        self.assertEqual(app.finished, [])
+        # the new browser comes up and is ready: the song is played again...
+        service.state = "ready"
+        host._service_state("ready", "Signed in")
+        self.assertIn(("play", (3241559, "NOFX Linoleum", ["NOFX Linoleum", "Linoleum NOFX", "Linoleum", "NOFX"], "NOFX", "Linoleum")), service.web.calls)
+        # ... and when it plays, it is put back where it was, with the key and tempo it had
+        service.web.calls.clear()
+        host._handle(status(position=0.5, duration=130.0))
+        self.assertIn(("seek", (95.0,)), service.web.calls)
+        self.assertIn(("set_key", (-2,)), service.web.calls)
+        self.assertIn(("set_tempo", (110,)), service.web.calls)
+
+    def test_it_gives_up_after_three_restarts(self):
+        app, entry, service, host = self._playing()
+        for n in range(3):
+            service.state = "error"
+            host._service_state("error", "x")
+            service.state = "ready"
+            host._service_state("ready", "ok")
+            host._handle(status(position=10.0))
+        self.assertEqual(service.started, 3)
+        service.state = "error"
+        host._service_state("error", "x")
+        self.assertEqual(service.started, 3)                                    # no fourth restart
+        self.assertEqual(app.statuses[-1][0], "failed")
+
+    def test_an_error_before_the_song_started_still_fails_it_as_before(self):
+        app, entry, service, host = make(state="starting")
+        host.start(entry, 0, 100)
+        service.state = "error"
+        host._service_state("error", "no browser")
+        self.assertEqual(app.statuses[-1][0], "failed")
+        self.assertEqual((service.stopped, service.started), (0, 0))
+
+    def test_a_song_whose_playback_state_lags_still_starts_when_its_position_moves(self):
+        # the failure seen live: the page was playing the song but its playback state never said so, so the app never faded the music or showed the picture
+        app, entry, service, host = make()
+        host.start(entry, 0, 100)
+        host._handle({"type": "status", "playing": False, "moving": True, "state": 2, "position": 1.5, "duration": 130.0,
+                      "song": {"id": 3241559, "title": "Linoleum", "artist": "NOFX"}})
+        self.assertEqual(app.statuses[-1], ("playing", "Playing in KaraFun"))
+        self.assertEqual(app.faded, [1])
+        host._start_frames.assert_called_once()
+
+    def test_the_last_chance_check_never_fails_a_song_that_is_sounding(self):
+        app, entry, service, host = make()
+        host._arm_watchdog = KaraFunWebHost._arm_watchdog.__get__(host)
+        host.start(entry, 0, 100)
+        host.status = {"playing": True, "moving": False, "state": 3, "position": 8.0, "duration": 130.0, "song": {"id": 3241559}}
+        host.asked["at"] = 0.0                                                   # long overdue
+        from PyQt6.QtCore import QTimer
+        with mock.patch.object(QTimer, "singleShot", side_effect=lambda ms, fn: fn()):
+            host._arm_watchdog()
+        self.assertEqual(app.statuses[-1][0], "playing")                         # started, not failed
+        self.assertNotIn("failed", [s[0] for s in app.statuses])
+
+    def test_a_song_that_really_never_plays_is_failed_with_the_last_status_and_the_player_stopped(self):
+        app, entry, service, host = make()
+        host._arm_watchdog = KaraFunWebHost._arm_watchdog.__get__(host)
+        logs = []
+        host._diag_fn = logs.append
+        host.start(entry, 0, 100)
+        host.status = {"playing": False, "moving": False, "state": 0, "position": 0, "duration": 0, "song": None}
+        host.asked["at"] = 0.0
+        from PyQt6.QtCore import QTimer
+        with mock.patch.object(QTimer, "singleShot", side_effect=lambda ms, fn: fn()):
+            host._arm_watchdog()
+        self.assertEqual(app.statuses[-1][0], "failed")
+        self.assertIn(("stop", ()), service.web.calls)
+        self.assertTrue(any("last status: playing=False" in line for line in logs))
+
+    def test_audio_nobody_asked_for_is_stopped(self):
+        app, entry, service, host = make()
+        host.service = service                         # the player is up (started earlier), no song has been asked for
+        logs = []
+        host._diag_fn = logs.append
+        host._handle({"type": "status", "playing": True, "moving": True, "state": 3, "position": 5.0, "song": {"id": 999}})
+        self.assertIn(("stop", ()), service.web.calls)
+        service.web.calls.clear()
+        host._handle({"type": "status", "playing": True, "moving": True, "state": 3, "position": 6.0, "song": {"id": 999}})
+        self.assertEqual(service.web.calls, [])                                  # not hammered: once per few seconds
+
+    def test_a_song_that_SingWS_started_is_never_treated_as_stray(self):
+        app, entry, service, host = self._playing()
+        service.web.calls.clear()
+        host._handle(status(position=20.0))
+        self.assertNotIn(("stop", ()), service.web.calls)
 
     def test_finish_without_a_web_song_says_so(self):
         app, entry, service, host = make()

@@ -101,19 +101,17 @@ def _default_open(url: str, timeout: float = 30):
 
 def ensure_browser(progress: Callable[[int, int], None] = lambda done, total: None, *, urlopen=None, verify: bool = True) -> Path:
     """The browser KaraFun's player runs in: SingWS's OWN Chrome for Testing in ~/SingWS (downloaded now if it is not there yet: about 200 MB from Google's
-    own site, checked that it runs and is the version asked for, unpacked into a folder of its own), so nothing you do in your everyday Chrome (quitting it,
-    scripting it, updating it) can reach the player. Only when that cannot be downloaded (offline) is an installed Google Chrome used instead.
+    own site, checked that it runs and is the version asked for, unpacked into a folder of its own). It is never the installed Google Chrome: nothing you do
+    in your everyday Chrome (quitting it, scripting it, updating it, force-quitting it) can reach the player. Offline on the very first start there is
+    nothing to fall back on, and that is reported plainly.
     `progress(bytes_done, bytes_total)` is called while it downloads. Raises RuntimeError (nothing half-installed is left behind)."""
     have = downloaded_chrome()
     if have is not None:
         return have
-    installed = find_chrome()
     try:
         return _download_browser(progress, urlopen, verify)
-    except RuntimeError:
-        if installed is not None:
-            return installed
-        raise
+    except RuntimeError as error:
+        raise RuntimeError(f"the player's own browser is not on this Mac yet and could not be downloaded (internet needed once): {error}") from error
 
 
 def _download_browser(progress, urlopen, verify) -> Path:
@@ -428,6 +426,9 @@ class KaraFunWebService:
                     self._open_sign_in_page()
         elif kind == "error" and message.get("message") == "KaraFun's web player stopped":
             self._set("error", "KaraFun's player stopped")
+        elif kind == "error" and message.get("message") == "Chrome stopped" and self.web is not None and self.state not in ("idle", "error"):
+            # The player's browser went away (closed by hand, crashed, killed): say so, so the host can restart it. (Our own stop() clears `web` first.)
+            self._set("error", "The player's browser stopped")
         try:
             self.on_message(message)
         except Exception as error:

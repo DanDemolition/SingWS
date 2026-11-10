@@ -22,6 +22,9 @@
     pinia = found;
     store('mediaSession').$onAction(({ name, args }) => { if (name === 'setPlaybackState') playbackState = args[0]; });
     post({ type: 'ready' });
+    // KaraFun keeps its own queue between sessions and may start it by itself as the page loads (audio with no picture and no host): until SingWS has
+    // asked for a song, empty that queue and pause, a few times as the queue finishes loading.
+    for (const delay of [1500, 4000, 9000]) setTimeout(() => { if (!singwsControlled) { try { store('player').pause(); clearQueue(); } catch (error) {} } }, delay);
     return true;
   }
   // An error's words: its message, or what's in it (KaraFun throws plain objects too).
@@ -29,6 +32,7 @@
   const fail = (what, error) => { if (what === 'Play') blankUntil(null); post({ type: 'error', message: `${what}: ${describe(error)}` }); };
   // The song the audience picture is blank until (null: not blank); see
   // singwsPlay. Cleared by the status check below once it plays.
+  let singwsControlled = false;      // true once SingWS has asked for a song in this page
   let blankFor = null;
   const blankUntil = id => { blankFor = id; document.documentElement.classList.toggle('singws-starting', id !== null); };
 
@@ -96,6 +100,7 @@
   window.singwsPlay = async (id, query, extra) => {
     // Black until this song plays: KaraFun's canvas still shows the last
     // song's lyrics while the new one is found and loaded.
+    singwsControlled = true;
     blankUntil(id);
     if (!connect()) return fail('Play', 'KaraFun is still starting');
     extra = extra || {};
@@ -289,6 +294,7 @@
     window.dispatchEvent(new Event('resize'));
   };
 
+  let lastSongId = null, lastPos = 0, lastPosAt = 0, movingUntil = 0;
   // Where things are, twice a second.
   setInterval(() => {
     if (!connect()) return;
@@ -297,10 +303,19 @@
       if (store('remote').$state.session && !turningOff) turnRemoteOff();
       const state = store('player').$state;
       const songId = store('mediaSession').$state.currentSongId;
-      if (blankFor !== null && askedId(songId) === blankFor && playbackState === 3) blankUntil(null);
+      // `playbackState` comes from a hook that can miss KaraFun's own state changes (a song then plays with the state stuck): the song's position moving is the
+      // proof it is playing, and is what the host and the start-up shield go by as well.
+      const position = state.currentTime || 0;
+      const nowMs = Date.now();
+      if (songId !== lastSongId) { lastSongId = songId; lastPos = position; lastPosAt = nowMs; movingUntil = 0; }
+      else if (position > lastPos + 0.3) { movingUntil = nowMs + 1500; lastPos = position; lastPosAt = nowMs; }
+      else if (position < lastPos) { lastPos = position; }
+      const moving = nowMs < movingUntil;
+      const playing = playbackState === 3 || moving;
+      if (blankFor !== null && askedId(songId) === blankFor && playing) blankUntil(null);
       const entry = store('queue').$state.rawQueue.find(e => e.content && e.content.id === songId);
       post({ type: 'status', signedIn: !!session.userId, plan: session.planCaption || '', queue: store('queue').$state.rawQueue.length,
-        playing: playbackState === 3, state: playbackState, position: state.currentTime || 0, duration: state.duration || 0,
+        playing, moving, state: playbackState, position, duration: state.duration || 0,
         song: entry ? { id: askedId(songId), title: entry.content.title || '', artist: (entry.content.artist && entry.content.artist.name) || '' } : null });
     } catch (error) {}
   }, 500);
