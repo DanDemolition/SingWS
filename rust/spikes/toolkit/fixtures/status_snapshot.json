@@ -1,0 +1,3 @@
+{"version":1,"taken_at":1792000000,"settings":{"venue_name":"Joe's","use_waiting_for_add":true,"queue_mode":"rotation","bg_video_enabled":false},"connection":"Connected","network_configured":true,"last":{"received":"","accepted":"","sync":"12:01:02","error":""},"attention":{"1":{}},"queue_rev":9,"queue":[{"name":"Ann","rotation_marker":false},{"name":"Bo","rotation_marker":true}],"total_secs":600,"locked":false,"looping":false,
+"diagnostics":{"local_name":"Speakers","screen_count":2,"karafun_path":null,"output_host":true,"preview_host":true,"show_ticker":true,"qr_url":"https://x/","bg_files":[]},
+"hero":{"kicker":"NOW SINGING","singer":"Ann","subtitle":"Radio Ga Ga · Queen","meta":"SC8671","format":"ZIP","remaining":"03:21"}}

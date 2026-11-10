@@ -1,0 +1,10 @@
+# Slint adoption trial (2026-11-10). A SEPARATE workspace, like spikes/toolkit: not a member of rust/Cargo.toml, nothing the app ships depends on it.
+[workspace]
+resolver = "2"
+members = ["singws-slint"]
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
