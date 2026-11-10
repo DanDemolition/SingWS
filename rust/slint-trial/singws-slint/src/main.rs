@@ -45,6 +45,12 @@ fn apply(app: &App, dir: &str, ui: &mut Ui) {
     app.set_st_chips(ModelRc::new(VecModel::from(st.chips.iter().map(|c| ChipItem { text: c.text.as_str().into(), tone: c.tone.as_str().into() }).collect::<Vec<_>>())));
     app.set_st_status(st.status_text.into()); app.set_st_warn(st.warn_dot); app.set_st_location(st.location.into()); app.set_st_tooltip(st.tooltip.into());
     app.set_st_eta(st.eta.into()); app.set_st_summary(st.summary.into()); app.set_st_report(st.report_title.into());
+    app.set_st_all_passed(st.all_passed);
+    app.set_st_diag(ModelRc::new(VecModel::from(st.check_rows.iter().map(|c| DiagItem { ok: c.ok, label: c.label.as_str().into(), detail: c.detail.as_str().into() }).collect::<Vec<_>>())));
+    match &st.hero {
+        Some(h) => { app.set_hero_has(true); app.set_hero_live(h.kicker == "NOW SINGING"); app.set_hero_kicker(h.kicker.as_str().into()); app.set_hero_singer(h.singer.as_str().into()); app.set_hero_sub(h.subtitle.as_str().into()); app.set_hero_meta(h.meta.as_str().into()); app.set_hero_format(h.format.as_str().into()); app.set_hero_left(h.remaining.as_str().into()); }
+        None => app.set_hero_has(false),
+    }
     app.set_st_checks(ModelRc::new(VecModel::from(st.checks.iter().map(|(ok, t)| CheckItem { ok: *ok, text: t.as_str().into() }).collect::<Vec<_>>())));
     let r = panels::rotation_view(dir);
     app.set_rot_title(r.title.into()); app.set_rot_count(r.count.into()); app.set_rot_status(r.status.into()); app.set_rot_now(r.now.into()); app.set_rot_next(r.next.into());

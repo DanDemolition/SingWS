@@ -191,7 +191,12 @@ pub const STATUS_STALE_SECS: i64 = 300;
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct StatusChip { pub text: String, pub tone: String }
 #[derive(Debug, Default, Clone, PartialEq)]
+pub struct StatusCheck { pub ok: bool, pub label: String, pub detail: String }
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct StatusHero { pub kicker: String, pub singer: String, pub subtitle: String, pub meta: String, pub format: String, pub remaining: String }
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct StatusViewData {
+    pub all_passed: bool, pub check_rows: Vec<StatusCheck>, pub hero: Option<StatusHero>,
     pub note: String, pub stale: bool, pub has: bool, pub chips: Vec<StatusChip>, pub status_text: String, pub warn_dot: bool, pub location: String,
     pub tooltip: String, pub eta: String, pub summary: String, pub report_title: String, pub checks: Vec<(bool, String)>,
 }
@@ -225,6 +230,9 @@ pub fn status_view(dir: &str, now: i64) -> StatusViewData {
                 status_text: v.status.text.clone(), warn_dot: v.status.dot_token == "warning", location: v.status.location.clone(), tooltip: v.status.tooltip.clone(),
                 eta: strip_tags(&v.eta.html), summary: v.summary.clone(), report_title: v.report.title.clone(),
                 checks: v.report.checks.iter().map(|c| (c.ok, format!("{}   {}", c.label, c.detail))).collect(),
+                all_passed: v.report.all_passed,
+                check_rows: v.report.checks.iter().map(|c| StatusCheck { ok: c.ok, label: c.label.to_string(), detail: c.detail.to_string() }).collect(),
+                hero: v.hero.as_ref().map(|h| StatusHero { kicker: h.kicker.clone(), singer: h.singer.clone(), subtitle: h.subtitle.clone(), meta: h.meta.clone(), format: h.format_text.clone(), remaining: h.remaining.clone() }),
             }
         }
         Err(e) => note(format!("Status unavailable: {e}")),
@@ -234,7 +242,7 @@ pub fn status_view(dir: &str, now: i64) -> StatusViewData {
 #[cfg(test)]
 mod tests {
     use super::*;
-    const STATUS_FIXTURE: &str = r#"{"version":1,"taken_at":1792000000,"settings":{"venue_name":"Joe's","use_waiting_for_add":true,"queue_mode":"rotation","bg_video_enabled":false},"connection":"Connected","network_configured":true,"last":{"received":"","accepted":"","sync":"12:01:02","error":""},"attention":{"1":{}},"queue_rev":9,"queue":[{"name":"Ann","rotation_marker":false},{"name":"Bo","rotation_marker":true}],"total_secs":600,"locked":false,"looping":false,"diagnostics":{"local_name":"Speakers","screen_count":2,"karafun_path":null,"output_host":true,"preview_host":true,"show_ticker":true,"qr_url":"https://x/","bg_files":[]}}"#;
+    const STATUS_FIXTURE: &str = r#"{"version":1,"taken_at":1792000000,"settings":{"venue_name":"Joe's","use_waiting_for_add":true,"queue_mode":"rotation","bg_video_enabled":false},"connection":"Connected","network_configured":true,"last":{"received":"","accepted":"","sync":"12:01:02","error":""},"attention":{"1":{}},"queue_rev":9,"queue":[{"name":"Ann","rotation_marker":false},{"name":"Bo","rotation_marker":true}],"total_secs":600,"locked":false,"looping":false,"diagnostics":{"local_name":"Speakers","screen_count":2,"karafun_path":null,"output_host":true,"preview_host":true,"show_ticker":true,"qr_url":"https://x/","bg_files":[]},"hero":{"kicker":"NOW SINGING","singer":"Ann","subtitle":"Radio Ga Ga · Queen","meta":"SC8671","format":"ZIP","remaining":"03:21"}}"#;
     fn dir(n: &str) -> String { let d = std::env::temp_dir().join(format!("singws-uimodel-panels-{}-{n}", std::process::id())); std::fs::create_dir_all(&d).unwrap(); d.to_string_lossy().into() }
     #[test]
     fn same_text_as_the_qt_shell_for_the_same_files() {
@@ -251,6 +259,7 @@ mod tests {
         let d = dir("s");
         std::fs::write(format!("{d}/status_snapshot.json"), STATUS_FIXTURE).unwrap();
         let v = status_view(&d, 1_792_000_020);
+        assert_eq!(v.hero.as_ref().map(|h| h.singer.as_str()), Some("Ann"));
         assert!(v.has && v.note == "updated 20s ago" && v.location == "Joe's" && v.checks.len() == 7, "{v:?}");
     }
     #[test]

@@ -133,3 +133,6 @@ Slint notes from this round: `ScrollView` with a `VerticalLayout` needs `alignme
 - Left: Music, EQ, Chat (rich text, GIFs: the riskiest Slint gap), Network settings, Diagnostics, Now playing, the live Ticker/Waitlist buttons and the TV-window button, the Library key spinner, a worker thread for slow searches.
 - Audience window and video surface: not started; plan unchanged (native bridge view, a second spike for a transparent overlay judged on a real TV).
 - Not tested anywhere: Intel Mac, Windows, VoiceOver, a live login/Add/transport against a running app.
+
+### Slint trial, Diagnostics and Now playing (2026-11-10, last)
+Both read the same `status_snapshot.json` as the Status tab (`panels::status_view` now also returns `check_rows`, `all_passed` and `hero`; test extended). Compared with Qt on screen: Diagnostics is nearly identical (the detail column starts about 24 px further right in Slint). Now playing: same card text and colours; the Slint card sizes itself around its content, while the **Qt page's card is too short and the meta and time-left lines hang below its border** (a Qt-side `implicitHeight` bug in `NowPlayingPage.qml`, left alone: the Qt shell is not touched). Still left: Music, EQ, Chat, Network settings, the live Ticker/Waitlist buttons, the TV-window button, the audience window.
