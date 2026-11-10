@@ -17,6 +17,12 @@ pub struct Item {
     pub title: String,
     pub helper: String,
     pub text: String,
+    pub request_id: i64,
+    pub singer: String,
+    pub artist: String,
+    pub song: String,
+    pub key: i64,
+    pub tempo: i64,
     pub first_time: bool,
     /// e.g. "key +3   tempo -4", empty when both are 0
     pub tag: String,
@@ -78,7 +84,7 @@ pub fn load(dir: &str, now: SystemTime) -> WaitlistView {
         for r in &s.rows {
             rows += 1;
             let (k, t) = key_tempo(&snapshot, r.request_id);
-            items.push(Item { section: s.key.to_string(), text: r.text.clone(), first_time: r.first_time_singer, tag: tag(k, t), ..Default::default() });
+            items.push(Item { section: s.key.to_string(), text: r.text.clone(), request_id: r.request_id, singer: r.singer.clone(), artist: r.artist.clone(), song: r.title.clone(), key: k, tempo: t, first_time: r.first_time_singer, tag: tag(k, t), ..Default::default() });
         }
     }
     let mut status = if rows == 0 { "Nobody is waiting".to_string() } else { format!("{rows} request{}", if rows == 1 { "" } else { "s" }) };

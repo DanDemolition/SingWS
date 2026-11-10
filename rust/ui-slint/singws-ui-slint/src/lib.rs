@@ -1,5 +1,6 @@
 //! Toolkit-free glue for the Slint host window. Ports `ticker_panel.rs` and `waitlist_panel.rs` of the Qt shell: READ-ONLY, same files (`queue.json`, `settings.json`,
 //! `waitlist_snapshot.json` in `SINGWS_HOME` or `~/SingWS`), all rules from `singws-uimodel`. Nothing here writes show data.
+pub mod control;
 pub mod ticker_page;
 pub mod waitlist_page;
 
