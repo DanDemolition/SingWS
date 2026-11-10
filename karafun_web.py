@@ -17,6 +17,7 @@ import base64
 import json
 import os
 import subprocess
+import sys
 import threading
 from pathlib import Path
 from typing import Callable, Optional
@@ -39,6 +40,9 @@ def find_helper() -> Optional[Path]:
     arch = "arm64" if platform.machine() in ("arm64", "aarch64") else "x86_64"
     here = Path(__file__).resolve().parent
     candidates = [os.environ.get("SINGWS_KARAFUN_WEB", "")]
+    meipass = getattr(sys, "_MEIPASS", None)      # the frozen app: PyInstaller puts the helper in its Frameworks/bundle folder
+    if meipass:
+        candidates += [str(Path(meipass) / _HELPER_NAME), str(Path(meipass) / "Frameworks" / _HELPER_NAME)]
     candidates += [str(here / "Frameworks" / _HELPER_NAME), str(here.parent / "Frameworks" / _HELPER_NAME),
                    str(here / "native" / "singws_karafun_web" / arch / _HELPER_NAME)]
     candidates += [str(Path.home() / ".cache" / d / "release" / _HELPER_NAME) for d in ("singws-rust-target-kfweb", "singws-rust-target")]

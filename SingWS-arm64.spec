@@ -73,6 +73,11 @@ karafun_bin = project_root / "native" / "singws_karafun" / "arm64" / "singws-kar
 if karafun_bin.is_file() and "arm64" in subprocess.getoutput(f"/usr/bin/lipo -archs '{karafun_bin}'"):
     binaries.append((str(karafun_bin), "."))
 
+# Rust KaraFun web player driver (rust/build_karafun_web.sh). Optional: without it the karafun_web_player setting cannot start the player.
+karafun_web_bin = project_root / "native" / "singws_karafun_web" / "arm64" / "singws-karafun-web"
+if karafun_web_bin.is_file() and "arm64" in subprocess.getoutput(f"/usr/bin/lipo -archs '{karafun_web_bin}'"):
+    binaries.append((str(karafun_web_bin), "."))
+
 # Rust update rules (rust/build_update.sh). Optional: without it update_shadow is silently skipped.
 update_bin = project_root / "native" / "singws_update" / "arm64" / "singws-update"
 if update_bin.is_file() and "arm64" in subprocess.getoutput(f"/usr/bin/lipo -archs '{update_bin}'"):
@@ -114,6 +119,8 @@ for helper in (
     "settings_migrate_shadow.py",
     "songend_shadow.py",
     "karafun_script_shadow.py",
+    "karafun_web.py",
+    "karafun_web_host.py",
     "karafun_monitor_shadow.py",
     "karafun_flow_shadow.py",
     "karafun_builder_shadow.py",
@@ -246,6 +253,8 @@ a = Analysis(
         'settings_migrate_shadow',
         'songend_shadow',
         'karafun_script_shadow',
+        'karafun_web',
+        'karafun_web_host',
         'karafun_monitor_shadow',
         'karafun_flow_shadow',
         'karafun_builder_shadow',

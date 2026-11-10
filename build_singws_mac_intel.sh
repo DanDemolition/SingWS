@@ -15,6 +15,7 @@ python3 tools/check_native_libs_fresh.py --arch x86_64 --require || { echo "!! t
 ./rust/build_settingsmig.sh || echo "!! could not build the singws-settingsmig helper; settings_migrate_shadow will be skipped in this build"
 ./rust/build_songend.sh || echo "!! could not build the singws-songend helper; the opt-in songend_shadow will be skipped in this build"
 ./rust/build_karafun.sh || echo "!! could not build the singws-karafun helper; karafun_script_shadow will be skipped in this build"
+./rust/build_karafun_web.sh || echo "!! could not build the singws-karafun-web helper; the karafun_web_player setting will not work in this build"
 ./rust/build_scan.sh || echo "!! could not build the singws-scan-cli helper; the scan shadow will report helper-not-found in this build"
 
 APP_NAME="SingWS"
