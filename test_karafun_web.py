@@ -132,6 +132,7 @@ class ServiceTests(unittest.TestCase):
             self.kw = kw; self.started = False; self.signed_in_called = 0; self.closed = False
         def start(self): self.started = True
         def sign_in(self): self.signed_in_called += 1
+        def command(self, name, **kw): self.commands = getattr(self, 'commands', []) + [name]
         def login(self, email, password): self.logins = getattr(self, 'logins', []) + [(email, password)]
         def close(self): self.closed = True
 
@@ -211,21 +212,30 @@ class ServiceTests(unittest.TestCase):
         self.signed_out(service, 60)
         self.assertEqual(holder["web"].logins, [("a@b.c", "pw")])
         self.assertEqual(holder["web"].signed_in_called, 0)
-        self.signed_out(service, 19)
+        self.signed_out(service, 59)
         self.assertEqual(holder["web"].signed_in_called, 0)
         self.signed_out(service, 1)
         self.assertEqual(holder["web"].signed_in_called, 1)
         self.signed_out(service, 100)
         self.assertEqual(len(holder["web"].logins), 1)            # tried once only: no hammering KaraFun's login
 
-    def test_a_saved_login_that_works_never_opens_the_browser(self):
+    def test_a_saved_login_that_works_reloads_the_player_once_then_is_ready(self):
         service, states, holder = self.make(credentials=lambda: ("a@b.c", "pw"))
         self.go(service)
         self.signed_out(service, 60)
-        service._message({"type": "status", "signedIn": True, "plan": "Pro"})
-        self.signed_out(service, 0)
-        self.assertEqual(holder["web"].signed_in_called, 0)
+        signed = {"type": "status", "signedIn": True, "plan": "Pro"}
+        service._message(signed)
+        self.assertEqual(holder["web"].commands, ["reload"])
+        self.assertNotEqual(states[-1][0], "ready")              # not ready until the reloaded page is signed in
+        with mock.patch.object(karafun_web.time, "monotonic", return_value=karafun_web.time.monotonic() + 1):
+            service._message(signed)                              # a stale status from the page being reloaded
+        self.assertNotEqual(states[-1][0], "ready")
+        with mock.patch.object(karafun_web.time, "monotonic", return_value=karafun_web.time.monotonic() + 20):
+            service._message(signed)
         self.assertEqual(states[-1][0], "ready")
+        service._message(signed)
+        self.assertEqual(holder["web"].commands, ["reload"])      # only once
+        self.assertEqual(holder["web"].signed_in_called, 0)       # and the browser page never opened
 
     def test_an_unreadable_keychain_falls_back_to_the_browser_page(self):
         def broken():

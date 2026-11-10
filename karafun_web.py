@@ -19,6 +19,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -281,6 +282,7 @@ class KaraFunWeb:
         self.command("screencast", on=False)
 
 
+RELOAD_SETTLE_S = 8.0            # seconds after the post-login reload during which the old page's statuses are ignored
 SIGN_IN_AFTER_STATUSES = 60      # statuses come twice a second
 
 
@@ -303,6 +305,8 @@ class KaraFunWebService:
         self.on_state, self.on_message, self.on_frame, self.on_log = on_state, on_message, on_frame, on_log
         self._credentials = credentials          # () -> (email, password) or None: the saved login, if the user saved one
         self._login_tried = False
+        self._reload_after_login = False
+        self._reload_at = 0.0
         home = os.environ.get("SINGWS_HOME")
         self.profile_dir = Path(profile_dir) if profile_dir else (Path(home) if home else Path.home() / "SingWS") / "Chrome-KaraFun"
         self._make_web = make_web or (lambda **kw: KaraFunWeb(self.profile_dir, **kw))
@@ -329,6 +333,7 @@ class KaraFunWebService:
             self._signed_out_seen = 0
             self._sign_in_opened = False
             self._login_tried = False
+            self._reload_after_login = False
             self._ready_told = False
             self._thread = threading.Thread(target=self._run, name="karafun-web-setup", daemon=True)
             self._thread.start()
@@ -365,7 +370,19 @@ class KaraFunWebService:
     def _message(self, message: dict) -> None:
         kind = message.get("type")
         if kind == "status":
-            if message.get("signedIn"):
+            if message.get("signedIn") and self._login_tried and not self._reload_after_login and self.web is not None:
+                # Signed in by the saved login: the page's search does not work until it has been loaded once more (found by testing), so reload it
+                # once and call the player ready when it is signed in again.
+                self._reload_after_login = True
+                self._reload_at = time.monotonic()
+                self._ready_told = False
+                self.on_log("signed in with the saved login; reloading the player once")
+                self._set("starting", "Starting KaraFun's player")
+                self.web.command("reload")
+                self._signed_out_seen = 0
+            elif self._reload_after_login and time.monotonic() - self._reload_at < RELOAD_SETTLE_S:
+                pass                       # statuses from the page that is being reloaded say nothing yet
+            elif message.get("signedIn"):
                 self._signed_out_seen = 0
                 if not self._ready_told or self.state != "ready":
                     self._ready_told = True
@@ -389,8 +406,8 @@ class KaraFunWebService:
                         self.web.login(saved[0], saved[1])
                     else:
                         self._open_sign_in_page()
-                # The saved login did not work (wrong or changed password): the browser way, once.
-                elif self._signed_out_seen == SIGN_IN_AFTER_STATUSES + 20 and self.web is not None:
+                # The saved login did not work (wrong or changed password; it can take up to ~40 s): the browser way, once.
+                elif self._signed_out_seen == SIGN_IN_AFTER_STATUSES + 60 and self.web is not None:
                     self._open_sign_in_page()
         elif kind == "error" and message.get("message") == "KaraFun's web player stopped":
             self._set("error", "KaraFun's player stopped")

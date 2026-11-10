@@ -77,7 +77,12 @@
       // can trip on (it found nothing for "Alice in Chains Would?").
       const plain = query.replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
       for (const term of plain && plain !== query ? [query, plain] : [query]) {
-        try { const list = await find(term); item = list.find(r => r.content.id === id) || byName(list, query); } catch (error) { return fail('Play', error); }
+        try {
+          // Right after a sign-in the player is still reloading its session and its search can answer nothing: ask again a few times.
+          let list = await find(term);
+          for (let again = 0; again < 3 && !list.length; again++) { post({ type: 'log', message: `search "${term}": no answer yet, asking again` }); await sleep(4000); list = await find(term); }
+          item = list.find(r => r.content.id === id) || byName(list, query);
+        } catch (error) { return fail('Play', error); }
         if (item) break;
         post({ type: 'log', message: `search "${term}": song ${id} not among ${results.length} result(s) [${results.map(r => typeof r.content.id + ':' + r.content.id + ' ' + r.content.title).join('; ')}]` });
       }
