@@ -154,6 +154,37 @@ pub fn settings_view_data(dir: &str, query: &str) -> SettingsData {
     }
 }
 
+// ---- Library tab -----------------------------------------------------------------------------------------------------------------------
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct LibRow { pub id: i64, pub artist: String, pub title: String, pub left: String, pub right: String }
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct LibraryData { pub rows: Vec<LibRow>, pub status: String }
+
+/// Typo-tolerant search over the song index (same calls and wording as the Qt shell's `library_panel.rs`); `db` is the `singws.db` path.
+pub fn library_view(db: &str, query: &str) -> LibraryData {
+    let path = std::path::Path::new(db);
+    match crate::search_with_fuzzy(path, query, 500, Some(std::time::Duration::from_millis(1500))) {
+        Ok(res) => {
+            let providers = crate::providers_for(path, &res.rows.iter().map(|r| r.id).collect::<Vec<_>>());
+            let rows: Vec<LibRow> = res.rows.iter().map(|r| {
+                let (left, right) = match crate::rows::library_row(r, providers.get(&r.id).map(String::as_str)) {
+                    Ok(x) => (x.left, x.right),
+                    Err(_) => (if r.artist.is_empty() { r.title.clone() } else { format!("{} \u{2022} {}", r.artist, r.title) }, crate::format_duration(r.duration_secs)),
+                };
+                LibRow { id: r.id, artist: r.artist.clone(), title: r.title.clone(), left, right }
+            }).collect();
+            let n = rows.len();
+            let status = if query.trim().is_empty() { "Type to search your library".to_string() } else if n == 0 { "No songs match".into() }
+                else if res.fuzzy_used { format!("{n} song{} (closest matches to what you typed)", if n == 1 { "" } else { "s" }) }
+                else { format!("{n} song{}", if n == 1 { "" } else { "s" }) };
+            LibraryData { rows, status }
+        }
+        Err(e) => LibraryData { status: format!("Library unavailable: {e}"), ..Default::default() },
+    }
+}
+
+pub fn db_path(dir: &str) -> String { std::env::var("SINGWS_DB").unwrap_or_else(|_| format!("{dir}/singws.db")) }
+
 // ---- Status tab ------------------------------------------------------------------------------------------------------------------------
 pub const STATUS_STALE_SECS: i64 = 300;
 
@@ -244,5 +275,18 @@ mod tests {
         std::fs::write(format!("{d}/settings.json"), r#"{"venue_name":"Joe","api_key":"SECRET123"}"#).unwrap();
         let s = settings_view_data(&d, "");
         assert!(s.rows.iter().any(|r| r.key == "api_key" && r.hidden && !r.value.contains("SECRET123")), "{s:?}");
+    }
+    #[test]
+    fn library_search_finds_a_typo_and_says_so() {
+        let d = dir("lib");
+        let db = format!("{d}/singws.db");
+        let con = rusqlite::Connection::open(&db).unwrap();
+        con.execute_batch("CREATE TABLE songs (id INTEGER PRIMARY KEY AUTOINCREMENT, path TEXT NOT NULL UNIQUE, artist TEXT, title TEXT, discid TEXT, duration_secs INTEGER, song_type TEXT, display TEXT, searchstring TEXT NOT NULL);").unwrap();
+        con.execute("INSERT INTO songs (path, artist, title, discid, duration_secs, searchstring) VALUES ('/lib/SC1-01.zip','Queen','Radio Ga Ga','SC1',212,'queen radio ga ga')", []).unwrap();
+        drop(con);
+        let v = library_view(&db, "radio");
+        assert_eq!((v.rows.len(), v.rows[0].left.as_str()), (1, "Queen \u{2022} Radio Ga Ga"), "{v:?}");
+        assert_eq!(library_view(&db, "").status, "Type to search your library");
+        assert_eq!(library_view(&db, "zzzzqq").status, "No songs match");
     }
 }

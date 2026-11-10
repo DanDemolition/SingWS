@@ -75,10 +75,11 @@ impl Control {
         self.vm = Arc::new(Mutex::new(vm));
     }
     /// Send one command by name (`play_pause`, `skip`, `stop`, `restart`, ...). The result banner comes back through the view model's acks.
-    pub fn send(&self, label: &str, command: &str) {
+    pub fn send(&self, label: &str, command: &str) { self.send_args(label, command, &json!({})); }
+    pub fn send_args(&self, label: &str, command: &str, args: &Value) {
         let id = new_request_id();
         self.vm.lock().unwrap().note_sent(&id, label);
-        let res = match &self.handle { Some(h) => h.send_with_id(command, &json!({}), None, &id).map(|_| ()).map_err(|e| e.to_string()), None => Err("not connected to the relay".into()) };
+        let res = match &self.handle { Some(h) => h.send_with_id(command, args, None, &id).map(|_| ()).map_err(|e| e.to_string()), None => Err("not connected to the relay".into()) };
         if let Err(e) = res {
             let mut v = self.vm.lock().unwrap();
             v.forget(&id);

@@ -6,7 +6,7 @@ use std::rc::Rc;
 use std::time::{Duration, SystemTime};
 
 #[derive(Default)]
-struct Ui { singer_search: String, selected: String, song_query: String, setting_query: String }
+struct Ui { lib_query: String, singer_search: String, selected: String, song_query: String, setting_query: String }
 
 fn now_epoch() -> i64 { SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0) }
 
@@ -15,6 +15,12 @@ fn apply_control(app: &App, c: &control::Control) {
     app.set_c_status(v.status.into()); app.set_c_enabled(v.enabled); app.set_c_login_error(v.login_error.into());
     app.set_c_now(v.now.into()); app.set_c_clock(v.clock.into()); app.set_c_playing(v.playing); app.set_c_result(v.result_text.into()); app.set_c_result_kind(v.result_kind.into());
     app.set_c_logged_in(v.logged_in);
+}
+
+fn apply_library(app: &App, dir: &str, q: &str) {
+    let l = panels::library_view(&panels::db_path(dir), q);
+    app.set_lib_status(l.status.into());
+    app.set_lib_rows(ModelRc::new(VecModel::from(l.rows.iter().map(|r| LibItem { id: r.id as i32, artist: r.artist.as_str().into(), title: r.title.as_str().into(), left: r.left.as_str().into(), right: r.right.as_str().into() }).collect::<Vec<_>>())));
 }
 
 fn apply(app: &App, dir: &str, ui: &mut Ui) {
@@ -80,6 +86,12 @@ fn main() {
     { let (w, c) = (app.as_weak(), ctl.clone()); app.on_c_disconnect(move || { c.borrow_mut().disconnect(); if let Some(a) = w.upgrade() { apply_control(&a, &c.borrow()); } }); }
     { let (w, c) = (app.as_weak(), ctl.clone()); app.on_c_send(move |label, cmd| { c.borrow().send(&label, &cmd); if let Some(a) = w.upgrade() { apply_control(&a, &c.borrow()); } }); }
     { let (w, c) = (app.as_weak(), ctl.clone()); app.on_c_changed(move || { if let Some(a) = w.upgrade() { apply_control(&a, &c.borrow()); } }); }
+    // library: search on every edit (the index answers in milliseconds; a typo falls back to the fuzzy pass, at most 1.5 s)
+    { let (w, d, u) = (app.as_weak(), dir.clone(), ui.clone());
+      app.on_lib_search(move |t| { u.borrow_mut().lib_query = t.to_string(); if let Some(a) = w.upgrade() { apply_library(&a, &d, &t); } }); }
+    { let (w, c) = (app.as_weak(), ctl.clone());
+      app.on_lib_add(move |id, singer| { c.borrow().send_args(&format!("Add song for {singer}"), "queue.add_song", &serde_json::json!({"singer": singer.to_string(), "song_id": id as i64, "key": 0})); if let Some(a) = w.upgrade() { apply_control(&a, &c.borrow()); } }); }
+    apply_library(&app, &dir, &std::env::var("SLINT_TRIAL_QUERY").unwrap_or_default());
     // the Qt shell's pages refresh every 3 s while visible
     let timer = slint::Timer::default();
     let (weak, d, u) = (app.as_weak(), dir.clone(), ui.clone());

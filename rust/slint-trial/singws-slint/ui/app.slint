@@ -1,4 +1,4 @@
-import { ScrollView } from "std-widgets.slint";
+import { ScrollView, ListView } from "std-widgets.slint";
 
 // Colours copied from singws-shell's QML (Main.qml, TickerPage.qml, WaitlistPage.qml). One place, so a theme change is one edit.
 global Theme {
@@ -28,6 +28,7 @@ export struct CheckItem { ok: bool, text: string }
 export struct RotItem { number: string, singer: string, combined: string, duet: bool }
 export struct HistItem { key: string, title: string, detail: string, selectable: bool, selected: bool }
 export struct SettingItem { key: string, value: string, hidden: bool }
+export struct LibItem { id: int, artist: string, title: string, left: string, right: string }
 export struct SingerItem { number: string, name: string }
 
 component TabButton inherits Rectangle {
@@ -100,6 +101,9 @@ export component App inherits Window {
     callback h-search(string); callback h-pick(string); callback h-song-search(string);
     in property <string> set-status; in property <[SettingItem]> set-rows;
     callback set-search(string);
+    in property <string> lib-status; in property <[LibItem]> lib-rows;
+    callback lib-search(string); callback lib-add(int, string);
+    in-out property <string> lib-singer;
     // controls (live)
     in-out property <string> c-url; in-out property <string> c-user;
     in property <string> c-status; in property <bool> c-enabled; in property <bool> c-logged-in; in property <string> c-login-error;
@@ -117,6 +121,7 @@ export component App inherits Window {
             TabButton { label: "Singer history"; width: 110px; selected: root.tab == 4; clicked => { root.tab = 4; } }
             TabButton { label: "Settings"; width: 80px; selected: root.tab == 5; clicked => { root.tab = 5; } }
             TabButton { label: "Controls"; width: 80px; selected: root.tab == 6; clicked => { root.tab = 6; } }
+            TabButton { label: "Library"; width: 80px; selected: root.tab == 7; clicked => { root.tab = 7; } }
         }
 
         if root.tab == 0 : VerticalLayout {
@@ -351,6 +356,36 @@ export component App inherits Window {
                         Btn { label: c-playing ? "Pause" : "Play"; tone: Theme.accent; enabled: c-enabled; clicked => { root.c-send("Play/pause", "play_pause"); } }
                         Btn { label: "Next"; enabled: c-enabled; clicked => { root.c-send("Next", "skip"); } }
                         Btn { label: "Stop"; tone: #5a1f2a; enabled: c-enabled; clicked => { root.c-send("Stop", "stop"); } }
+                    }
+                }
+            }
+        }
+
+        if root.tab == 7 : VerticalLayout {
+            spacing: 8px;
+            PageTitle { text: "SONG LIBRARY"; }
+            SearchBox { placeholder: "Search your library (typos are fine)"; edited(t) => { root.lib-search(t); } }
+            singer-box := SearchBox { placeholder: "Add songs for singer (a new name creates a new singer)"; text <=> root.lib-singer; }
+            Text { visible: !c-enabled; text: "To add songs to the rotation, connect on the Controls tab (the app must be online)."; color: Theme.text-dim; font-size: 12px; }
+            if c-result != "" : Text { text: c-result; color: c-result-kind == "ok" ? Theme.good : Theme.warn; font-size: 13px; wrap: word-wrap; }
+            Text { text: lib-status; color: Theme.text-dim; font-size: 12px; }
+            // ListView draws only the visible rows (all rows are the same height): 500 results cost the same as 10
+            ListView {
+                for r in lib-rows : Rectangle {
+                    height: 50px;
+                    accessible-role: list-item; accessible-label: r.left + " " + r.right;
+                    Rectangle {
+                        height: 48px; border-radius: 6px; background: Theme.row;
+                        HorizontalLayout {
+                            padding-left: 10px; padding-right: 10px; spacing: 10px;
+                            VerticalLayout {
+                                alignment: center; horizontal-stretch: 1;
+                                Text { text: r.artist != "" ? r.artist : r.title; color: #ffffff; font-size: 14px; font-weight: 600; overflow: elide; }
+                                Text { text: r.artist != "" ? r.title : ""; color: Theme.text-row; font-size: 12px; overflow: elide; }
+                            }
+                            Text { text: r.right; color: Theme.text-dim; font-size: 12px; vertical-alignment: center; }
+                            Btn { label: "Add"; enabled: c-enabled && lib-singer != ""; y: 8px; height: 32px; clicked => { root.lib-add(r.id, lib-singer); } }
+                        }
                     }
                 }
             }
