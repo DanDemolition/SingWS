@@ -15,9 +15,16 @@ global Theme {
     out property <color> text-dim: #9a97c0;
     out property <color> text-row: #c9c6e8;
     out property <color> label: #6d6a99;
+    out property <color> good: #34e08a;
+    out property <color> warn: #f5c84b;
+    out property <color> purple: #a855f7;
+    out property <color> mute: #969cb8;
+    pure public function tone(t: string) -> color { return t == "good" ? good : t == "warn" ? warn : t == "purple" ? purple : mute; }
 }
 
 export struct WaitItem { is-header: bool, key: string, title: string, helper: string, text: string, first-time: bool }
+export struct ChipItem { text: string, tone: string }
+export struct CheckItem { ok: bool, text: string }
 export struct SingerItem { number: string, name: string }
 
 component TabButton inherits Rectangle {
@@ -48,6 +55,11 @@ export component App inherits Window {
     in property <[SingerItem]> singers;
     in property <string> wait-status;
     in property <[WaitItem]> wait-items;
+    in property <string> st-note; in property <bool> st-stale; in property <bool> st-has;
+    in property <[ChipItem]> st-chips;
+    in property <string> st-status; in property <bool> st-warn; in property <string> st-location; in property <string> st-tooltip;
+    in property <string> st-eta; in property <string> st-summary; in property <string> st-report;
+    in property <[CheckItem]> st-checks;
 
     VerticalLayout {
         padding: 12px; spacing: 10px;
@@ -55,6 +67,7 @@ export component App inherits Window {
             spacing: 4px; alignment: start;
             TabButton { label: "Ticker"; width: 80px; selected: root.tab == 0; clicked => { root.tab = 0; } }
             TabButton { label: "Waitlist"; width: 80px; selected: root.tab == 1; clicked => { root.tab = 1; } }
+            TabButton { label: "Status"; width: 80px; selected: root.tab == 2; clicked => { root.tab = 2; } }
         }
 
         if root.tab == 0 : VerticalLayout {
@@ -103,6 +116,48 @@ export component App inherits Window {
                             if !it.is-header : Text { text: it.text; color: #ffffff; font-size: 13px; wrap: word-wrap; }
                         }
                     }
+                }
+            }
+        }
+
+        if root.tab == 2 : VerticalLayout {
+            spacing: 10px; alignment: start;
+            PageTitle { text: "STATUS (read-only)"; }
+            Text { text: st-note; color: st-stale ? Theme.warn : Theme.text-dim; font-size: 12px; wrap: word-wrap; }
+            if st-has : HorizontalLayout {
+                spacing: 8px; alignment: start;
+                for c in st-chips : Rectangle {
+                    height: 30px; border-radius: 15px; background: Theme.card; border-width: 1px; border-color: Theme.tone(c.tone);
+                    width: chip-text.preferred-width + 28px;
+                    accessible-role: text; accessible-label: c.text;
+                    chip-text := Text { x: 14px; height: parent.height; vertical-alignment: center; text: c.text; color: Theme.tone(c.tone); font-size: 13px; font-weight: 600; }
+                }
+            }
+            if st-has : Rectangle {
+                border-radius: 8px; background: Theme.card; border-width: 1px; border-color: Theme.card-border;
+                height: status-col.preferred-height;
+                status-col := VerticalLayout {
+                    padding: 10px; spacing: 6px;
+                    HorizontalLayout {
+                        spacing: 8px; alignment: start;
+                        Rectangle { width: 10px; height: 10px; y: 4px; border-radius: 5px; background: st-warn ? Theme.warn : Theme.good; }
+                        Text { text: st-status; color: #ffffff; font-size: 14px; }
+                        Text { text: "• " + st-location; color: Theme.text-dim; font-size: 14px; }
+                    }
+                    Text { text: st-tooltip; color: Theme.text-row; font-size: 12px; wrap: word-wrap; }
+                }
+            }
+            if st-has : Rectangle {
+                height: 46px; border-radius: 8px; background: Theme.card; border-width: 1px; border-color: Theme.card-border;
+                Text { x: 14px; height: parent.height; vertical-alignment: center; text: st-eta; color: #ffffff; font-size: 16px; overflow: elide; width: parent.width - 28px; }
+            }
+            if st-has : Text { text: st-summary != "" ? "Queue summary: " + st-summary : "Queue summary: nobody is queued"; color: Theme.text-row; font-size: 13px; }
+            if st-has : PageTitle { text: st-report; }
+            if st-has : VerticalLayout {
+                spacing: 2px;
+                for c in st-checks : Rectangle {
+                    height: 28px; border-radius: 6px; background: Theme.row;
+                    Text { x: 10px; height: parent.height; vertical-alignment: center; text: (c.ok ? "✓  " : "✗  ") + c.text; color: c.ok ? Theme.good : Theme.warn; font-size: 13px; }
                 }
             }
         }

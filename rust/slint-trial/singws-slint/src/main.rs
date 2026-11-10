@@ -20,6 +20,12 @@ fn apply(app: &App, dir: &str) {
             items.push(WaitItem { is_header: false, key: s.key.as_str().into(), title: SharedString::new(), helper: SharedString::new(), text: r.text.as_str().into(), first_time: r.first_time });
         }
     }
+    let st = panels::status_view(dir, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0));
+    app.set_st_note(st.note.into()); app.set_st_stale(st.stale); app.set_st_has(st.has);
+    app.set_st_chips(ModelRc::new(VecModel::from(st.chips.iter().map(|c| ChipItem { text: c.text.as_str().into(), tone: c.tone.as_str().into() }).collect::<Vec<_>>())));
+    app.set_st_status(st.status_text.into()); app.set_st_warn(st.warn_dot); app.set_st_location(st.location.into()); app.set_st_tooltip(st.tooltip.into());
+    app.set_st_eta(st.eta.into()); app.set_st_summary(st.summary.into()); app.set_st_report(st.report_title.into());
+    app.set_st_checks(ModelRc::new(VecModel::from(st.checks.iter().map(|(ok, t)| CheckItem { ok: *ok, text: t.as_str().into() }).collect::<Vec<_>>())));
     app.set_wait_items(ModelRc::new(VecModel::from(items)));
 }
 

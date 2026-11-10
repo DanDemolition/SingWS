@@ -112,3 +112,6 @@ Limitations hit: `ListView` assumes uniform row height, so the waitlist uses `Sc
 
 ### Audience window / video surface
 Not attempted. Plan: keep the picture as the native view owned by the video bridge; host windows are Slint. For the audience ticker/rotation screen, run a second small spike (transparent Slint window above the picture vs rendering with wgpu) and judge on the real TV; never reorder surface creation mid-show (AGENTS rule 6). Slint's winit backend exposes the raw window handle so the bridge can attach to it.
+
+### Slint trial, Status tab (2026-11-10, later)
+Status tab added (pills, status line, tooltip, ETA line, queue summary, 7 checks), loader `panels::status_view` over `singws-uimodel::status`, test passes, compared on screen with the Qt Status page. Same text and colours except: the ETA line is plain white because Slint `Text` has no rich text (the Qt page shows coloured HTML spans), so the app's coloured segments (ENDS red, ROTATION purple, START yellow) are lost — the view model would have to return segments instead of HTML before Slint can colour them (a `Row` of several `Text`s works); tooltip line spacing is tighter. Library, chat and the transparent ticker overlay are left to the toolkit-spike session.

@@ -2,7 +2,7 @@
 //! and hand the text to the UI. Every RULE lives in `singws-uimodel` (`ticker`, `waitlist`); what is here is the file reading and the status wording, which is the same
 //! as `singws-shell`'s `ticker_panel.rs` / `waitlist_panel.rs`. When Slint is adopted these two functions should move into `singws-uimodel` and the Qt shell call them too.
 use serde_json::Value;
-use singws_uimodel::{ticker, waitlist};
+use singws_uimodel::{status, ticker, waitlist};
 use std::time::SystemTime;
 
 pub const STALE_SECS: u64 = 120;
@@ -89,11 +89,65 @@ mod tests {
         assert_eq!(v.singers, vec!["Ann", "Bo"]);
     }
     #[test]
+    fn status_from_the_fixture_and_html_is_stripped() {
+        assert_eq!(strip_tags("<span style='color:#fff'>SINGERS</span>&nbsp;3"), "SINGERS 3");
+        let d = dir("s");
+        std::fs::write(format!("{d}/status_snapshot.json"), include_str!("../../fixtures/status_snapshot.json")).unwrap();
+        let v = status_view(&d, 1_792_000_020);
+        assert!(v.has && v.note == "updated 20s ago" && v.location == "Joe's" && v.checks.len() == 7, "{v:?}");
+    }
+    #[test]
     fn missing_and_broken_files() {
         let d = dir("m");
         assert_eq!(ticker_view(&d).text, "");
         std::fs::write(format!("{d}/queue.json"), "{no").unwrap();
         assert!(ticker_view(&d).status.starts_with("Ticker unavailable"));
         assert!(waitlist_view(&d, SystemTime::now()).status.starts_with("No waitlist snapshot"));
+    }
+}
+
+// ---- Status tab ------------------------------------------------------------------------------------------------------------------------
+pub const STATUS_STALE_SECS: i64 = 300;
+
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct StatusChip { pub text: String, pub tone: String }
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct StatusViewData {
+    pub note: String, pub stale: bool, pub has: bool, pub chips: Vec<StatusChip>, pub status_text: String, pub warn_dot: bool, pub location: String,
+    pub tooltip: String, pub eta: String, pub summary: String, pub report_title: String, pub checks: Vec<(bool, String)>,
+}
+
+/// The app's ETA line is a little HTML (coloured spans); Slint's `Text` has no rich text, so the tags are dropped and the words kept (a known gap, see the design doc).
+pub fn strip_tags(html: &str) -> String {
+    let mut out = String::new();
+    let mut in_tag = false;
+    for c in html.chars() {
+        match c { '<' => in_tag = true, '>' => in_tag = false, _ if !in_tag => out.push(c), _ => {} }
+    }
+    out.replace("&nbsp;", " ").replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
+}
+
+pub fn status_view(dir: &str, now: i64) -> StatusViewData {
+    let path = format!("{dir}/status_snapshot.json");
+    let note = |t: String| StatusViewData { note: t, ..Default::default() };
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return note("No status snapshot yet. Turn on \"status_snapshot\" in the app's settings; it then writes the file whenever the header refreshes.".into()),
+        Err(e) => return note(format!("Status unavailable: {e}")),
+    };
+    let snapshot: Value = match serde_json::from_str(&text) { Ok(v) => v, Err(e) => return note(format!("Status unavailable: the snapshot is not valid JSON ({e})")) };
+    match status::view(&snapshot) {
+        Ok(v) => {
+            let age = (now - v.taken_at).max(0);
+            StatusViewData {
+                note: if age > STATUS_STALE_SECS { format!("snapshot is {}m old, the app may be closed", age / 60) } else { format!("updated {age}s ago") },
+                stale: age > STATUS_STALE_SECS, has: true,
+                chips: v.chips.iter().map(|c| StatusChip { text: c.text.clone(), tone: c.tone.to_string() }).collect(),
+                status_text: v.status.text.clone(), warn_dot: v.status.dot_token == "warning", location: v.status.location.clone(), tooltip: v.status.tooltip.clone(),
+                eta: strip_tags(&v.eta.html), summary: v.summary.clone(), report_title: v.report.title.clone(),
+                checks: v.report.checks.iter().map(|c| (c.ok, format!("{}   {}", c.label, c.detail))).collect(),
+            }
+        }
+        Err(e) => note(format!("Status unavailable: {e}")),
     }
 }
