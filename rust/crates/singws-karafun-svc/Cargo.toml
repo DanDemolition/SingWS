@@ -1,0 +1,17 @@
+[package]
+name = "singws-karafun-svc"
+version = "0.1.0"
+edition = "2021"
+description = "Stage E (milestone W1 of docs/design/stage-e-karafun-web-rust-plan.md): the KaraFun web player SERVICE state machine (karafun_web.KaraFunWebService) as a pure step function plus a JSON CLI. Offline/parity only: nothing in the app calls it; the Python stays in charge. No I/O, no clock of its own, never sees the saved password."
+publish = false
+
+[lib]
+name = "singws_karafun_svc"
+path = "src/lib.rs"
+
+[[bin]]
+name = "singws-karafun-svc"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = { version = "1.0.151", features = ["float_roundtrip"] }
