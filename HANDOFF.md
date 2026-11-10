@@ -2,6 +2,10 @@
 
 Updated 2026-11-09.
 
+## STATE 2026-11-10 (newest, read first): 1.0.3.3 PUBLISHED (GitHub Latest, main d230dca; arm64 DMG `1c5f3eb2...` INSTALLED here, backup `/Applications/SingWS-1.0.3.2-pre-1.0.3.3-20261109.app`; x86_64 DMG `f0042eb0...` in `local-installs/intel-1.0.3.3`)
+
+Contains everything in the two sections below plus: **(1) song matching with the app's OWN search rules** (`karafun_bridge.js` `choose`: the query ladder from `_karafun_search_queries_for_entry`, qualifiers like "(live)" ignored, artist confirmation, unique-title fallback; the failing case was "Amor de cana (live)" not matching "Amor de cana"); **(2) a song that ends by itself now stops the picture stream and calls `_show_idle_background_after_karaoke(reason="karafun_web_end")`** (`on_finish` used to return early because `_complete` clears `asked` first); **(3) SingWS's own Chrome for Testing is preferred over the installed Chrome** (`ensure_browser`; a separate app identity, background-only, so nothing done in the everyday Chrome can reach it; the installed Chrome is only the fallback when the download is impossible); **(4) KEYCHAIN BUG FIXED: a full test run wiped the operator's real saved KaraFun login** (`save()` called a no-argument `delete()` and the tests used the real service name). The operator MUST re-save the login (`python3 tools/karafun_web_save_login.py`); tests now patch `SERVICE` to a test-only name. Full suite 2777 passed, 53 skipped. NOT verified: the slideshow returning on screen after a web song (logic and tests only), the real TV, Intel hardware (Rosetta only), a real upload of the Top 100 from the app after the operator flips the dashboard switch (the list was already on the server).
+
 ## STATE 2026-11-09 (night): Top 100 ideas on the request page + web player fixes; server DEPLOYED, app REBUILT and INSTALLED (arm64 here), Intel in `local-installs/intel-1.0.3.2-top100`
 
 **Released 1.0.3.2 (GitHub, Latest, 2026-11-09)** = the build before these fixes; its web player (off by default) has the post-login search bug below. Everything in this section is committed locally (app 6814a81 and earlier; server c7eb98c), NOT in a release.
