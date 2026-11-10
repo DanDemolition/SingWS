@@ -145,6 +145,29 @@
       post({ type: 'log', message: 'login: sent (the next status says whether it signed in)' });
     } catch (error) { post({ type: 'log', message: `login: failed (${describe(error)})` }); }
   };
+  // KaraFun's own chart (Discover > Top > "Top US" is id 7): open it, scroll its list to the bottom until every row has loaded (it loads 30 at a
+  // time), and report the songs in rank order. Needs no sign-in.
+  window.singwsTop = async (id) => {
+    if (!connect()) return fail('Top', 'KaraFun is still starting');
+    try {
+      const router = app().config.globalProperties.$router;
+      await router.push({ path: `/discover/tops/${id}` });
+      const key = `pl_${id}`;
+      const list = () => { const s = store('songs'); return s && s.$state.lists && s.$state.lists[key]; };
+      for (let i = 0; i < 60 && !(list() && list().total); i++) await sleep(250);
+      if (!list()) return fail('Top', `the chart ${id} did not load`);
+      let last = -1, stalled = 0;
+      for (let i = 0; i < 120 && list().items.length < list().total && stalled < 12; i++) {
+        const scroller = [...document.querySelectorAll('*')].find(e => /(auto|scroll)/.test(getComputedStyle(e).overflowY) && e.scrollHeight > e.clientHeight + 50);
+        if (scroller) scroller.scrollTop = scroller.scrollHeight;
+        await sleep(800);
+        if (list().items.length === last) stalled++; else { stalled = 0; last = list().items.length; }
+      }
+      const songs = list().items.filter(item => item.type === 'song' && item.content && item.content.title && item.content.artist && item.content.artist.name)
+        .map(item => ({ title: item.content.title, artist: item.content.artist.name, seconds: item.content.len || 0 }));
+      post({ type: 'top', id, total: list().total, songs });
+    } catch (error) { fail('Top', error); }
+  };
   window.singwsSignIn = async () => {
     if (!connect()) return fail('Sign in', 'KaraFun is still starting');
     try { await store('auth').remoteLogin(); } catch (error) { fail('Sign in', error); }

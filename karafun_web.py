@@ -269,6 +269,7 @@ class KaraFunWeb:
     def set_tempo(self, percent: int) -> None: self.command("tempo", percent=int(percent))
     def set_volume(self, volume: float) -> None: self.command("volume", volume=float(volume))
     def sign_in(self) -> None: self.command("signin")
+    def top(self, chart_id: int = 7) -> None: self.command("top", id=int(chart_id))
     def login(self, email: str, password: str) -> None: self.command("login", email=str(email), password=str(password))
     def sign_out(self) -> None: self.command("signout")
     def audience(self, on: bool = True) -> None: self.command("audience", on=bool(on))

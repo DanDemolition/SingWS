@@ -7,6 +7,7 @@
 //!   pause | resume | stop
 //!   seek {seconds} | key {semitones} | tempo {percent} | volume {volume}   (volume 0-100)
 //!   login {email, password}   sign in with the account's own login form call (no browser); the password is never logged
+//!   top {id}   read KaraFun's chart `id` (7 = Top US) in full; answers {"type":"top","songs":[{title,artist,seconds}]}
 //!   signin | signout      (KaraFun's own: sign-in opens karafun.com/connect in the browser)
 //!   audience {on}         lyrics-only picture with a click shield
 //!   screencast {on, width, height, quality}   stream the page as JPEG frames (the page is sized width x height)
@@ -56,6 +57,7 @@ fn script_for(line: &Value) -> Option<String> {
         "volume" => format!("singwsVolume({})", number("volume")?.clamp(0.0, 100.0).round() as i64),
         "signin" => "singwsSignIn()".into(),
         "signout" => "singwsSignOut()".into(),
+        "top" => format!("singwsTop({})", line.get("id")?.as_u64()?),
         "login" => {
             // Both are JSON strings already, so nothing in a password can break out of the call. Never logged.
             let email = line.get("email").filter(|v| v.is_string())?;

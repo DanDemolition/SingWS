@@ -4515,6 +4515,7 @@ DEFAULTS = {
     "karafun_native_double_click": False,   # Learned: System Events clicks only select the result on this Mac
     "karafun_auto_key_tempo": True,          # Set KaraFun key/tempo from the queue entry via its Playback menu
     "karafun_auto_queue_enabled": False, # Machine-local host automation; requires macOS Accessibility permission
+    "karafun_top100_sync": False,        # Once a day, read KaraFun's Top US chart in a windowless Chrome and send it to the venue server for the request page's "Top 100 ideas" list (karafun_top100.py)
     "karafun_web_email": "",             # the KaraFun account's email for the web player; its password is in the macOS Keychain (karafun_credentials.py), never here
     "karafun_web_player": False,         # Experimental: play KaraFun songs through KaraFun's web player (Chrome, downloaded once) instead of the KaraFun Mac app (karafun_web_host.py)
     "karafun_accessibility_prompt_requested": False, # macOS trust prompt is requested once for an automation-enabled install
@@ -25288,6 +25289,7 @@ class KaraokeApp(QWidget):
         # waiting for the first KaraFun song is too late for a live handoff.
         QTimer.singleShot(3500, self._request_karafun_accessibility_on_first_launch)
         QTimer.singleShot(8000, self._karafun_web_startup)
+        QTimer.singleShot(120000, self._karafun_top100_tick)
 
         # Build the rotation window while the app is idle, so its Qt Quick
         # startup cost is not paid on the first click during a show.
@@ -32467,6 +32469,20 @@ class KaraokeApp(QWidget):
         karafun_audio_edit.editingFinished.connect(_save_karafun_audio_override)
 
         v = _section_card(tab_karafun, "Requests")
+        karafun_top100_cb = QCheckBox("Send KaraFun's Top 100 chart to the request page (once a day)")
+        karafun_top100_cb.setChecked(bool(self.settings.get("karafun_top100_sync", False)))
+        karafun_top100_cb.setToolTip(
+            "Reads KaraFun's \"Top US\" chart in a windowless Chrome (no sign-in; Chrome for Testing is downloaded once, about 200 MB, if Google Chrome is not installed) "
+            "and sends it to your SingWS server. Singers see it as \"Top 100 ideas\" on the request page when you switch that on in the dashboard (Catalog settings).")
+        karafun_top100_cb.setEnabled(sys.platform == "darwin")
+
+        def _on_karafun_top100_toggled(checked):
+            _save_karafun_choice("karafun_top100_sync", checked)
+            if checked:
+                QTimer.singleShot(500, self._karafun_top100_check)
+
+        karafun_top100_cb.toggled.connect(_on_karafun_top100_toggled)
+        v.addWidget(karafun_top100_cb)
         karafun_search_cb = QCheckBox("Include KaraFun catalog results in search")
         karafun_search_cb.setChecked(bool(self.settings.get("karafun_include_online_search", False)))
         karafun_search_cb.toggled.connect(
@@ -60909,6 +60925,37 @@ class KaraokeApp(QWidget):
                 self._karafun_web_host().ensure_service()
         except Exception as exc:
             _diag(f"[KARAFUN-WEB] startup set-up failed: {exc}")
+
+    def _karafun_top100_tick(self):
+        """Hourly (UI thread): schedule the next check, then check."""
+        QTimer.singleShot(3600 * 1000, self._karafun_top100_tick)
+        self._karafun_top100_check()
+
+    def _karafun_top100_check(self):
+        """With the setting on, read KaraFun's Top US chart and send it to the venue server, at most once a day (UI thread; the work runs on its own thread)."""
+        try:
+            if sys.platform != "darwin" or not bool(self.settings.get("karafun_top100_sync", False)) or getattr(self, "_karafun_top100_busy", False):
+                return
+            import karafun_top100
+            if not karafun_top100.is_due():
+                return
+            config = _log_server_config(self.settings)
+            if not (config["base"] and config["user"] and config["key"]):
+                return
+            self._karafun_top100_busy = True
+
+            def work():
+                try:
+                    ok, message = karafun_top100.refresh(config, on_log=lambda text: None)
+                    _diag(f"[KARAFUN-TOP100] {'sent' if ok else 'not sent'}: {message}")
+                except Exception as exc:
+                    _diag(f"[KARAFUN-TOP100] failed: {type(exc).__name__}")
+                finally:
+                    self._karafun_top100_busy = False
+
+            threading.Thread(target=work, name="karafun-top100", daemon=True).start()
+        except Exception as exc:
+            _diag(f"[KARAFUN-TOP100] check failed: {exc}")
 
     def _karafun_web_shutdown(self):
         host = getattr(self, "_karafun_web", None)
