@@ -104,3 +104,29 @@ The host-window toolkit is **Slint**; Dioxus/Tauri stays the fallback. Audience 
 
 ### Licence decision (operator, 2026-11-10)
 SingWS will be released under **GPLv3**, and uses **Slint under its GPLv3 terms** (no royalty-free attribution licence, no commercial licence). Still to do: add the `LICENSE` file and per-crate `license` fields when the repo is opened, and re-read Slint's current licence page then. The bundled libmpv/Signalsmith/other third-party licences need the same GPL-compatibility check before publication.
+
+## Slint follow-up checks (2026-11-10, after the decision)
+Code: same spike (`rust/spikes/toolkit/slint-proto`), new Library and Chat tabs. The other linked session (slint-trial) was told not to duplicate these three checks.
+
+**1. Library page: PASSED on screen (looked at it).** Virtualised `ListView` over a SYNTHETIC 130,000-row index (`genlib`, same columns the app's search reads; the real library is on the Intel Mac), searched through the real `singws-uimodel::search_with_fuzzy`, with a per-row "+" button (click handler wired, not clicked). Idle memory with 20,000 rows in the model: 114 MB (97 to 103 MB with a few thousand).
+
+| Query | Rows | Time |
+|---|---|---|
+| `queen` | 8,125 | 31 ms |
+| `valerie 99` | 507 | 17 ms |
+| `a` (capped at 20,000) | 20,000 | 98 ms |
+| `quen radyo` (typo-tolerant fallback) | 2,708 | 291 ms |
+| `zzzzqq` (no match, full fuzzy scan) | 0 | 363 ms (the 400 ms budget) |
+
+Search runs on the UI thread in the spike; the fuzzy cases should move to a worker thread in the real page. Typing into the search box was not exercised (the query was injected at start); text input in Slint's `LineEdit` is unverified for IME and emoji.
+
+**2. Rich-text chat: BUILT, NOT YET SEEN.** The window was covered by another app when the screenshot was taken (the operator was using the screen), so this tab has only been compiled and run (95 MB, 1.6 to 4 % CPU with a 10 fps GIF timer), not looked at. What the code does and what Slint 1.18 offers:
+- `StyledText` (CommonMark subset: bold, italic, strike, inline code, links, lists, `<u>`, `<font color>`), fed from Rust with `StyledText::from_markdown` (currently through `slint::private_unstable_api`, i.e. not a stable API). Unsupported in it: images inside text, headings, tables, block quotes. So the Qt chat's HTML bubbles map to markdown plus separate `Image` elements; GIFs and pictures are separate elements below the text, which is how the chat already attaches them.
+- Pictures: `slint::Image` from RGBA pixel buffers (works).
+- Animated GIF: Slint has no animated-image element; the prototype decodes frames with the `image` crate and swaps the row's image from a `Timer` at 10 fps (a real GIF built and decoded in memory). A chat with many visible GIFs needs a shared timer and frame caching.
+- Colour emoji rendering, link clicking and text SELECTION/copy inside `StyledText` are unverified; text selection is not a documented feature of `Text`/`StyledText`.
+
+**3. Transparent ticker overlay over a libmpv picture: NOT DONE.** It opens real windows over the live picture and needs the screen free (and a real TV to judge stacking). Pending.
+**4. VoiceOver, Intel Mac, Windows: NOT DONE.** Pending.
+
+Net: step 1 removes the biggest widget risk. Step 2 stays the open risk (emoji, selection, many GIFs); if it fails, that single page can be the one place a webview component is considered.

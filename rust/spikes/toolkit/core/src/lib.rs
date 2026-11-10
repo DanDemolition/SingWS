@@ -37,3 +37,33 @@ pub fn load(dir: &str, custom_on: bool) -> Snapshot {
     };
     Snapshot { ticker_text, waitlist, waitlist_status, hero, status_line }
 }
+
+#[derive(Clone, Default, Debug, PartialEq)]
+pub struct SongLine { pub id: i64, pub artist: String, pub title: String, pub meta: String }
+
+/// Library search exactly as the Qt shell does it: strict search, then the typo-tolerant fallback. Returns (rows, elapsed ms, fuzzy used).
+pub fn library_search(db: &str, query: &str, limit: i64) -> (Vec<SongLine>, u128, bool) {
+    let t = std::time::Instant::now();
+    match singws_uimodel::search_with_fuzzy(std::path::Path::new(db), query, limit, Some(std::time::Duration::from_millis(400))) {
+        Ok(r) => (r.rows.iter().map(|s| SongLine { id: s.id, artist: s.artist.clone(), title: s.title.clone(), meta: format!("{}  {}", s.discid, singws_uimodel::format_duration(s.duration_secs)) }).collect(), t.elapsed().as_millis(), r.fuzzy_used),
+        Err(_) => (vec![], t.elapsed().as_millis(), false),
+    }
+}
+
+/// Synthetic library for scale tests (same columns the app's index has that the search reads). NOT real data.
+pub fn generate_library(path: &str, n: usize) {
+    let _ = std::fs::remove_file(path);
+    let con = rusqlite::Connection::open(path).unwrap();
+    con.execute_batch("CREATE TABLE meta (k TEXT PRIMARY KEY, v TEXT NOT NULL);
+        CREATE TABLE songs (id INTEGER PRIMARY KEY AUTOINCREMENT, path TEXT NOT NULL UNIQUE, artist TEXT, title TEXT, discid TEXT, duration_secs INTEGER, song_type TEXT, display TEXT, provider TEXT DEFAULT 'local', searchstring TEXT NOT NULL); BEGIN;").unwrap();
+    let a = ["Queen", "ABBA", "Journey", "Adele", "Prince", "Madonna", "Oasis", "Blur", "Bon Jovi", "Whitney Houston", "Cyndi Lauper", "Elton John", "The Beatles", "Fleetwood Mac", "Taylor Swift", "Bruno Mars"];
+    let w = ["love", "night", "dance", "heart", "fire", "rain", "dream", "road", "summer", "angel", "radio", "valerie", "waterloo", "thunder", "paradise", "forever"];
+    for i in 0..n {
+        let artist = format!("{} {}", a[i % a.len()], i / 16 % 40);
+        let title = format!("{} {} {}", w[i * 7 % w.len()], w[(i / 3) % w.len()], i);
+        let ss = format!("{artist} {title}").to_lowercase();
+        con.execute("INSERT INTO songs (path, artist, title, discid, duration_secs, song_type, display, searchstring) VALUES (?,?,?,?,?,?,?,?)",
+            rusqlite::params![format!("/lib/{i}.zip"), artist, title, format!("SC{:05}", i % 99999), 120 + (i % 240) as i64, "cdg", "", ss]).unwrap();
+    }
+    con.execute_batch("COMMIT;").unwrap();
+}

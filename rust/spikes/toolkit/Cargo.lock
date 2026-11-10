@@ -6453,6 +6453,7 @@ dependencies = [
 name = "slint-proto"
 version = "0.0.0"
 dependencies = [
+ "image",
  "slint",
  "slint-build",
  "spike-core",
@@ -6600,6 +6601,7 @@ dependencies = [
 name = "spike-core"
 version = "0.0.0"
 dependencies = [
+ "rusqlite",
  "serde_json",
  "singws-uimodel",
 ]
