@@ -1,8 +1,8 @@
-//! Toolkit-free loaders for the Ticker and Waitlist tabs: read the same snapshot files the Qt shell reads (`queue.json`, `settings.json`, `waitlist_snapshot.json`)
+//! Toolkit-free loaders for the Ticker, Waitlist and Status tabs (moved here from the Slint trial so any UI can call them): read the same snapshot files the Qt shell reads (`queue.json`, `settings.json`, `waitlist_snapshot.json`)
 //! and hand the text to the UI. Every RULE lives in `singws-uimodel` (`ticker`, `waitlist`); what is here is the file reading and the status wording, which is the same
 //! as `singws-shell`'s `ticker_panel.rs` / `waitlist_panel.rs`. When Slint is adopted these two functions should move into `singws-uimodel` and the Qt shell call them too.
 use serde_json::Value;
-use singws_uimodel::{status, ticker, waitlist};
+use crate::{status, ticker, waitlist};
 use std::time::SystemTime;
 
 pub const STALE_SECS: u64 = 120;
@@ -78,7 +78,8 @@ pub fn waitlist_view(dir: &str, now: SystemTime) -> WaitView {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn dir(n: &str) -> String { let d = std::env::temp_dir().join(format!("singws-slint-{}-{n}", std::process::id())); std::fs::create_dir_all(&d).unwrap(); d.to_string_lossy().into() }
+    const STATUS_FIXTURE: &str = r#"{"version":1,"taken_at":1792000000,"settings":{"venue_name":"Joe's","use_waiting_for_add":true,"queue_mode":"rotation","bg_video_enabled":false},"connection":"Connected","network_configured":true,"last":{"received":"","accepted":"","sync":"12:01:02","error":""},"attention":{"1":{}},"queue_rev":9,"queue":[{"name":"Ann","rotation_marker":false},{"name":"Bo","rotation_marker":true}],"total_secs":600,"locked":false,"looping":false,"diagnostics":{"local_name":"Speakers","screen_count":2,"karafun_path":null,"output_host":true,"preview_host":true,"show_ticker":true,"qr_url":"https://x/","bg_files":[]}}"#;
+    fn dir(n: &str) -> String { let d = std::env::temp_dir().join(format!("singws-uimodel-panels-{}-{n}", std::process::id())); std::fs::create_dir_all(&d).unwrap(); d.to_string_lossy().into() }
     #[test]
     fn same_text_as_the_qt_shell_for_the_same_files() {
         let d = dir("t");
@@ -92,7 +93,7 @@ mod tests {
     fn status_from_the_fixture_and_html_is_stripped() {
         assert_eq!(strip_tags("<span style='color:#fff'>SINGERS</span>&nbsp;3"), "SINGERS 3");
         let d = dir("s");
-        std::fs::write(format!("{d}/status_snapshot.json"), include_str!("../../fixtures/status_snapshot.json")).unwrap();
+        std::fs::write(format!("{d}/status_snapshot.json"), STATUS_FIXTURE).unwrap();
         let v = status_view(&d, 1_792_000_020);
         assert!(v.has && v.note == "updated 20s ago" && v.location == "Joe's" && v.checks.len() == 7, "{v:?}");
     }

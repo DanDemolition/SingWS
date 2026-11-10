@@ -115,3 +115,5 @@ Not attempted. Plan: keep the picture as the native view owned by the video brid
 
 ### Slint trial, Status tab (2026-11-10, later)
 Status tab added (pills, status line, tooltip, ETA line, queue summary, 7 checks), loader `panels::status_view` over `singws-uimodel::status`, test passes, compared on screen with the Qt Status page. Same text and colours except: the ETA line is plain white because Slint `Text` has no rich text (the Qt page shows coloured HTML spans), so the app's coloured segments (ENDS red, ROTATION purple, START yellow) are lost — the view model would have to return segments instead of HTML before Slint can colour them (a `Row` of several `Text`s works); tooltip line spacing is tighter. Library, chat and the transparent ticker overlay are left to the toolkit-spike session.
+
+The Ticker, Waitlist and Status loaders now live in `singws-uimodel::panels` (additive; the Qt shell still has its own copies and is untouched, so switching it to these is a follow-up). The Slint trial calls them through `pub use singws_uimodel::panels`.

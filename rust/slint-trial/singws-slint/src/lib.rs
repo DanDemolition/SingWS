@@ -1,1 +1,1 @@
-pub mod panels;
+pub use singws_uimodel::panels;

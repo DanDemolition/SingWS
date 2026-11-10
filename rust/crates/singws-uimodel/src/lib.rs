@@ -11,6 +11,7 @@ pub mod header;
 pub mod hero;
 pub mod history;
 pub mod music;
+pub mod panels;
 pub mod rotation;
 pub mod rows;
 pub mod settings_view;
