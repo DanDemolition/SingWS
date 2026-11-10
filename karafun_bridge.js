@@ -136,9 +136,8 @@
   window.singwsLogin = async (email, password) => {
     if (!connect()) return fail('Login', 'KaraFun is still starting');
     try {
-      const reply = await store('auth').login({ email, password });
-      const signedIn = !!(store('auth').$state.session && store('auth').$state.session.userId);
-      post({ type: 'log', message: signedIn ? 'login: signed in' : `login: refused (${(reply && reply.content) || 'no reason given'})` });
+      await store('auth').login({ login: email, password });
+      post({ type: 'log', message: 'login: sent (the next status says whether it signed in)' });
     } catch (error) { post({ type: 'log', message: `login: failed (${describe(error)})` }); }
   };
   window.singwsSignIn = async () => {
