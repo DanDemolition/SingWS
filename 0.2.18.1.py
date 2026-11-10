@@ -33443,8 +33443,6 @@ class KaraokeApp(QWidget):
         def apply_settings():
             if pending_text_size.get("dirty"):
                 apply_text_size_from_slider()
-            _save_karafun_audio_override()
-            _save_karafun_url()
             try:
                 self.save_settings()
             except Exception:
