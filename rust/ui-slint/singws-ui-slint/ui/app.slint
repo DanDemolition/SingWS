@@ -1,0 +1,63 @@
+import { TabWidget, ListView, ScrollView } from "std-widgets.slint";
+
+export struct ListItem { header: bool, section: string, title: string, helper: string, text: string, first-time: bool, tag: string }
+
+component Pill inherits Rectangle {
+    in property <string> label;
+    background: #3b2a6e; border-radius: 8px; height: 22px;
+    width: lbl.preferred-width + 16px;
+    lbl := Text { text: root.label; color: #b6ff3b; font-size: 11px; font-weight: 700; x: 8px; vertical-alignment: center; height: parent.height; }
+}
+
+component WaitRow inherits Rectangle {
+    in property <ListItem> it;
+    height: it.header ? lay.preferred-height : max(lay.preferred-height, 40px);
+    border-radius: 6px;
+    background: it.header ? (it.section == "pending_acceptance" ? #0e3a52 : it.section == "removed" ? #4a1d1d : #1f2540) : (it.first-time ? #16341f : #1a1838);
+    accessible-role: text;
+    accessible-label: it.header ? it.title : it.text;
+    lay := HorizontalLayout { padding: 8px; spacing: 10px;
+        VerticalLayout { horizontal-stretch: 1; spacing: 2px;
+            Text { text: it.header ? it.title : it.text; color: it.header ? #e8e6f5 : white; font-size: it.header ? 14px : 13px; font-weight: it.header ? 700 : 400; wrap: word-wrap; }
+            if it.header && it.helper != "" : Text { text: it.helper; color: #9a97c0; font-size: 12px; wrap: word-wrap; } }
+        if it.tag != "" : Pill { label: it.tag; y: 0px; } }
+}
+
+export component App inherits Window {
+    title: "SingWS";
+    preferred-width: 900px; preferred-height: 620px;
+    background: #14101f;
+    in property <string> ticker-text;
+    in property <string> ticker-message;
+    in property <string> ticker-status;
+    in property <[string]> singers;
+    in property <string> waitlist-status;
+    in property <[ListItem]> waitlist;
+    in property <int> start-tab: 0;
+
+    TabWidget { current-index: root.start-tab;
+        Tab { title: "Ticker";
+            VerticalLayout { padding: 14px; spacing: 10px;
+                Text { text: "TICKER (read-only)"; color: #e8e6f5; font-size: 15px; font-weight: 700; }
+                Text { text: root.ticker-status; color: #9a97c0; font-size: 12px; wrap: word-wrap; }
+                // the exact string the audience ticker scrolls
+                Rectangle { background: #0b0816; border-radius: 8px; border-color: #2a2650; border-width: 1px; height: 56px; clip: true;
+                    Text { text: root.ticker-text; color: white; font-size: 20px; x: 14px; width: parent.width - 28px; height: parent.height; vertical-alignment: center; overflow: elide; accessible-role: text; accessible-label: "Ticker text: " + root.ticker-text; } }
+                if root.ticker-message != "" : Text { text: "Custom message: " + root.ticker-message; color: #c9c6e8; font-size: 13px; wrap: word-wrap; }
+                ListView {
+                    for s[i] in root.singers : Rectangle { background: #1a1838; border-radius: 6px; height: 32px;
+                        Text { text: (i + 1) + ".  " + s; color: #c9c6e8; font-size: 13px; x: 10px; vertical-alignment: center; height: parent.height; accessible-role: text; } }
+                }
+            }
+        }
+        Tab { title: "Waitlist";
+            VerticalLayout { padding: 14px; spacing: 10px;
+                Text { text: "WAITLIST (read-only)"; color: #e8e6f5; font-size: 15px; font-weight: 700; }
+                Text { text: root.waitlist-status; color: #9a97c0; font-size: 12px; wrap: word-wrap; }
+                ListView {
+                    for it in root.waitlist : WaitRow { it: it; }
+                }
+            }
+        }
+    }
+}

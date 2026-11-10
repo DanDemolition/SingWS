@@ -130,3 +130,10 @@ Search runs on the UI thread in the spike; the fuzzy cases should move to a work
 **4. VoiceOver, Intel Mac, Windows: NOT DONE.** Pending.
 
 Net: step 1 removes the biggest widget risk. Step 2 stays the open risk (emoji, selection, many GIFs); if it fails, that single page can be the one place a webview component is considered.
+
+## Slint port, slice 1: Ticker and Waitlist (2026-11-10)
+
+New crate `rust/ui-slint/singws-ui-slint` in its OWN workspace (`rust/ui-slint/`): adding slint (winit, femtovg) to `rust/Cargo.toml` would rewrite the shared `Cargo.lock` every shipped crate builds from. Build/test: `cd rust/ui-slint && cargo test` / `cargo build --release` (use a private `CARGO_TARGET_DIR`).
+Read-only ports of the Qt shell's `ticker_panel.rs`/`TickerPage.qml` and `waitlist_panel.rs`/`WaitlistPage.qml`: same files (`SINGWS_HOME` or `~/SingWS`), 3 s refresh, rules from `singws-uimodel` (`ticker::view`, `waitlist::sections_from_snapshot`), snapshot staleness status line included. Toolkit-free glue is in `ticker_page.rs` / `waitlist_page.rs` (6 unit tests, scratch dirs); UI is `ui/app.slint`. Key/tempo of a request is shown as a tag (read the way the app's Edit dialog reads it).
+Seen on screen (macOS, fixture data copied to a scratch dir): both tabs render correctly (numbered ticker text and singer list; waitlist section header, first-time-singer green row, key/tempo pill). `SINGWS_UI_TAB=1` opens on Waitlist.
+Not done: Add/Remove/Restore/Edit and the custom-message editor (need the app command channel, next slice), custom-message toggle in the ticker view, tab switching by mouse not exercised, Windows, Intel.
