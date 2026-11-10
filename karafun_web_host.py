@@ -22,7 +22,7 @@ import threading
 import time
 from typing import Optional
 
-NEVER_STARTED_AFTER_S = 30.0
+NEVER_STARTED_AFTER_S = 60.0
 SAT_AT_END_S = 2.5
 END_MARGIN_S = 1.5
 SEEK_END_GUARD_S = 8.0
@@ -75,9 +75,17 @@ class KaraFunWebHost:
             else:
                 import karafun_web
                 factory = karafun_web.KaraFunWebService
-            self.service = factory(self._service_state, on_message=self._on_message, on_frame=self._on_frame, on_log=self._log)
+            self.service = factory(self._service_state, on_message=self._on_message, on_frame=self._on_frame, on_log=self._log,
+                                   credentials=self._saved_login)
         if self.service.state in ("idle", "error"):
             self.service.start()
+
+    def _saved_login(self):
+        """(email, password) saved in the Keychain from Settings, or None. The password is never kept in settings.json."""
+        import karafun_credentials
+        email = str(self.app.settings.get("karafun_web_email", "") or "").strip()
+        password = karafun_credentials.load(email) if email else None
+        return (email, password) if email and password else None
 
     def shutdown(self) -> None:
         self._stop_frames()

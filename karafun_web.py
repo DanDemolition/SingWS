@@ -268,6 +268,7 @@ class KaraFunWeb:
     def set_tempo(self, percent: int) -> None: self.command("tempo", percent=int(percent))
     def set_volume(self, volume: float) -> None: self.command("volume", volume=float(volume))
     def sign_in(self) -> None: self.command("signin")
+    def login(self, email: str, password: str) -> None: self.command("login", email=str(email), password=str(password))
     def sign_out(self) -> None: self.command("signout")
     def audience(self, on: bool = True) -> None: self.command("audience", on=bool(on))
     def reload(self) -> None: self.command("reload")
@@ -278,6 +279,9 @@ class KaraFunWeb:
 
     def stop_screencast(self) -> None:
         self.command("screencast", on=False)
+
+
+SIGN_IN_AFTER_STATUSES = 60      # statuses come twice a second
 
 
 class KaraFunWebService:
@@ -295,8 +299,10 @@ class KaraFunWebService:
 
     def __init__(self, on_state: Callable[[str, str], None], *, on_message: Callable[[dict], None] = lambda m: None,
                  on_frame: Callable[[bytes], None] = lambda b: None, on_log: Callable[[str], None] = lambda s: None,
-                 profile_dir=None, make_web=None, find_browser=None):
+                 profile_dir=None, make_web=None, find_browser=None, credentials=None):
         self.on_state, self.on_message, self.on_frame, self.on_log = on_state, on_message, on_frame, on_log
+        self._credentials = credentials          # () -> (email, password) or None: the saved login, if the user saved one
+        self._login_tried = False
         home = os.environ.get("SINGWS_HOME")
         self.profile_dir = Path(profile_dir) if profile_dir else (Path(home) if home else Path.home() / "SingWS") / "Chrome-KaraFun"
         self._make_web = make_web or (lambda **kw: KaraFunWeb(self.profile_dir, **kw))
@@ -322,6 +328,7 @@ class KaraFunWebService:
                 return
             self._signed_out_seen = 0
             self._sign_in_opened = False
+            self._login_tried = False
             self._ready_told = False
             self._thread = threading.Thread(target=self._run, name="karafun-web-setup", daemon=True)
             self._thread.start()
@@ -348,6 +355,13 @@ class KaraFunWebService:
             self.on_log(f"set-up failed: {error}")
             self._set("error", str(error))
 
+    def _open_sign_in_page(self) -> None:
+        if self._sign_in_opened or self.web is None:
+            return
+        self._sign_in_opened = True
+        self._set("sign_in", "Sign in to KaraFun in your browser, then come back")
+        self.web.sign_in()
+
     def _message(self, message: dict) -> None:
         kind = message.get("type")
         if kind == "status":
@@ -361,10 +375,23 @@ class KaraFunWebService:
                 # A few statuses in a row, so a page still starting does not count as "signed out".
                 if self._signed_out_seen == 4 and self.web is not None:
                     self._ready_told = False
-                    self._set("sign_in", "Sign in to KaraFun in your browser, then come back")
-                    if not self._sign_in_opened:
-                        self._sign_in_opened = True
-                        self.web.sign_in()
+                    self._set("sign_in", "Signing in to KaraFun")
+                # The profile signs itself in about 20 s after the page starts, so nothing is done about it for 30 s (twice a second).
+                if self._signed_out_seen == SIGN_IN_AFTER_STATUSES and self.web is not None and not self._login_tried:
+                    self._login_tried = True
+                    saved = None
+                    try:
+                        saved = self._credentials() if self._credentials else None
+                    except Exception as error:
+                        self.on_log(f"saved login unreadable: {type(error).__name__}")
+                    if saved:
+                        self.on_log("signing in with the saved KaraFun login")
+                        self.web.login(saved[0], saved[1])
+                    else:
+                        self._open_sign_in_page()
+                # The saved login did not work (wrong or changed password): the browser way, once.
+                elif self._signed_out_seen == SIGN_IN_AFTER_STATUSES + 20 and self.web is not None:
+                    self._open_sign_in_page()
         elif kind == "error" and message.get("message") == "KaraFun's web player stopped":
             self._set("error", "KaraFun's player stopped")
         try:

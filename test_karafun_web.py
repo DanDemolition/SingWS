@@ -132,16 +132,17 @@ class ServiceTests(unittest.TestCase):
             self.kw = kw; self.started = False; self.signed_in_called = 0; self.closed = False
         def start(self): self.started = True
         def sign_in(self): self.signed_in_called += 1
+        def login(self, email, password): self.logins = getattr(self, 'logins', []) + [(email, password)]
         def close(self): self.closed = True
 
-    def make(self, find=None):
+    def make(self, find=None, credentials=None):
         states = []
         holder = {}
         def make_web(**kw):
             holder["web"] = self.FakeWeb(**kw)
             return holder["web"]
         service = karafun_web.KaraFunWebService(lambda s, d: states.append((s, d)), profile_dir="/tmp/x", make_web=make_web,
-                                                find_browser=find or (lambda progress: Path("/x/chrome")))
+                                                find_browser=find or (lambda progress: Path("/x/chrome")), credentials=credentials)
         return service, states, holder
 
     def go(self, service):
@@ -176,21 +177,63 @@ class ServiceTests(unittest.TestCase):
         self.go(service)
         self.assertTrue(holder["web"].started)
 
-    def test_signed_in_is_ready_and_signed_out_opens_the_sign_in_once(self):
+    def signed_out(self, service, n):
+        for _ in range(n):
+            service._message({"type": "status", "signedIn": False})
+
+    def test_signed_in_is_ready(self):
         service, states, holder = self.make()
         self.go(service)
-        signed_out = {"type": "status", "signedIn": False}
-        for _ in range(3):
-            service._message(signed_out)
-        self.assertEqual(holder["web"].signed_in_called, 0)       # a page still starting is not "signed out"
-        service._message(signed_out)
-        self.assertEqual(states[-1][0], "sign_in")
-        self.assertEqual(holder["web"].signed_in_called, 1)
-        for _ in range(10):
-            service._message(signed_out)
-        self.assertEqual(holder["web"].signed_in_called, 1)       # once
         service._message({"type": "status", "signedIn": True, "plan": "Premium"})
         self.assertEqual(states[-1], ("ready", "Signed in (Premium)"))
+
+    def test_nothing_is_opened_while_the_profile_signs_itself_in(self):
+        service, states, holder = self.make()
+        self.go(service)
+        self.signed_out(service, 3)
+        self.assertEqual(states[-1][0], "starting")              # a page still starting is not "signed out"
+        self.signed_out(service, 1)
+        self.assertEqual(states[-1][0], "sign_in")
+        self.signed_out(service, 50)
+        self.assertEqual(holder["web"].signed_in_called, 0)       # the browser page does not open in the first 30 s
+
+    def test_without_a_saved_login_the_browser_page_opens_once_after_30_seconds(self):
+        service, states, holder = self.make()
+        self.go(service)
+        self.signed_out(service, 60)
+        self.assertEqual(holder["web"].signed_in_called, 1)
+        self.signed_out(service, 100)
+        self.assertEqual(holder["web"].signed_in_called, 1)
+
+    def test_a_saved_login_is_used_first_then_the_browser_page_if_it_does_not_work(self):
+        service, states, holder = self.make(credentials=lambda: ("a@b.c", "pw"))
+        self.go(service)
+        self.signed_out(service, 60)
+        self.assertEqual(holder["web"].logins, [("a@b.c", "pw")])
+        self.assertEqual(holder["web"].signed_in_called, 0)
+        self.signed_out(service, 19)
+        self.assertEqual(holder["web"].signed_in_called, 0)
+        self.signed_out(service, 1)
+        self.assertEqual(holder["web"].signed_in_called, 1)
+        self.signed_out(service, 100)
+        self.assertEqual(len(holder["web"].logins), 1)            # tried once only: no hammering KaraFun's login
+
+    def test_a_saved_login_that_works_never_opens_the_browser(self):
+        service, states, holder = self.make(credentials=lambda: ("a@b.c", "pw"))
+        self.go(service)
+        self.signed_out(service, 60)
+        service._message({"type": "status", "signedIn": True, "plan": "Pro"})
+        self.signed_out(service, 0)
+        self.assertEqual(holder["web"].signed_in_called, 0)
+        self.assertEqual(states[-1][0], "ready")
+
+    def test_an_unreadable_keychain_falls_back_to_the_browser_page(self):
+        def broken():
+            raise OSError("keychain locked")
+        service, states, holder = self.make(credentials=broken)
+        self.go(service)
+        self.signed_out(service, 60)
+        self.assertEqual(holder["web"].signed_in_called, 1)
 
     def test_the_players_messages_still_reach_the_host(self):
         got = []

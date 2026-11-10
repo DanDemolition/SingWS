@@ -131,6 +131,16 @@
     if (!connect()) return;
     try { await store('auth').logout(); post({ type: 'log', message: 'signed out' }); } catch (error) { fail('Sign out', error); }
   };
+  // Sign in with the account's email and password through KaraFun's own login call (the same one its sign-in form makes); no browser needed.
+  // Reports only whether it worked and KaraFun's own reason text: never the email or the password.
+  window.singwsLogin = async (email, password) => {
+    if (!connect()) return fail('Login', 'KaraFun is still starting');
+    try {
+      const reply = await store('auth').login({ email, password });
+      const signedIn = !!(store('auth').$state.session && store('auth').$state.session.userId);
+      post({ type: 'log', message: signedIn ? 'login: signed in' : `login: refused (${(reply && reply.content) || 'no reason given'})` });
+    } catch (error) { post({ type: 'log', message: `login: failed (${describe(error)})` }); }
+  };
   window.singwsSignIn = async () => {
     if (!connect()) return fail('Sign in', 'KaraFun is still starting');
     try { await store('auth').remoteLogin(); } catch (error) { fail('Sign in', error); }

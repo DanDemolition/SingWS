@@ -4515,6 +4515,7 @@ DEFAULTS = {
     "karafun_native_double_click": False,   # Learned: System Events clicks only select the result on this Mac
     "karafun_auto_key_tempo": True,          # Set KaraFun key/tempo from the queue entry via its Playback menu
     "karafun_auto_queue_enabled": False, # Machine-local host automation; requires macOS Accessibility permission
+    "karafun_web_email": "",             # the KaraFun account's email for the web player; its password is in the macOS Keychain (karafun_credentials.py), never here
     "karafun_web_player": False,         # Experimental: play KaraFun songs through KaraFun's web player (Chrome, downloaded once) instead of the KaraFun Mac app (karafun_web_host.py)
     "karafun_accessibility_prompt_requested": False, # macOS trust prompt is requested once for an automation-enabled install
     "karafun_fast_start_enabled": True, # Skip slow renderer/probe passes; the completion monitor verifies playback in background
@@ -32377,6 +32378,70 @@ class KaraokeApp(QWidget):
         v.addWidget(karafun_web_cb)
         v.addWidget(karafun_web_status)
         v.addWidget(karafun_web_btn)
+
+        # The KaraFun account, so the player can sign itself in again whenever it is signed out. The password goes to the macOS Keychain only.
+        karafun_login_note = QLabel("")
+        karafun_login_note.setWordWrap(True)
+        karafun_login_email = QLineEdit(str(self.settings.get("karafun_web_email", "") or ""))
+        karafun_login_email.setPlaceholderText("KaraFun email")
+        karafun_login_password = QLineEdit()
+        karafun_login_password.setPlaceholderText("KaraFun password")
+        karafun_login_password.setEchoMode(QLineEdit.EchoMode.Password)
+        karafun_login_save = QPushButton("Save login")
+        karafun_login_forget = QPushButton("Forget login")
+        karafun_login_save.setToolTip("Keeps the password in the macOS Keychain (never in settings.json) so the player can sign in again by itself")
+
+        def _refresh_karafun_login_note():
+            email = str(self.settings.get("karafun_web_email", "") or "").strip()
+            try:
+                import karafun_credentials
+                saved = bool(email and karafun_credentials.load(email))
+            except Exception:
+                saved = False
+            karafun_login_note.setText(f"A login is saved for {email} (in the Keychain)." if saved else "No login saved: you sign in to KaraFun in your browser instead.")
+            karafun_login_forget.setEnabled(saved)
+
+        def _on_karafun_login_save():
+            import karafun_credentials
+            email, password = karafun_login_email.text().strip(), karafun_login_password.text()
+            if not email or not password:
+                karafun_login_note.setText("Enter the email and the password.")
+                return
+            if not karafun_credentials.save(email, password):
+                karafun_login_note.setText("The Keychain would not save it.")
+                return
+            karafun_login_password.clear()
+            old = str(self.settings.get("karafun_web_email", "") or "").strip()
+            if old and old != email:
+                karafun_credentials.delete(old)
+            self.settings["karafun_web_email"] = email
+            self.save_settings()
+            try:
+                host = getattr(self, "_karafun_web", None)
+                if host is not None and host.service is not None and host.service.web is not None and host.service.state != "ready":
+                    host.service.web.login(email, password)
+            except Exception:
+                pass
+            _refresh_karafun_login_note()
+
+        def _on_karafun_login_forget():
+            import karafun_credentials
+            karafun_credentials.delete(str(self.settings.get("karafun_web_email", "") or "").strip())
+            self.settings["karafun_web_email"] = ""
+            self.save_settings()
+            karafun_login_email.clear()
+            _refresh_karafun_login_note()
+
+        karafun_login_save.clicked.connect(_on_karafun_login_save)
+        karafun_login_forget.clicked.connect(_on_karafun_login_forget)
+        v.addWidget(karafun_login_note)
+        v.addWidget(karafun_login_email)
+        v.addWidget(karafun_login_password)
+        login_row = QHBoxLayout()
+        login_row.addWidget(karafun_login_save)
+        login_row.addWidget(karafun_login_forget)
+        v.addLayout(login_row)
+        _refresh_karafun_login_note()
         _karafun_web_timer = QTimer(tab_karafun)
         _karafun_web_timer.setInterval(1000)
         _karafun_web_timer.timeout.connect(_refresh_karafun_web_status)
