@@ -75,35 +75,82 @@ pub fn waitlist_view(dir: &str, now: SystemTime) -> WaitView {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    const STATUS_FIXTURE: &str = r#"{"version":1,"taken_at":1792000000,"settings":{"venue_name":"Joe's","use_waiting_for_add":true,"queue_mode":"rotation","bg_video_enabled":false},"connection":"Connected","network_configured":true,"last":{"received":"","accepted":"","sync":"12:01:02","error":""},"attention":{"1":{}},"queue_rev":9,"queue":[{"name":"Ann","rotation_marker":false},{"name":"Bo","rotation_marker":true}],"total_secs":600,"locked":false,"looping":false,"diagnostics":{"local_name":"Speakers","screen_count":2,"karafun_path":null,"output_host":true,"preview_host":true,"show_ticker":true,"qr_url":"https://x/","bg_files":[]}}"#;
-    fn dir(n: &str) -> String { let d = std::env::temp_dir().join(format!("singws-uimodel-panels-{}-{n}", std::process::id())); std::fs::create_dir_all(&d).unwrap(); d.to_string_lossy().into() }
-    #[test]
-    fn same_text_as_the_qt_shell_for_the_same_files() {
-        let d = dir("t");
-        std::fs::write(format!("{d}/queue.json"), r#"[{"name":"Ann","songs":[{"title":"x"}]},{"name":"Skip","skipped":true,"songs":[{}]},{"name":"Bo","songs":[{"title":"y"}]}]"#).unwrap();
-        std::fs::write(format!("{d}/settings.json"), r#"{"ticker_custom_enabled":true,"ticker_custom_message":"Tip your host"}"#).unwrap();
-        let v = ticker_view(&d);
-        assert_eq!(v.text, "Tip your host   |   1. Ann   |   2. Bo");
-        assert_eq!(v.singers, vec!["Ann", "Bo"]);
+
+// ---- Rotation tab ----------------------------------------------------------------------------------------------------------------------
+use crate::{history, rotation, settings_view};
+
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct RotRow { pub number: String, pub singer: String, pub combined: String, pub duet: bool }
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct RotationData { pub rows: Vec<RotRow>, pub title: String, pub count: String, pub now: String, pub next: String, pub status: String }
+
+/// Same inputs as the Qt shell's `rotation_panel.rs`, but stateless (the files are re-read each call).
+pub fn rotation_view(dir: &str) -> RotationData {
+    let queue_path = std::env::var("SINGWS_QUEUE").unwrap_or_else(|_| format!("{dir}/queue.json"));
+    let queue = match rotation::load_queue(std::path::Path::new(&queue_path)) { Ok(q) => q, Err(e) => return RotationData { status: format!("Rotation unavailable: {e}"), ..Default::default() } };
+    let tracks = rotation::load_tracks(std::path::Path::new(&format!("{dir}/tracks.json"))).unwrap_or_default();
+    let db = std::path::PathBuf::from(format!("{dir}/singws.db"));
+    let live = rotation::load_live_state(std::path::Path::new(&format!("{dir}/live_state.json")));
+    let (now, playing, active_id, live_title) = match &live { Some(l) => (l.singer.clone(), l.playing, l.singer_id.clone(), l.title.clone()), None => (String::new(), false, String::new(), String::new()) };
+    let inp = rotation::Inputs { db: Some(db.as_path()), tracks: &tracks, now_singing: if now.trim().is_empty() { "Singer Rotation" } else { &now }, playing, active_singer_id: &active_id, live_title: &live_title };
+    match rotation::view(&queue, &inp) {
+        Ok(v) => {
+            let note = if live.is_some() { "Live from the app" } else { "As of the app's last save (live stage state off)" };
+            RotationData {
+                status: if v.rows.is_empty() { format!("Nobody is waiting. {note}") } else { note.to_string() },
+                rows: v.rows.iter().map(|r| RotRow { number: r.number.clone(), singer: r.singer.clone(), combined: r.combined.clone(), duet: r.duet }).collect(),
+                title: v.title_label, count: v.count_label, now: v.now_strip, next: v.next_strip,
+            }
+        }
+        Err(e) => RotationData { status: format!("Could not build the rotation: {e}"), ..Default::default() },
     }
-    #[test]
-    fn status_from_the_fixture_and_html_is_stripped() {
-        assert_eq!(strip_tags("<span style='color:#fff'>SINGERS</span>&nbsp;3"), "SINGERS 3");
-        let d = dir("s");
-        std::fs::write(format!("{d}/status_snapshot.json"), STATUS_FIXTURE).unwrap();
-        let v = status_view(&d, 1_792_000_020);
-        assert!(v.has && v.note == "updated 20s ago" && v.location == "Joe's" && v.checks.len() == 7, "{v:?}");
+}
+
+// ---- Singer history tab ----------------------------------------------------------------------------------------------------------------
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct HistRow { pub key: String, pub title: String, pub detail: String, pub selectable: bool }
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct HistoryData { pub singers: Vec<HistRow>, pub status: String, pub selected: String, pub name: String, pub summary: String, pub songs: Vec<HistRow>, pub song_meta: String }
+
+fn hist_rows(rows: &[history::Row]) -> Vec<HistRow> {
+    rows.iter().map(|r| { let mut l = r.text.splitn(2, '\n'); HistRow { key: r.key.clone(), title: l.next().unwrap_or("").into(), detail: l.next().unwrap_or("").into(), selectable: r.selectable } }).collect()
+}
+
+/// `selected` is the singer key the user picked ("" or unknown: the first real singer, like the Qt page).
+pub fn history_view(dir: &str, singer_search: &str, selected: &str, song_query: &str, now_epoch: i64) -> HistoryData {
+    let path = std::env::var("SINGWS_HISTORY").unwrap_or_else(|_| format!("{dir}/singer_history.json"));
+    let store = match history::load(std::path::Path::new(&path)) { Ok(s) => s, Err(e) => return HistoryData { status: format!("Singer history unavailable: {e}"), ..Default::default() } };
+    let d = match history::directory(&store, singer_search, 700, 500) { Ok(d) => d, Err(e) => return HistoryData { status: format!("Could not list singers: {e}"), ..Default::default() } };
+    let singers = hist_rows(&d.rows);
+    let key = if singers.iter().any(|r| r.selectable && r.key == selected) { selected.to_string() } else { singers.iter().find(|r| r.selectable).map(|r| r.key.clone()).unwrap_or_default() };
+    let mut out = HistoryData { status: format!("{} singer{}", d.total_matches, if d.total_matches == 1 { "" } else { "s" }), singers, selected: key.clone(), name: "Select a singer".into(), summary: "No singer selected.".into(), song_meta: "0 entries".into(), ..Default::default() };
+    if !key.is_empty() {
+        let (name, summary) = history::details(&store, &key);
+        out.name = name; out.summary = summary;
+        match history::songs_view(&store, &key, song_query, 500, now_epoch) {
+            Ok(v) => { out.songs = hist_rows(&v.rows); out.song_meta = v.meta; }
+            Err(e) => out.song_meta = format!("Could not list songs: {e}"),
+        }
     }
-    #[test]
-    fn missing_and_broken_files() {
-        let d = dir("m");
-        assert_eq!(ticker_view(&d).text, "");
-        std::fs::write(format!("{d}/queue.json"), "{no").unwrap();
-        assert!(ticker_view(&d).status.starts_with("Ticker unavailable"));
-        assert!(waitlist_view(&d, SystemTime::now()).status.starts_with("No waitlist snapshot"));
+    out
+}
+
+// ---- Settings viewer -------------------------------------------------------------------------------------------------------------------
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct SettingRow { pub key: String, pub value: String, pub hidden: bool }
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct SettingsData { pub rows: Vec<SettingRow>, pub status: String }
+
+pub fn settings_view_data(dir: &str, query: &str) -> SettingsData {
+    let r = std::fs::read_to_string(format!("{dir}/settings.json")).map_err(|e| e.to_string()).and_then(|t| serde_json::from_str::<Value>(&t).map_err(|e| e.to_string())).and_then(|v| settings_view::rows(&v, query));
+    match r {
+        Ok(rows) => {
+            let n = rows.len();
+            let hidden = rows.iter().filter(|r| r.hidden).count();
+            SettingsData { status: if n == 0 { "No settings match".into() } else { format!("{n} setting{}   \u{2022}   {hidden} hidden (keys, PINs and tokens are never shown)", if n == 1 { "" } else { "s" }) },
+                rows: rows.into_iter().map(|r| SettingRow { key: r.key, value: r.value, hidden: r.hidden }).collect() }
+        }
+        Err(e) => SettingsData { status: format!("Settings unavailable: {e}"), ..Default::default() },
     }
 }
 
@@ -150,5 +197,52 @@ pub fn status_view(dir: &str, now: i64) -> StatusViewData {
             }
         }
         Err(e) => note(format!("Status unavailable: {e}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    const STATUS_FIXTURE: &str = r#"{"version":1,"taken_at":1792000000,"settings":{"venue_name":"Joe's","use_waiting_for_add":true,"queue_mode":"rotation","bg_video_enabled":false},"connection":"Connected","network_configured":true,"last":{"received":"","accepted":"","sync":"12:01:02","error":""},"attention":{"1":{}},"queue_rev":9,"queue":[{"name":"Ann","rotation_marker":false},{"name":"Bo","rotation_marker":true}],"total_secs":600,"locked":false,"looping":false,"diagnostics":{"local_name":"Speakers","screen_count":2,"karafun_path":null,"output_host":true,"preview_host":true,"show_ticker":true,"qr_url":"https://x/","bg_files":[]}}"#;
+    fn dir(n: &str) -> String { let d = std::env::temp_dir().join(format!("singws-uimodel-panels-{}-{n}", std::process::id())); std::fs::create_dir_all(&d).unwrap(); d.to_string_lossy().into() }
+    #[test]
+    fn same_text_as_the_qt_shell_for_the_same_files() {
+        let d = dir("t");
+        std::fs::write(format!("{d}/queue.json"), r#"[{"name":"Ann","songs":[{"title":"x"}]},{"name":"Skip","skipped":true,"songs":[{}]},{"name":"Bo","songs":[{"title":"y"}]}]"#).unwrap();
+        std::fs::write(format!("{d}/settings.json"), r#"{"ticker_custom_enabled":true,"ticker_custom_message":"Tip your host"}"#).unwrap();
+        let v = ticker_view(&d);
+        assert_eq!(v.text, "Tip your host   |   1. Ann   |   2. Bo");
+        assert_eq!(v.singers, vec!["Ann", "Bo"]);
+    }
+    #[test]
+    fn status_from_the_fixture_and_html_is_stripped() {
+        assert_eq!(strip_tags("<span style='color:#fff'>SINGERS</span>&nbsp;3"), "SINGERS 3");
+        let d = dir("s");
+        std::fs::write(format!("{d}/status_snapshot.json"), STATUS_FIXTURE).unwrap();
+        let v = status_view(&d, 1_792_000_020);
+        assert!(v.has && v.note == "updated 20s ago" && v.location == "Joe's" && v.checks.len() == 7, "{v:?}");
+    }
+    #[test]
+    fn missing_and_broken_files() {
+        let d = dir("m");
+        assert_eq!(ticker_view(&d).text, "");
+        std::fs::write(format!("{d}/queue.json"), "{no").unwrap();
+        assert!(ticker_view(&d).status.starts_with("Ticker unavailable"));
+        assert!(waitlist_view(&d, SystemTime::now()).status.starts_with("No waitlist snapshot"));
+    }
+
+    #[test]
+    fn rotation_history_settings_from_files() {
+        let d = dir("r");
+        std::fs::write(format!("{d}/queue.json"), r#"[{"name":"Ann","songs":[{"song_info":"/x/Queen - Radio.zip"}]},{"name":"Bo","songs":[{"song_info":"/x/ABBA - Waterloo.zip"}]}]"#).unwrap();
+        let r = rotation_view(&d);
+        assert_eq!(r.rows.len(), 2, "{r:?}");
+        std::fs::write(format!("{d}/singer_history.json"), r#"{"singers":{"ann":{"name":"Ann","songs":{"queen|radio":{"artist":"Queen","title":"Radio","play_count":2}}}}}"#).unwrap();
+        let h = history_view(&d, "", "", "", 1_800_000_000);
+        assert_eq!(h.name, "Ann", "{h:?}");
+        assert_eq!(h.songs.len(), 1);
+        std::fs::write(format!("{d}/settings.json"), r#"{"venue_name":"Joe","api_key":"SECRET123"}"#).unwrap();
+        let s = settings_view_data(&d, "");
+        assert!(s.rows.iter().any(|r| r.key == "api_key" && r.hidden && !r.value.contains("SECRET123")), "{s:?}");
     }
 }
