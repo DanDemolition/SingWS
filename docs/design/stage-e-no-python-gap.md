@@ -1,5 +1,7 @@
 # Stage E exit: what stands between today's app and "no Python in the package"
 
+> Direction (operator, 2026-11-10): the end state is Rust only, with **no Qt either**. See `stage-e-no-python-no-qt.md` (toolkit options, recommended order, open decisions). This document covers the Python half.
+
 Written 2026-10-31 from a read of the tree at `7e5cdf0` (branch `claude/agitated-chebyshev-4d95ea`). Read-only inventory: no code, build, install or deploy was touched.
 Exit being measured (RUST_APP_LOGIC_PLAN.md:272-279): *the signed application contains no Python interpreter, Python modules, PyQt or PyInstaller bootloader, and passes the same show acceptance checklist on both architectures.*
 

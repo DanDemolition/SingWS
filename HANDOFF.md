@@ -2,6 +2,8 @@
 
 Updated 2026-11-09.
 
+**End-state direction (operator 2026-11-10): Rust only, no Python AND no Qt, eventually.** Written down in `docs/design/stage-e-no-python-no-qt.md`: measured Qt footprint (68k-line PyQt app, 50 files; the Rust shell is Qt Quick via cxx-qt, 19 QML pages / 3.7k lines), toolkit options (Slint, iced, egui, webview, native AppKit, wgpu), the recommended order (logic into UI-agnostic crates first, Qt Quick only as the interim UI, a toolkit spike before choosing, swap last) and three open decisions for the operator (Windows goal, licence appetite, whether a webview counts). Nothing started.
+
 **Rust migration queue (operator 2026-11-10: "we are in the middle of converting everything to Rust, add that to the process"):** the web player's Python (`karafun_web.py`, `karafun_web_host.py`, `karafun_credentials.py`, `karafun_top100.py`) is now in the migration process: plan `docs/design/stage-e-karafun-web-rust-plan.md` (milestones W1-W7: service state machine, song lifecycle, browser provisioning, Keychain through the Security framework keeping the `h:<hex>` format, Top 100, frames via the Rust shell, JS-vs-Rust matching parity), listed in `stage-e-no-python-gap.md` section 1.3b. NOT started. The Objective-C bridge retirement plan (`rust-only-video-bridge.md`) is the other queued Rust step.
 
 ## STATE 2026-11-10 (newest, read first): 1.0.3.3 PUBLISHED (GitHub Latest, main d230dca; arm64 DMG `1c5f3eb2...` INSTALLED here, backup `/Applications/SingWS-1.0.3.2-pre-1.0.3.3-20261109.app`; x86_64 DMG `f0042eb0...` in `local-installs/intel-1.0.3.3`)
