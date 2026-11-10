@@ -27795,7 +27795,7 @@ class KaraokeApp(QWidget):
         """Return the one supported bundled native mpv backend."""
         import mpv_playback_iina
         bridge = mpv_playback_iina._runtime_root() / "libsingws_mpv_bridge.dylib"
-        if not bridge.is_file():
+        if not bridge.is_file() and mpv_playback_iina._rust_bridge_path() is None:
             raise RuntimeError(f"bundled native mpv bridge missing: {bridge}")
         return mpv_playback_iina.MpvPlaybackPlugin, "native"
 
@@ -28226,14 +28226,13 @@ class KaraokeApp(QWidget):
     def _show_video_bridge_notice(self, text: str) -> None:
         """Non-modal, on the GUI thread: tell the operator about a video engine fallback or failure."""
         try:
-            self.status_label.setText(text)
             box = QMessageBox(QMessageBox.Icon.Warning, "Video engine", text, QMessageBox.StandardButton.Ok, self)
             box.setWindowModality(Qt.WindowModality.NonModal)
             box.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
             box.show()
             self._video_bridge_notice_box = box
-        except Exception:
-            pass
+        except Exception as exc:
+            _diag(f"[VIDEO-BRIDGE] could not show the operator notice: {exc}")
 
     @_perf_timed("ui_songstart_transport_setup")
     def _start_mpv_karaoke_transport(
