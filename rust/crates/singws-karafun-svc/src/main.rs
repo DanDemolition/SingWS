@@ -4,7 +4,7 @@ use std::io::{BufRead, Read};
 
 fn answer(text: &str) -> serde_json::Value {
     match serde_json::from_str::<serde_json::Value>(text) {
-        Ok(v) => match v.get("kind").and_then(|k| k.as_str()) { Some("host") => singws_karafun_svc::host::handle(&v), Some("browser") => singws_karafun_svc::browser::handle(&v), Some("cred") => cred(&v), Some("match") => singws_karafun_svc::matching::handle(&v), _ => singws_karafun_svc::handle(&v) },
+        Ok(v) => match v.get("kind").and_then(|k| k.as_str()) { Some("host") => singws_karafun_svc::host::handle(&v), Some("browser") => singws_karafun_svc::browser::handle(&v), Some("cred") => cred(&v), Some("match") => singws_karafun_svc::matching::handle(&v), Some("frames") => singws_karafun_svc::frames::handle(&v), Some("top100") => singws_karafun_svc::top100::handle(&v), _ => singws_karafun_svc::handle(&v) },
         Err(e) => serde_json::json!({"error": format!("bad request: {e}")}),
     }
 }

@@ -2,7 +2,7 @@
 
 Goal: the web player (`karafun_web_player`, shipped OFF by default in 1.0.3.3) runs with no Python, like the rest of the Rust migration. Same method as every other
 port (see `stage-e-karafun-rust-plan.md`): Python is the oracle; the Rust twin is proven OFFLINE first; then it runs as a log-only shadow in real shows; then it drives
-behind a flag after one clean show per decision (project gate policy). Nothing here changes how the Python player works today. NOT started: this is the plan.
+behind a flag after one clean show per decision (project gate policy). Nothing here changes how the Python player works today. The plan below is now largely BUILT OFFLINE: see "Final status of the port" at the end.
 
 ## What exists today
 
@@ -46,3 +46,35 @@ Offline parity IDENTICAL, mutation survivors documented, one clean real show or 
 - Whether KaraFun changes its web player (it has not approved this): the JavaScript, not the Rust, is where that would break.
 - The Rust shell cannot show the picture yet without W6; until then the Python host stays the audience-window owner.
 - Intel hardware has never run the web player (Rosetta only).
+
+
+## Final status of the port (2026-11-12)
+
+Everything below lives in ONE crate, `rust/crates/singws-karafun-svc` (library plus a JSON CLI, `--batch` for the tools), branch `claude/karafun-web-rust-4a4a02`. **Nothing calls it: the Python still runs the web player, no installer contains it, no setting selects it.** Every module is a pure decision function (time, files, network and the Keychain are passed in or scripted), proven against its real oracle and then mutation-tested with `tools/mutate_karafun_svc.py` (scratch copy; survivors are documented with the reason, a mutant that loops or declines where the original did not counts as killed).
+
+| Milestone | Module | Oracle | Proof |
+|---|---|---|---|
+| W1 service state machine | `lib.rs` | real `KaraFunWebService` | `tools/karafun_service_parity.py`, 12,000 identical |
+| W2 song lifecycle | `host.rs` | real `KaraFunWebHost` | `tools/karafun_host_parity.py`, 8,000+ identical |
+| W3 browser provisioning (rules only, scripted network) | `browser.rs` | real `ensure_browser` | `tools/karafun_browser_parity.py`, 7,500 identical; found and fixed two Python defects (a version escaping the browser folder; a file named like the version) |
+| W4 saved login | `credentials.rs` | real `karafun_credentials` on a TEST-ONLY Keychain service | `tools/karafun_credentials_parity.py`, 1,565 identical |
+| W5 Top 100 | `top100.rs` | real `karafun_top100` | `tools/karafun_top100_parity.py`, 12,000 identical |
+| W6 frame hand-off (offline part) | `frames.rs` | real `KaraFunWebHost` frame methods | `tools/karafun_frames_parity.py`, 1,500 identical |
+| W7 matching | `matching.rs` + generated `match_tables.rs` | the REAL JavaScript of `karafun_bridge.js` run in Node (`tools/karafun_match_oracle.js`) | `tools/karafun_match_parity.py`, 20,000 identical |
+
+Dependencies added: `security-framework` (macOS only, W4) and `unicode-normalization` (W7); both were already in the workspace lock. The only Python app code changed: the two `ensure_browser` fixes.
+
+### What still must be wired before the Python can be retired
+1. **A runtime around the pure functions.** The Rust has no I/O: something must own the helper process (`singws-karafun-web`), the clock, the Keychain, the files and HTTP, and feed events in. The pieces exist elsewhere in the workspace (`singws-http`, `singws-mac`, the shell).
+2. **The download itself** (W3 decides, it does not fetch): index fetch, archive, `ditto`, `--version`, through `singws-http`.
+3. **The Keychain hand-over (W4 finding).** An item is readable without a prompt only by the program that created it. A login saved by the Python app (through `/usr/bin/security`) cannot be read by the Security framework from another program without a dialog, and a framework-made item makes `security -w` hang on a dialog. While Python and Rust coexist, use the `tool` backend (drives `/usr/bin/security`, identical to Python); the native backend needs a one-time approval or a re-save of the login.
+4. **W6, the part that needs a real screen:** painting the picture into the audience and preview windows through the Rust shell's display window, its look, and real frame timing. Only the hand-off rules are proven.
+5. **The page script stays JavaScript** (`karafun_bridge.js`, compiled into the helper); only its matching rules have a Rust twin, as a consistency check.
+6. **Intel hardware** has never run the web player; the real TV has not been rehearsed.
+
+### Safe order for wiring it in (shadow first, nothing driving)
+1. **Shadow, log-only, default on once clean** (`karafun_web_shadow`, like every other shadow in this repo): feed the Rust machines the SAME events the Python sees (service messages, status messages, the song start/finish calls, frame callbacks) on a low-priority thread and log a MISMATCH (field names only, never the song text or any login) when the effects differ. Start with W2 (song lifecycle) and W1 (service), the two that run in every show; then W7 (matching, compared with what the page script chose), W5 (what would be sent and when, without sending) and W6 (hand-off decisions).
+2. Read `grep KARAFUN-WEB-SHADOW` after a rehearsal and a real show; put each decision in `tools/gate_ledger.py` (one clean show per decision).
+3. **Drive behind a flag**, narrowest first: W5 (Top 100 upload, no show risk), W7 matching, then W3/W4 (provisioning and login, using the `tool` Keychain backend), and last W2/W1 (`karafun_web_engine = python | shadow | rust`, falling back to Python on any Rust trouble).
+4. **W6 last**, together with the Rust shell's audience window, looked at on the real screen (AGENTS.md rules 4 and 6).
+5. Retire the Python only after the Rust has driven a clean real show with the Python as the fallback.

@@ -25,6 +25,8 @@ if not os.environ.get("SINGWS_HOME") or Path(os.environ["SINGWS_HOME"]).resolve(
 import karafun_browser_parity as bp  # noqa: E402
 import karafun_credentials_parity as cp  # noqa: E402
 import karafun_match_parity as mp  # noqa: E402
+import karafun_top100_parity as tp  # noqa: E402
+import karafun_frames_parity as fp  # noqa: E402
 import karafun_host_parity as hp  # noqa: E402
 import karafun_service_parity as sp  # noqa: E402
 
@@ -35,6 +37,14 @@ ENV = dict(os.environ, CARGO_TARGET_DIR=TARGET, PATH=os.path.expanduser("~/.carg
 
 # "<file>|<snippet[:70]>|<old>-><new>" -> "equivalent: why" | "GAP: what is missing"
 NOTES: dict = {
+    'top100.rs|let mut buf = [0u16; 2];|2->3': 'equivalent: the UTF-16 scratch buffer is larger than any character needs (2 units suffice)',
+    'top100.rs|let force = req.get("force").and_then(|x| x.as_bool()).unwrap_or(false|false->true': 'equivalent: the harness always supplies force; the default is for a malformed request only',
+    'top100.rs|let now = req.get("now").and_then(|x| x.as_f64()).unwrap_or(0.0);|0.0->1.0': 'equivalent: the harness always supplies now',
+    'top100.rs|let last = req.get("last").and_then(|x| x.as_f64()).unwrap_or(0.0);|0.0->1.0': 'equivalent: the harness always supplies last',
+    'top100.rs|Some(a) if a.len() == 2 => (a[0].as_bool().unwrap_or(false), a[1].as_s|false->true': "equivalent: the harness always supplies the sender's bool",
+    'top100.rs|let deliveries: Vec<(f64, &Value)> = req.get("deliveries").and_then(|d|0.0->1.0': 'equivalent: the harness always supplies a delivery time',
+    'top100.rs|if !(text.contains("still starting") || songs.is_some() || error.is_so|||->&&': 'equivalent: once a chart answer or an error is stored `done` is set and no later message is processed, so only the first term of the condition can matter',
+    'top100.rs|while !done && now - 0.0 < timeout {|-->+': "equivalent: subtracting 0.0 (the loop's start time) changes nothing",
     'matching.rs|let mut in_sep = false;|false->true': 'equivalent: a leading separator is dropped by every caller (words trims spaces, terms trims spaces)',
     'matching.rs|same.sort_by_key(|&i| if words(list[i].title) == want_words { 0 } else|1->2': 'equivalent: only the order 0 before non-0 matters in the stable sort, not the second weight',
     'credentials.rs|if stored.iter().any(|&b| b < 0x20 || b >= 0x7f) {|>=->>': 'equivalent: a DEL byte (0x7f) is neither a hex digit nor whitespace, so the hex parse rejects it anyway',
@@ -137,6 +147,24 @@ def match_corpus(n):
     return [(dict(r, kind="match"), json.loads(o)) for r, o in zip(reqs, out)]
 
 
+def top_corpus(n):
+    rng = random.Random(505)
+    out = []
+    for _ in range(n):
+        req, kind = tp.gen(rng)
+        out.append((dict(req, kind="top100"), tp.python_answer(req, kind)))
+    return out
+
+
+def frames_corpus(n):
+    rng = random.Random(606)
+    out = []
+    for _ in range(n):
+        ev = fp.gen(rng)
+        out.append(({"kind": "frames", "events": fp.fix_decode(ev)}, fp.python_trace(ev)))
+    return out
+
+
 def rust_all(cli, svc, host, brw=(), cred=(), mtc=()):
     """Run the whole corpus through ONE --batch process; returns True when every Rust answer equals the oracle."""
     lines, expect = [], []
@@ -156,7 +184,10 @@ def rust_all(cli, svc, host, brw=(), cred=(), mtc=()):
     for req, exp in mtc:
         lines.append(json.dumps(req))
         expect.append(("mtc", None, exp))
-    p = subprocess.run([cli, "--batch"], input="\n".join(lines) + "\n", capture_output=True, text=True, timeout=600)
+    try:
+        p = subprocess.run([cli, "--batch"], input="\n".join(lines) + "\n", capture_output=True, text=True, timeout=120)
+    except subprocess.TimeoutExpired:
+        return False       # a mutant that loops forever is killed
     global BASE_DECLINED
     got = p.stdout.strip().split("\n")
     if len(got) != len(lines):
@@ -208,6 +239,10 @@ def main():
     brw = browser_corpus(a.browser) if a.file != "credentials.rs" else []
     cred = cp.oracle_cases() if a.file in ("", "credentials.rs") else []
     mtc = match_corpus(6000) if a.file in ("", "matching.rs") else []
+    if a.file in ("", "top100.rs"):
+        mtc = mtc + top_corpus(4000)
+    if a.file in ("", "frames.rs"):
+        mtc = mtc + frames_corpus(1500)
     print(f"corpus: {len(svc)} service + {len(host)} host scenarios (oracle = the real Python)", flush=True)
     cli = os.path.join(TARGET, "release", "singws-karafun-svc")
 
@@ -216,9 +251,9 @@ def main():
 
     assert build() and rust_all(cli, svc, host, brw, cred, mtc), "the unmutated crate must equal the Python first"
     only = {int(x) for x in a.only.split(",")} if a.only else None
-    ORIG = {f: (CRATE / "src" / f).read_text() for f in ("lib.rs", "host.rs", "browser.rs", "credentials.rs", "matching.rs")}  # snapshot: later edits of the repo must not shift the line numbers
+    ORIG = {f: (CRATE / "src" / f).read_text() for f in ("lib.rs", "host.rs", "browser.rs", "credentials.rs", "matching.rs", "top100.rs", "frames.rs")}  # snapshot: later edits of the repo must not shift the line numbers
     muts = []
-    for fname in ("lib.rs", "host.rs", "browser.rs", "credentials.rs", "matching.rs"):
+    for fname in ("lib.rs", "host.rs", "browser.rs", "credentials.rs", "matching.rs", "top100.rs", "frames.rs"):
         if a.file and a.file != fname:
             continue
         muts += generate(fname, ORIG[fname])
