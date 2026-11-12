@@ -776,6 +776,13 @@ impl Renderer {
 
     fn create_bg_core(&self) -> Option<Handle> {
         let h = self.api.create()?;
+        // Optional hardware decode for the decorative background clip (setting `bg_video_hwdec`, passed by the app as SINGWS_BG_HWDEC).
+        // Only the copy-back variant is accepted; mpv itself falls back to software decode for a file VideoToolbox cannot take.
+        let bg_hwdec = match std::env::var("SINGWS_BG_HWDEC").as_deref() {
+            Ok("videotoolbox-copy") => "videotoolbox-copy",
+            _ => "no",
+        };
+        bridge_log!("[background] decoder hwdec={}", bg_hwdec);
         for (k, v) in [
             ("config", "no"),
             ("vo", "libmpv"),
@@ -787,7 +794,7 @@ impl Renderer {
             // left some short AAC-backed VJ loops parked on their first rendered frame.
             // Software decode: VideoToolbox cannot export several older H.264 VJ-loop formats into this secondary render context on
             // Intel (hwaccel setup fails before a frame); these clips are decorative and muted, reliable beats fast.
-            ("hwdec", "no"),
+            ("hwdec", bg_hwdec),
             ("pause", "no"),
             // keep-open would park a finished loop on its last frame with pause=yes; END_FILE / eof-reached must stay observable so
             // Python's shuffle bag can advance, while idle keeps this core alive.
