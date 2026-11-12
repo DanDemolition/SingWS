@@ -50,6 +50,27 @@ class ServiceParity(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout[-3000:] + r.stderr[-1000:])
         self.assertIn("IDENTICAL", r.stdout)
 
+    def test_matching_parity_against_the_page_script_in_node(self):
+        import shutil
+        if shutil.which("node") is None:
+            self.skipTest("node not installed")
+        sys.path.insert(0, str(ROOT / "tools"))
+        import karafun_match_parity as p
+        try:
+            p.find_cli()
+        except FileNotFoundError:
+            self.skipTest("singws-karafun-svc not built")
+        r = subprocess.run([sys.executable, str(ROOT / "tools" / "karafun_match_parity.py"), "--cases", "3000", "--seed", "3"], capture_output=True, text=True, timeout=300)
+        self.assertEqual(r.returncode, 0, r.stdout[-3000:] + r.stderr[-1000:])
+        self.assertIn("IDENTICAL", r.stdout)
+
+    def test_credentials_parity_uses_only_a_test_service(self):
+        # the Keychain parity tool itself is run by hand (it writes and deletes items in the login Keychain); here only its safety rule is pinned
+        sys.path.insert(0, str(ROOT / "tools"))
+        import karafun_credentials_parity as p
+        self.assertTrue(p.TEST.startswith("SingWS-TEST-"))
+        self.assertNotEqual(p.TEST, p.REAL)
+
 
 if __name__ == "__main__":
     unittest.main()
