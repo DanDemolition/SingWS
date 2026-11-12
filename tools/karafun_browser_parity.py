@@ -139,6 +139,7 @@ URLS = ["https://storage.googleapis.com/chrome-for-testing-public/1.2/mac/chrome
         "https://dl.google.com#f", "ftp://dl.google.com/x", "//dl.google.com/x", "https:///x", "https://", "https://:443/x", "storage.googleapis.com/x", "https://dl.google.com:evil/x",
         "https://u:p@dl.google.com:80/x", "https://EDGEDL.me.gvt1.com/x", "", "https:", "https://exa mple.com", "https://dl.google.com\\@evil.com", "https://example.com/" + "a" * 60,
         "https://a@b@dl.google.com/x", "HTTPS://dl.google.com/x", "https://dl.google.com./x", "https://dl.google.com/é"]
+URLS += ["1ttp://dl.google.com/x", ".x://dl.google.com/x", "+x://dl.google.com/x", "://dl.google.com/x", "https:///" + "p" * 60]
 FOLDERS = ["1.2.3", "99.0.1", "100.0.1", "138.0.7204.49", ".download-x", ".hidden", "abc", "Z", "a", "10", "9"]
 
 
