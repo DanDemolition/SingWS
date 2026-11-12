@@ -158,13 +158,15 @@ pub fn ensure(req: &Value) -> R<Value> {
         Value::String(s) => s,
         _ => return Err("url not a string".into()),
     };
-    if version.is_empty() || version.contains('/') || version.starts_with('.') || !version.is_ascii() {
-        return Err("version is not a plain folder name".into());
-    }
     let host = hostname(&url)?;
     let shown = host.clone().unwrap_or_default();
     if !url.starts_with("https://") || !CFT_HOSTS.contains(&shown.as_str()) {
         return wrap(format!("the browser download address is not Google's ({})", if shown.is_empty() { chars(&url, 40) } else { shown }));
+    }
+    // Python: re.fullmatch(r"[0-9A-Za-z][0-9A-Za-z._-]*", version) and no ".." (the version names a folder under the browser root)
+    let plain = version.chars().next().map_or(false, |c| c.is_ascii_alphanumeric()) && version.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')) && !version.contains("..");
+    if !plain {
+        return wrap("the browser version is not a plain name".into());
     }
     let dl = req.get("download").cloned().unwrap_or(json!({}));
     if let Some(t) = dl.get("error").and_then(|e| e.as_str()) {
@@ -207,10 +209,7 @@ pub fn ensure(req: &Value) -> R<Value> {
             return wrap(format!("the downloaded browser is not the one asked for: {}", chars(py_strip(said)?, 120)));
         }
     }
-    // `final.exists()` is true for a plain FILE with the version's name: rmtree(ignore_errors) leaves it and the rename of the folder onto it fails
-    if folders.iter().any(|f| f.0 == version && !f.1) {
-        return Ok(json!({"raises": "NotADirectoryError"}));
-    }
+    // a plain FILE with the version's name is removed first (the Python unlinks it), so the install goes through
     Ok(json!({"ok": version, "progress": progress}))
 }
 

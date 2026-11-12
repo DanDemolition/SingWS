@@ -82,6 +82,28 @@ class BrowserTests(unittest.TestCase):
         leftovers = [p.name for p in karafun_web.browser_root().iterdir() if p.name.startswith(".download")]
         self.assertEqual(leftovers, [])
 
+    def test_a_version_that_is_not_a_plain_name_installs_nothing_and_stays_inside_the_browser_folder(self):
+        data = fake_zip(self.root)
+        for bad in ("../evil", "1/2", ".hidden", "1..2", ""):
+            def opener(url, timeout=None, bad=bad):
+                index = {"channels": {"Stable": {"version": bad, "downloads": {"chrome": [
+                    {"platform": "mac-arm64", "url": "https://storage.googleapis.com/x/a.zip"}, {"platform": "mac-x64", "url": "https://storage.googleapis.com/x/b.zip"}]}}}}
+                return Response(json.dumps(index).encode()) if url.endswith(".json") else Response(data)
+            with self.assertRaises(RuntimeError, msg=bad):
+                karafun_web.ensure_browser(urlopen=opener, verify=False)
+        self.assertFalse((karafun_web.browser_root().parent / "evil").exists())
+        self.assertFalse(karafun_web.browser_root().exists())      # refused before anything was created
+
+    def test_a_plain_file_with_the_versions_name_does_not_stop_the_install(self):
+        data = fake_zip(self.root)
+        root = karafun_web.browser_root()
+        root.mkdir(parents=True)
+        (root / "999.0.1").write_text("in the way")
+        with mock.patch.object(karafun_web, "find_chrome", return_value=None):
+            got = karafun_web.ensure_browser(urlopen=server(data), verify=True)
+        self.assertTrue(got.is_file())
+        self.assertTrue((root / "999.0.1").is_dir())
+
     def test_a_short_download_installs_nothing(self):
         data = fake_zip(self.root)
         with mock.patch.object(karafun_web, "find_chrome", return_value=None):

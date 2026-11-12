@@ -16,6 +16,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -130,6 +131,9 @@ def _download_browser(progress, urlopen, verify) -> Path:
     host = urlparse(url).hostname or ""
     if not url.startswith("https://") or host not in _CFT_HOSTS:
         raise RuntimeError(f"the browser download address is not Google's ({host or url[:40]})")
+    if not re.fullmatch(r"[0-9A-Za-z][0-9A-Za-z._-]*", version) or ".." in version:
+        # The version names a folder under the browser root: anything else (a slash, "..", a leading dot) could leave that folder.
+        raise RuntimeError("the browser version is not a plain name")
     root = browser_root()
     root.mkdir(parents=True, exist_ok=True)
     work = Path(tempfile.mkdtemp(prefix=".download-", dir=root))
@@ -168,7 +172,9 @@ def _download_browser(progress, urlopen, verify) -> Path:
                 raise RuntimeError("the downloaded browser is not the one asked for: " + said.strip()[:120])
         (unpacked / ".complete").write_text(version)
         final = root / version
-        if final.exists():
+        if final.is_symlink() or final.is_file():
+            final.unlink()            # a plain file with the version's name would make the rename fail
+        elif final.exists():
             shutil.rmtree(final, ignore_errors=True)
         unpacked.rename(final)
         return _cft_binary(final)

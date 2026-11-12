@@ -7,6 +7,8 @@ use serde_json::{json, Value};
 
 pub mod browser;
 pub mod credentials;
+pub mod match_tables;
+pub mod matching;
 pub mod host;
 
 /// Seconds after the post-login reload during which the old page's statuses are ignored (`RELOAD_SETTLE_S`).
