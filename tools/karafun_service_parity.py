@@ -168,7 +168,7 @@ def rust_trace(sc: dict, cli: str) -> dict:
 
 
 STATUS_VARIANTS = [True, False, True, False, 1, 0, None, "yes", "", "0", [], [1], {}, {"a": 1}]
-PLANS = [None, "Pro", "", "Premium Plus", "Plan é", 3, 0, True, False, "x" * 40]
+PLANS = [None, "Pro", "", "Premium Plus", "Plan é", 3, 0, True, False, "x" * 40, -3]
 ERRORS = ["KaraFun's web player stopped", "Chrome stopped", "Chrome stopped", "other", "", None, 5]
 TEXTS = ["no internet", "", "Unicode ünï", "a b c", "x" * 200]
 
@@ -185,8 +185,8 @@ def gen(rng: random.Random) -> dict:
     saved_kinds = [{"result": "found"}, {"result": "none"}, {"result": "none", "empty": ()}, {"result": "error", "kind": "Err"},
                    {"result": "error", "kind": "Err2"}, {"result": "error", "kind": "ValueError"}]
     if rng.random() < 0.7:  # set-up first, usually fine
-        sc["progress"] = [(rng.randint(0, 300), rng.choice([0, 0, 1, 7, 200, 300])) for _ in range(rng.choice([0, 0, 1, 3]))]
-        sc["progress"] = [(min(d, t_) if t_ else d, t_) for d, t_ in sc["progress"]]
+        sc["progress"] = [(rng.randint(0, 300), rng.choice([0, 0, 1, 7, 200, 300])) for _ in range(rng.choice([0, 0, 1, 3]))] + ([(-1, 3)] if rng.random() < 0.03 else []) + ([rng.choice([(0, 5), (5, 0), (0, 0), (1, 1)])] if rng.random() < 0.1 else [])
+        sc["progress"] = [(min(d, t_) if (t_ and d >= 0) else d, t_) for d, t_ in sc["progress"]]
         r = rng.random()
         if r < 0.1:
             sc["find_fail"] = True
@@ -201,8 +201,9 @@ def gen(rng: random.Random) -> dict:
     for _ in range(rng.randint(1, 9)):
         r = rng.random()
         if r < 0.45:
-            for _ in range(rng.choice(streak_choices) if rng.random() < 0.6 else rng.randint(1, 8)):
-                sc["events"].append(msg(rng, tick(), False))
+            long_run = rng.random() < 0.6
+            for _ in range(rng.choice(streak_choices) if long_run else rng.randint(1, 8)):
+                sc["events"].append(msg(rng, tick(), False, pure=long_run))
         elif r < 0.75:
             plan_status = msg(rng, tick(), True)
             sc["events"].append(plan_status)
@@ -230,11 +231,11 @@ def gen(rng: random.Random) -> dict:
 
 def story(rng: random.Random) -> dict:
     """Set-up, a long signed-out stretch (60 statuses = the saved-login rule), then the signed-in / reload / settle sequence."""
-    sc = {"has_credentials": True, "events": [{"ev": "setup", "t": 0.0}], "progress": [], "error": "x"}
+    sc = {"has_credentials": rng.random() < 0.7, "events": [{"ev": "setup", "t": 0.0}], "progress": [], "error": "x"}
     t = 0.0
     for _ in range(rng.choice([3, 4, 59, 60, 61, 70, 119, 120, 121])):
         t += 0.5
-        sc["events"].append(msg(rng, t, False))
+        sc["events"].append(msg(rng, t, False, pure=True))
     for e in sc["events"]:
         if e["ev"] == "message":
             e["saved"] = rng.choice([{"result": "found"}] * 4 + [{"result": "none"}, {"result": "error", "kind": "Err"}])
@@ -248,11 +249,11 @@ def story(rng: random.Random) -> dict:
     return sc
 
 
-def msg(rng, t, signed_in):
-    m = {"type": "status", "signedIn": signed_in if rng.random() < 0.85 else rng.choice(STATUS_VARIANTS)}
+def msg(rng, t, signed_in, pure=False):
+    m = {"type": "status", "signedIn": signed_in if (pure or rng.random() < 0.85) else rng.choice(STATUS_VARIANTS)}
     if rng.random() < 0.5:
         m["plan"] = rng.choice(PLANS) if rng.random() < 0.995 else rng.choice([2.5, ["a"], {"k": 1}])
-    if rng.random() < 0.05:
+    if rng.random() < 0.05 and not pure:
         del m["signedIn"]
     return {"ev": "message", "t": t, "message": m}
 

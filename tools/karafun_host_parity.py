@@ -191,7 +191,7 @@ def norm(x):
     return x
 
 
-TITLES = ["Memory", "Don't Stop", "It's \"Quoted\"", "Back\\slash", "", "A" * 30, "Ünïcode"]
+TITLES = ["Memory", "Don't Stop", "It's \"Quoted\"", "Back\\slash", "", "A" * 30, "Ünïcode", "tab\there"]
 ERRTEXTS = ["no internet", "Play failed: no match", "Play nothing", "KaraFun's player stopped", "", "x" * 300, "Plain"]
 
 
@@ -211,9 +211,9 @@ def world(rng, state="ready", **over):
 
 def gen(rng: random.Random) -> dict:
     ev = []
-    t = 100.0
+    t = rng.choice([100.0, 100.0, 0.0, 0.5, 3.9, 4.5])
     sid = rng.choice([3250037, 58970, 0, 5, None] if rng.random() < 0.3 else [3250037, 58970, 5])
-    dur = rng.choice([200.0, 261.4, 5.0, 3.0, 0.0, 130.5, 300])
+    dur = rng.choice([200.0, 261.4, 5.0, 3.0, 0.0, 130.5, 300, 1.0, 0.5, 1.5, 10.0])
     pos = 0.0
     state = rng.choice(["ready", "ready", "ready", "starting", "sign_in", "preparing", "error"])
     ev.append({"ev": "start", "t": t, "song_id": sid, "enabled": rng.random() < 0.95, "key": rng.choice([None, 0, 2, -3]),
@@ -227,7 +227,8 @@ def gen(rng: random.Random) -> dict:
         nonlocal pos, playing
         m = {}
         s = cur if song == "asked" else song
-        m["playing"] = playing if pl is None else pl
+        if rng.random() > 0.03:
+            m["playing"] = playing if pl is None else pl
         if rng.random() < 0.3:
             m["moving"] = rng.choice([True, False, 1, 0])
         m["position"] = pos if moving_pos is None else moving_pos
@@ -235,9 +236,9 @@ def gen(rng: random.Random) -> dict:
         if s is not None:
             m["song"] = s
         if rng.random() < 0.05:
-            m["position"] = rng.choice([None, 0, "", False, [], 7])
+            m["position"] = rng.choice([None, 0, "", False, [], {}, True, 7])
         if rng.random() < 0.03:
-            m["duration"] = rng.choice([None, 0, -1, 12.5])
+            m["duration"] = rng.choice([None, 0, -1, 12.5, True, {}, 0.5, 1.0, [1]])
         if rng.random() < 0.01:
             m["position"] = rng.choice(["3.5", [1], {"a": 1}])
         return m
@@ -264,7 +265,7 @@ def gen(rng: random.Random) -> dict:
         elif r < 0.65:
             ev.append({"ev": "watchdog", "t": t, "world": world(rng, rng.choice(["ready", "sign_in", "starting"]))})
         elif r < 0.7:
-            ev.append({"ev": "page_error", "t": t, "message": (rng.choice(ERRTEXTS) if rng.random() < 0.97 else rng.choice([None, 5])), "world": world(rng)})
+            ev.append({"ev": "page_error", "t": t, "message": (rng.choice(ERRTEXTS) if rng.random() < 0.9 else rng.choice([None, 5, False, 0, "", [], {}])), "world": world(rng)})
         elif r < 0.75:
             ev.append({"ev": "toggle_pause", "t": t, "world": world(rng)})
         elif r < 0.82:
@@ -285,6 +286,48 @@ def gen(rng: random.Random) -> dict:
     return {"events": ev}
 
 
+def storm(rng: random.Random) -> dict:
+    """A song that starts, plays, and whose player dies again and again (recovery up to 3, then give up), with the resume boundaries."""
+    t = 100.0
+    sid = 3250037
+    dur = rng.choice([200.0, 20.0, 9.0, 300.0])
+    ev = [{"ev": "start", "t": t, "song_id": sid, "enabled": True, "key": rng.choice([0, 2]), "tempo": rng.choice([100, 90]), "title": "Storm",
+           "world": world(rng, "ready", service_present=True, has_web=True, entry_current=True, active_same=True)}]
+    ok = dict(service_present=True, has_web=True, entry_current=True, active_same=True)
+    for round_ in range(rng.choice([2, 4, 5])):
+        t += 0.5
+        pos = rng.choice([0.0, 2.9, 3.0, 3.1, 3.5, 50.0, dur - 7.9, dur - 8.0, dur - 9.0, dur])
+        ev.append({"ev": "status", "t": t, "message": {"playing": True, "position": pos if pos > 0 else 0.0, "duration": dur, "song": {"id": sid}}, "world": world(rng, "ready", **ok)})
+        if rng.random() < 0.5:   # sometimes the player dies right after this report, so last_position is exactly `pos`
+            t += 0.5
+            ev.append({"ev": "status", "t": t, "message": {"playing": True, "position": pos + 0.5, "duration": dur, "song": {"id": sid}}, "world": world(rng, "ready", **ok)})
+        if rng.random() < 0.5:
+            t += 0.5
+            ev.append({"ev": "key_tempo", "t": t, "key": rng.randint(-3, 3), "tempo": rng.choice([80, 100, 0]), "world": world(rng, "ready", **ok)})
+        t += 0.5
+        ev.append({"ev": "service", "t": t, "state": "error", "detail": "browser died", "world": world(rng, "error", **ok, **({"restart_error": "boom"} if rng.random() < 0.1 else {}))})
+        for _ in range(rng.choice([0, 1, 3])):
+            t += rng.choice([1.0, 50.0, 149.5, 150.0, 151.0])
+            ev.append({"ev": "watchdog", "t": t, "world": world(rng, rng.choice(["starting", "sign_in"]), **ok)})
+        t += 1.0
+        ev.append({"ev": "service", "t": t, "state": "ready", "detail": "", "world": world(rng, "ready", **ok)})
+    return {"events": ev}
+
+
+def zero_clock(rng: random.Random) -> dict:
+    """The monotonic clock at 0.0: a pause stamped 0.0 is "no pause" to the Python (falsy), and the seek then counts from `now`."""
+    ok = dict(service_present=True, has_web=True, entry_current=True, active_same=True)
+    sid = 5
+    play = {"playing": True, "position": 10.0, "duration": 200.0, "song": {"id": sid}}
+    pause = dict(play, playing=False)
+    ev = [{"ev": "start", "t": 0.0, "song_id": sid, "enabled": True, "key": 0, "tempo": 100, "title": "Zero", "world": world(rng, "ready", **ok)},
+          {"ev": "status", "t": 0.0, "message": play, "world": world(rng, "ready", **ok)}]
+    for _ in range(rng.randint(1, 4)):
+        ev.append({"ev": rng.choice(["status", "status", "seek", "toggle_pause"]), "t": rng.choice([0.0, 0.0, 0.5]), "message": rng.choice([pause, pause, play]),
+                   "target": rng.choice([5.0, 50.0]), "world": world(rng, "ready", **ok)})
+    return {"events": ev}
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--cases", type=int, default=3000)
@@ -297,7 +340,7 @@ def main() -> int:
     py_errors: dict = {}
     first = []
     for i in range(a.cases):
-        sc = gen(rng)
+        sc = storm(rng) if i % 4 == 0 else (zero_clock(rng) if i % 7 == 1 else gen(rng))
         try:
             py = python_trace(sc)
         except Exception as error:   # a case the real code itself cannot run (e.g. a list where a number is expected): not comparable

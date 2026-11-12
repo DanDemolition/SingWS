@@ -5,6 +5,7 @@
 //! password: when the login should be tried it asks (`Action::ReadSavedLogin`) and is told only whether a login was found.
 use serde_json::{json, Value};
 
+pub mod browser;
 pub mod host;
 
 /// Seconds after the post-login reload during which the old page's statuses are ignored (`RELOAD_SETTLE_S`).
