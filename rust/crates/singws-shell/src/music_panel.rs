@@ -31,7 +31,7 @@ use core::pin::Pin;
 use cxx_qt::CxxQtType;
 use cxx_qt_lib::QString;
 use serde_json::{Value, json};
-use singws_uimodel::music;
+use singws_uimodel::panels;
 
 pub struct MusicPanelRust {
     rows_json: QString,
@@ -48,57 +48,19 @@ impl Default for MusicPanelRust {
     }
 }
 
-fn read_json(path: &str) -> Result<Value, String> {
-    let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-    serde_json::from_str(&text).map_err(|e| e.to_string())
-}
-
-/// "Music on, autoplay when idle on, volume 65%" from the three plain settings; anything missing is left out.
-fn info_line(dir: &str) -> String {
-    let Ok(s) = read_json(&format!("{dir}/settings.json")) else { return String::new() };
-    let onoff = |k: &str| s.get(k).and_then(Value::as_bool).map(|b| if b { "on" } else { "off" });
-    let mut parts = Vec::new();
-    if let Some(v) = onoff("bg_enabled") {
-        parts.push(format!("Background music {v}"));
-    }
-    if let Some(v) = onoff("bg_autoplay_on_idle") {
-        parts.push(format!("autoplay when idle {v}"));
-    }
-    if let Some(v) = s.get("bg_volume").and_then(Value::as_f64) {
-        parts.push(format!("volume {}%", (v * 100.0).round() as i64));
-    }
-    parts.join("   •   ")
-}
-
 impl qobject::MusicPanel {
     fn dump_rows(&self, path: &QString) {
         let _ = std::fs::write(path.to_string(), self.rows_json().to_string());
     }
 
+    /// The playlist, the search and the info line come from the shared `singws-uimodel::panels::music_view` (also used by the Slint trial).
     fn refresh(mut self: Pin<&mut Self>, query: &QString, cutoff: i32) {
         let dir = self.rust().dir.clone();
-        let info = info_line(&dir);
-        self.as_mut().set_info(QString::from(info.as_str()));
-        let path = format!("{dir}/bg_playlist.json");
-        if !std::path::Path::new(&path).exists() {
-            self.as_mut().set_rows_json(QString::from("[]"));
-            self.as_mut().set_count_label(QString::from("0 tracks"));
-            self.as_mut().set_status(QString::from("No background-music playlist saved yet"));
-            return;
-        }
-        let result = read_json(&path).and_then(|raw| music::parse_playlist(&raw)).and_then(|rows| music::view_from(&rows, &query.to_string(), i64::from(cutoff)));
-        match result {
-            Ok(v) => {
-                let rows: Vec<Value> = v.rows.iter().map(|r| json!({"index": r.index, "filename": r.filename, "path": r.path})).collect();
-                self.as_mut().set_rows_json(QString::from(Value::Array(rows).to_string().as_str()));
-                self.as_mut().set_count_label(QString::from(v.count_label.as_str()));
-                self.as_mut().set_status(QString::from(if v.total == 0 { "The playlist is empty" } else if v.shown == 0 { "No tracks match" } else { "" }));
-            }
-            Err(e) => {
-                self.as_mut().set_rows_json(QString::from("[]"));
-                self.as_mut().set_count_label(QString::from("0 tracks"));
-                self.as_mut().set_status(QString::from(format!("The playlist could not be read: {e}").as_str()));
-            }
-        }
+        let d = panels::music_view(&dir, &query.to_string(), i64::from(cutoff));
+        let rows: Vec<Value> = d.rows.iter().map(|r| json!({"index": r.index, "filename": r.filename, "path": r.path})).collect();
+        self.as_mut().set_info(QString::from(d.info.as_str()));
+        self.as_mut().set_rows_json(QString::from(Value::Array(rows).to_string().as_str()));
+        self.as_mut().set_count_label(QString::from(d.count.as_str()));
+        self.as_mut().set_status(QString::from(d.status.as_str()));
     }
 }

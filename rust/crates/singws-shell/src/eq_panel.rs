@@ -29,7 +29,7 @@ use core::pin::Pin;
 use cxx_qt::CxxQtType;
 use cxx_qt_lib::QString;
 use serde_json::{Value, json};
-use singws_uimodel::eq_view::{self, Eq};
+use singws_uimodel::{eq_view, panels};
 
 pub struct EqPanelRust {
     eq_json: QString,
@@ -44,8 +44,8 @@ impl Default for EqPanelRust {
     }
 }
 
-fn one(e: &Eq) -> Value {
-    json!({"gains": e.gains.to_vec(), "enabled": e.enabled, "flat": e.flat, "auto_enabled": e.auto_enabled})
+fn one(e: &panels::EqOne) -> Value {
+    json!({"gains": e.gains, "enabled": e.enabled, "flat": e.flat, "auto_enabled": e.auto_enabled})
 }
 
 impl qobject::EqPanel {
@@ -53,23 +53,17 @@ impl qobject::EqPanel {
         let _ = std::fs::write(path.to_string(), self.eq_json().to_string());
     }
 
+    /// The two equalisers come from the shared `singws-uimodel::panels::eq_data` (also used by the Slint trial); the presets are the app's table in `eq_view`.
     fn refresh(mut self: Pin<&mut Self>) {
-        let path = format!("{}/settings.json", self.rust().dir);
-        let result = std::fs::read_to_string(&path)
-            .map_err(|e| e.to_string())
-            .and_then(|t| serde_json::from_str::<Value>(&t).map_err(|e| e.to_string()))
-            .and_then(|v| eq_view::read(&v));
-        match result {
-            Ok((bgm, karaoke)) => {
-                let presets: Vec<Value> = eq_view::PRESETS.iter().map(|(n, g)| json!({"name": n, "gains": g.to_vec()})).collect();
-                let doc = json!({"bands": eq_view::BANDS_HZ.to_vec(), "presets": presets, "bgm": one(&bgm), "karaoke": one(&karaoke)});
-                self.as_mut().set_eq_json(QString::from(doc.to_string().as_str()));
-                self.as_mut().set_status(QString::from(""));
-            }
-            Err(e) => {
-                self.as_mut().set_eq_json(QString::from("{}"));
-                self.as_mut().set_status(QString::from(format!("The equalisers cannot be shown: {e}").as_str()));
-            }
+        let d = panels::eq_data(&self.rust().dir.clone());
+        if !d.status.is_empty() {
+            self.as_mut().set_eq_json(QString::from("{}"));
+            self.as_mut().set_status(QString::from(d.status.as_str()));
+            return;
         }
+        let presets: Vec<Value> = eq_view::PRESETS.iter().map(|(n, g)| json!({"name": n, "gains": g.to_vec()})).collect();
+        let doc = json!({"bands": eq_view::BANDS_HZ.to_vec(), "presets": presets, "bgm": one(&d.bgm), "karaoke": one(&d.karaoke)});
+        self.as_mut().set_eq_json(QString::from(doc.to_string().as_str()));
+        self.as_mut().set_status(QString::from(""));
     }
 }

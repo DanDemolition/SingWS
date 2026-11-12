@@ -189,7 +189,7 @@ pub fn db_path(dir: &str) -> String { std::env::var("SINGWS_DB").unwrap_or_else(
 use crate::{eq_view, music};
 
 #[derive(Debug, Default, Clone, PartialEq)]
-pub struct MusicRow { pub index: i64, pub filename: String }
+pub struct MusicRow { pub index: i64, pub filename: String, pub path: String }
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct MusicData { pub rows: Vec<MusicRow>, pub count: String, pub info: String, pub status: String }
 
@@ -216,7 +216,7 @@ pub fn music_view(dir: &str, query: &str, cutoff: i64) -> MusicData {
     match r {
         Ok(v) => MusicData {
             status: if v.total == 0 { "The playlist is empty".into() } else if v.shown == 0 { "No tracks match".into() } else { String::new() },
-            rows: v.rows.iter().map(|r| MusicRow { index: r.index as i64, filename: r.filename.clone() }).collect(), count: v.count_label, info,
+            rows: v.rows.iter().map(|r| MusicRow { index: r.index as i64, filename: r.filename.clone(), path: r.path.clone() }).collect(), count: v.count_label, info,
         },
         Err(e) => MusicData { count: "0 tracks".into(), info, status: format!("The playlist could not be read: {e}"), ..Default::default() },
     }
