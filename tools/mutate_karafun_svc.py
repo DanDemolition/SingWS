@@ -23,6 +23,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 if not os.environ.get("SINGWS_HOME") or Path(os.environ["SINGWS_HOME"]).resolve() == (Path.home() / "SingWS").resolve():
     os.environ["SINGWS_HOME"] = tempfile.mkdtemp(prefix="kf_svc_mut_home_")
 import karafun_browser_parity as bp  # noqa: E402
+import karafun_credentials_parity as cp  # noqa: E402
 import karafun_host_parity as hp  # noqa: E402
 import karafun_service_parity as sp  # noqa: E402
 
@@ -33,6 +34,8 @@ ENV = dict(os.environ, CARGO_TARGET_DIR=TARGET, PATH=os.path.expanduser("~/.carg
 
 # "<file>|<snippet[:70]>|<old>-><new>" -> "equivalent: why" | "GAP: what is missing"
 NOTES: dict = {
+    'credentials.rs|if stored.iter().any(|&b| b < 0x20 || b >= 0x7f) {|>=->>': 'equivalent: a DEL byte (0x7f) is neither a hex digit nor whitespace, so the hex parse rejects it anyway',
+    'credentials.rs|if i + 1 >= raw.len() || !raw[i].is_ascii_hexdigit() || !raw[i + 1].is|||->&&': 'equivalent: a non-hex digit in a pair is also rejected by from_str_radix(...).ok()?, so the explicit digit tests are redundant',
     'browser.rs|names.sort_by(|a, b| b.0.as_bytes().cmp(a.0.as_bytes())); // UTF-8 byt|==->!=': 'equivalent: the mutated text is inside a trailing comment',
     'browser.rs|names.sort_by(|a, b| b.0.as_bytes().cmp(a.0.as_bytes())); // UTF-8 byt|8->9': 'equivalent: the mutated text is inside a trailing comment',
     'browser.rs|.map(|f| (f[0].as_str().unwrap_or("").to_string(), f[1].as_bool().unwr|false->true': 'equivalent: the driver always supplies a bool for is_dir/has_binary/has_complete; the default is for malformed input only',
@@ -73,7 +76,7 @@ def blank_strings(line):
 
 def generate(name, text):
     lines = text.split("\n")
-    stop = next((i for i, l in enumerate(lines) if l.startswith(("/// Replay request", "pub fn handle"))), len(lines))
+    stop = next((i for i, l in enumerate(lines) if l.startswith(("/// Replay request", "pub fn handle", "#[cfg(target_os"))), len(lines))
     out = []
     for ln, line in enumerate(lines[:stop]):
         s = line.strip()
@@ -124,7 +127,7 @@ def corpora(n_svc, n_host):
 BASE_DECLINED = None
 
 
-def rust_all(cli, svc, host, brw=()):
+def rust_all(cli, svc, host, brw=(), cred=()):
     """Run the whole corpus through ONE --batch process; returns True when every Rust answer equals the oracle."""
     lines, expect = [], []
     for sc, py in svc:
@@ -137,6 +140,9 @@ def rust_all(cli, svc, host, brw=()):
     for sc, py in brw:
         lines.append(json.dumps(dict(sc, kind="browser", op="ensure")))
         expect.append(("brw", None, py))
+    for req, exp in cred:
+        lines.append(json.dumps(dict(req, kind="cred")))
+        expect.append(("cred", None, exp))
     p = subprocess.run([cli, "--batch"], input="\n".join(lines) + "\n", capture_output=True, text=True, timeout=600)
     global BASE_DECLINED
     got = p.stdout.strip().split("\n")
@@ -157,6 +163,9 @@ def rust_all(cli, svc, host, brw=()):
                 merged.append([a for part in r["trace"][i:i + n] for a in part])
                 i += n
             if {"trace": merged, "state": r["state"]} != py:
+                return False
+        elif kind == "cred":
+            if r != py:
                 return False
         elif kind == "brw":
             if r != py:
@@ -180,18 +189,19 @@ def main():
     (WORK / "crate" / "Cargo.toml").write_text((CRATE / "Cargo.toml").read_text() + "\n[workspace]\n")
     shutil.copy(ROOT / "rust/Cargo.lock", WORK / "crate" / "Cargo.lock")
     svc, host = corpora(a.svc, a.host)
-    brw = browser_corpus(a.browser)
+    brw = browser_corpus(a.browser) if a.file != "credentials.rs" else []
+    cred = cp.oracle_cases()
     print(f"corpus: {len(svc)} service + {len(host)} host scenarios (oracle = the real Python)", flush=True)
     cli = os.path.join(TARGET, "release", "singws-karafun-svc")
 
     def build():
         return subprocess.run(["cargo", "build", "--release", "--offline", "--quiet", "--manifest-path", str(WORK / "crate" / "Cargo.toml")], env=ENV, capture_output=True, text=True).returncode == 0
 
-    assert build() and rust_all(cli, svc, host, brw), "the unmutated crate must equal the Python first"
+    assert build() and rust_all(cli, svc, host, brw, cred), "the unmutated crate must equal the Python first"
     only = {int(x) for x in a.only.split(",")} if a.only else None
-    ORIG = {f: (CRATE / "src" / f).read_text() for f in ("lib.rs", "host.rs", "browser.rs")}  # snapshot: later edits of the repo must not shift the line numbers
+    ORIG = {f: (CRATE / "src" / f).read_text() for f in ("lib.rs", "host.rs", "browser.rs", "credentials.rs")}  # snapshot: later edits of the repo must not shift the line numbers
     muts = []
-    for fname in ("lib.rs", "host.rs", "browser.rs"):
+    for fname in ("lib.rs", "host.rs", "browser.rs", "credentials.rs"):
         if a.file and a.file != fname:
             continue
         muts += generate(fname, ORIG[fname])
@@ -213,7 +223,7 @@ def main():
                 killed += 1
                 print(f"#{n} {fname}:{ln} does not compile", flush=True)
                 continue
-            if not rust_all(cli, svc, host, brw):
+            if not rust_all(cli, svc, host, brw, cred):
                 killed += 1
                 print(f"#{n} {fname}:{ln} {line[s:e]!r}->{new!r}: killed", flush=True)
             elif key in NOTES:

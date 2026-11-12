@@ -2225,6 +2225,7 @@ dependencies = [
 name = "singws-karafun-svc"
 version = "0.1.0"
 dependencies = [
+ "security-framework",
  "serde_json",
 ]
 
