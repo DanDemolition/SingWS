@@ -4259,6 +4259,9 @@ DEFAULTS = {
     # app before any release; proven so far only in tools/render_thread_probe.py on Apple Silicon). Set it to false in
     # settings.json to draw on the main thread exactly as before. Read once at launch, before the first song creates the bridge.
     "karaoke_render_thread": True,
+    # Background-video decoder: True = VideoToolbox copy-back hardware decode (less CPU on Apple Silicon; NOT yet seen on the Intel Mac),
+    # False = software decode (the old behaviour). Read at launch; docs/design/metal-video-bridge.md.
+    "bg_video_hwdec": True,
     # Which native video bridge draws the karaoke picture: "rust" (DEFAULT since 2026-10-11, roadmap item 2: pixel-identical to the old one
     # on 22 on-screen images, freeze test passes, rehearsed by the operator on Apple Silicon) or "objc" (the long-standing Objective-C
     # bridge). Any problem loading the Rust one, or creating its renderer for a song, falls back to Objective-C. Read once at launch.
@@ -22796,6 +22799,11 @@ class KaraokeApp(QWidget):
             pass
         try:
             # The bridge reads this when it creates its renderer (first song). Never overrides an explicit env choice.
+            if self.settings.get("bg_video_hwdec", True) in (True, "videotoolbox-copy"):
+                os.environ["SINGWS_BG_HWDEC"] = "videotoolbox-copy"
+                _diag("[BG-VIDEO] bg_video_hwdec=videotoolbox-copy: the background clip uses hardware decode")
+            else:
+                os.environ.pop("SINGWS_BG_HWDEC", None)
             if bool(self.settings.get("karaoke_render_thread", True)):
                 os.environ.setdefault("SINGWS_RENDER_THREAD", "1")
                 _diag("[RENDER-THREAD] karaoke_render_thread=on: the karaoke picture is drawn on a dedicated render thread")
@@ -32856,6 +32864,20 @@ class KaraokeApp(QWidget):
 
         confirm_cb.toggled.connect(on_record_confirm_toggled)
         _layout_card.addWidget(confirm_cb)
+
+        hwdec_cb = QCheckBox("Use hardware decoding for background videos (applies the next time SingWS starts)")
+        hwdec_cb.setChecked(self.settings.get("bg_video_hwdec", True) in (True, "videotoolbox-copy"))
+        hwdec_cb.setToolTip("Lowers CPU use while a background animation plays. Turn it off if background videos stutter or stay black; files the Mac cannot decode in hardware are decoded in software either way.")
+
+        def on_bg_hwdec_toggled(checked: bool):
+            self.settings["bg_video_hwdec"] = bool(checked)
+            try:
+                self.save_settings()
+            except Exception:
+                pass
+
+        hwdec_cb.toggled.connect(on_bg_hwdec_toggled)
+        _layout_card.addWidget(hwdec_cb)
 
         def on_hero_look_changed(*_):
             self.settings["ui_hero_glow"] = str(glow_combo.currentData() or "soft")

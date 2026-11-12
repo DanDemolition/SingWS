@@ -1,0 +1,13 @@
+diff --git a/rust/crates/singws-video/src/render.rs b/rust/crates/singws-video/src/render.rs
+index 78ac496..904267f 100644
+--- a/rust/crates/singws-video/src/render.rs
++++ b/rust/crates/singws-video/src/render.rs
+@@ -787,7 +787,7 @@ impl Renderer {
+             // left some short AAC-backed VJ loops parked on their first rendered frame.
+             // Software decode: VideoToolbox cannot export several older H.264 VJ-loop formats into this secondary render context on
+             // Intel (hwaccel setup fails before a frame); these clips are decorative and muted, reliable beats fast.
+-            ("hwdec", "no"),
++            ("hwdec", &*Box::leak(std::env::var("SPIKE_BG_HWDEC").unwrap_or_else(|_| "no".into()).into_boxed_str())),
+             ("pause", "no"),
+             // keep-open would park a finished loop on its last frame with pause=yes; END_FILE / eof-reached must stay observable so
+             // Python's shuffle bag can advance, while idle keeps this core alive.
