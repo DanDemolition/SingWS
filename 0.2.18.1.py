@@ -29559,7 +29559,7 @@ class KaraokeApp(QWidget):
         self.poll_worker.requests_received.connect(self.handle_requests_from_thread)
 
     def start_request_polling(self, *, stop_existing=True):
-        base_url = _network_normalize_base_url(self.settings.get("base_url", "https://beta.wskar.com"))
+        base_url = _network_normalize_base_url(self.settings.get("base_url", "https://wskar.com"))
         tenant   = self.settings.get("user", self.settings.get("tenant", ""))
 
         # Safety: ensure any previous thread is gone
@@ -41139,7 +41139,7 @@ class KaraokeApp(QWidget):
             v.addWidget(connection_title)
             row1 = QHBoxLayout()
             row1.addWidget(_form_label("Base URL:"))
-            base_edit = QLineEdit(self.settings.get("base_url", "https://beta.wskar.com"))
+            base_edit = QLineEdit(self.settings.get("base_url", "https://wskar.com"))
             row1.addWidget(base_edit)
             v.addLayout(row1)
     
@@ -41769,7 +41769,7 @@ class KaraokeApp(QWidget):
             def accept():
                 # Save new values
                 _accept_started = time.monotonic()
-                self.settings["base_url"] = _network_normalize_base_url(base_edit.text() or "https://beta.wskar.com")
+                self.settings["base_url"] = _network_normalize_base_url(base_edit.text() or "https://wskar.com")
                 uid = user_edit.text().strip()
                 if uid:
                     self.settings["user"] = uid
@@ -61321,7 +61321,7 @@ class KaraokeApp(QWidget):
         import threading, json as _json
 
         def send():
-            base_url = _network_normalize_base_url(self.settings.get("base_url", "https://beta.wskar.com"))
+            base_url = _network_normalize_base_url(self.settings.get("base_url", "https://wskar.com"))
             tenant   = str(self.settings.get("user", self.settings.get("tenant", ""))).strip()
 
             # Upload via get_requests.php
