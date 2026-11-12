@@ -185,6 +185,59 @@ pub fn library_view(db: &str, query: &str) -> LibraryData {
 
 pub fn db_path(dir: &str) -> String { std::env::var("SINGWS_DB").unwrap_or_else(|_| format!("{dir}/singws.db")) }
 
+// ---- Music tab -------------------------------------------------------------------------------------------------------------------------
+use crate::{eq_view, music};
+
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct MusicRow { pub index: i64, pub filename: String }
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct MusicData { pub rows: Vec<MusicRow>, pub count: String, pub info: String, pub status: String }
+
+/// "Background music on   •   autoplay when idle on   •   volume 65%" from the three plain settings (same wording as the Qt shell).
+fn music_info(dir: &str) -> String {
+    let s: Value = std::fs::read_to_string(format!("{dir}/settings.json")).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(Value::Null);
+    let onoff = |k: &str| s.get(k).and_then(Value::as_bool).map(|b| if b { "on" } else { "off" });
+    let mut parts = Vec::new();
+    if let Some(v) = onoff("bg_enabled") { parts.push(format!("Background music {v}")); }
+    if let Some(v) = onoff("bg_autoplay_on_idle") { parts.push(format!("autoplay when idle {v}")); }
+    if let Some(v) = s.get("bg_volume").and_then(Value::as_f64) { parts.push(format!("volume {}%", (v * 100.0).round() as i64)); }
+    parts.join("   \u{2022}   ")
+}
+
+/// `cutoff` is the live player's current track index (rows at or before it are hidden, as in the app); -1 shows everything.
+pub fn music_view(dir: &str, query: &str, cutoff: i64) -> MusicData {
+    let info = music_info(dir);
+    let path = format!("{dir}/bg_playlist.json");
+    if !std::path::Path::new(&path).exists() {
+        return MusicData { count: "0 tracks".into(), info, status: "No background-music playlist saved yet".into(), ..Default::default() };
+    }
+    let r = std::fs::read_to_string(&path).map_err(|e| e.to_string()).and_then(|t| serde_json::from_str::<Value>(&t).map_err(|e| e.to_string()))
+        .and_then(|raw| music::parse_playlist(&raw)).and_then(|rows| music::view_from(&rows, query, cutoff));
+    match r {
+        Ok(v) => MusicData {
+            status: if v.total == 0 { "The playlist is empty".into() } else if v.shown == 0 { "No tracks match".into() } else { String::new() },
+            rows: v.rows.iter().map(|r| MusicRow { index: r.index as i64, filename: r.filename.clone() }).collect(), count: v.count_label, info,
+        },
+        Err(e) => MusicData { count: "0 tracks".into(), info, status: format!("The playlist could not be read: {e}"), ..Default::default() },
+    }
+}
+
+// ---- EQ tab ----------------------------------------------------------------------------------------------------------------------------
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct EqOne { pub gains: Vec<f64>, pub enabled: bool, pub flat: bool, pub auto_enabled: bool }
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct EqData { pub bands_hz: Vec<f64>, pub bgm: EqOne, pub karaoke: EqOne, pub status: String }
+
+pub fn eq_data(dir: &str) -> EqData {
+    let r = std::fs::read_to_string(format!("{dir}/settings.json")).map_err(|e| e.to_string())
+        .and_then(|t| serde_json::from_str::<Value>(&t).map_err(|e| e.to_string())).and_then(|v| eq_view::read(&v));
+    let one = |e: &eq_view::Eq| EqOne { gains: e.gains.to_vec(), enabled: e.enabled, flat: e.flat, auto_enabled: e.auto_enabled };
+    match r {
+        Ok((b, k)) => EqData { bands_hz: eq_view::BANDS_HZ.iter().map(|x| *x as f64).collect(), bgm: one(&b), karaoke: one(&k), status: String::new() },
+        Err(e) => EqData { status: format!("The equalisers cannot be shown: {e}"), ..Default::default() },
+    }
+}
+
 // ---- Status tab ------------------------------------------------------------------------------------------------------------------------
 pub const STATUS_STALE_SECS: i64 = 300;
 
@@ -297,5 +350,16 @@ mod tests {
         assert_eq!((v.rows.len(), v.rows[0].left.as_str()), (1, "Queen \u{2022} Radio Ga Ga"), "{v:?}");
         assert_eq!(library_view(&db, "").status, "Type to search your library");
         assert_eq!(library_view(&db, "zzzzqq").status, "No songs match");
+    }
+    #[test]
+    fn music_and_eq_from_files() {
+        let d = dir("me");
+        std::fs::write(format!("{d}/bg_playlist.json"), r#"[{"filename":"a.mp3","path":"/m/a.mp3"},{"filename":"b.mp3","path":"/m/b.mp3"}]"#).unwrap();
+        std::fs::write(format!("{d}/settings.json"), r#"{"bg_enabled":true,"bg_volume":0.65,"eq_bgm":[0,0,3,0,0,0,0,0,0,0]}"#).unwrap();
+        let m = music_view(&d, "", -1);
+        assert_eq!((m.rows.len(), m.info.as_str()), (2, "Background music on   \u{2022}   volume 65%"), "{m:?}");
+        assert_eq!(music_view(&d, "zzz", -1).status, "No tracks match");
+        let e = eq_data(&d);
+        assert_eq!((e.bgm.gains[2], e.bgm.enabled, e.bgm.auto_enabled, e.karaoke.flat), (3.0, true, true, true), "{e:?}");
     }
 }

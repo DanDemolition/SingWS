@@ -6,12 +6,13 @@ use std::rc::Rc;
 use std::time::{Duration, SystemTime};
 
 #[derive(Default)]
-struct Ui { lib_query: String, singer_search: String, selected: String, song_query: String, setting_query: String }
+struct Ui { music_query: String, eq_bgm: Vec<f64>, eq_kar: Vec<f64>, eq_bgm_on: bool, eq_kar_on: bool, cutoff: i64, lib_query: String, singer_search: String, selected: String, song_query: String, setting_query: String }
 
 fn now_epoch() -> i64 { SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0) }
 
 fn apply_control(app: &App, c: &control::Control) {
     let v = c.view();
+    app.set_bg_track(v.bg_track.as_str().into()); app.set_bg_playing(v.bg_playing); app.set_bg_volume(v.bg_volume as f32);
     app.set_c_status(v.status.into()); app.set_c_enabled(v.enabled); app.set_c_login_error(v.login_error.into());
     app.set_c_now(v.now.into()); app.set_c_clock(v.clock.into()); app.set_c_playing(v.playing); app.set_c_result(v.result_text.into()); app.set_c_result_kind(v.result_kind.into());
     app.set_c_logged_in(v.logged_in);
@@ -60,6 +61,15 @@ fn apply(app: &App, dir: &str, ui: &mut Ui) {
     app.set_h_status(h.status.into()); app.set_h_name(h.name.into()); app.set_h_summary(h.summary.into()); app.set_h_meta(h.song_meta.into());
     app.set_h_singers(ModelRc::new(VecModel::from(h.singers.iter().map(|x| HistItem { key: x.key.as_str().into(), title: x.title.as_str().into(), detail: x.detail.as_str().into(), selectable: x.selectable, selected: x.key == h.selected }).collect::<Vec<_>>())));
     app.set_h_songs(ModelRc::new(VecModel::from(h.songs.iter().map(|x| HistItem { key: x.key.as_str().into(), title: x.title.as_str().into(), detail: x.detail.as_str().into(), selectable: false, selected: false }).collect::<Vec<_>>())));
+    let mu = panels::music_view(dir, &ui.music_query, if app.get_c_enabled() { ui.cutoff } else { -1 });
+    app.set_mus_count(mu.count.into()); app.set_mus_info(mu.info.into()); app.set_mus_status(mu.status.into());
+    app.set_mus_rows(ModelRc::new(VecModel::from(mu.rows.iter().map(|r| MusicItem { index: r.index as i32, filename: r.filename.as_str().into() }).collect::<Vec<_>>())));
+    let eq = panels::eq_data(dir);
+    app.set_eq_status(eq.status.clone().into());
+    let bands = |g: &Vec<f64>| ModelRc::new(VecModel::from(eq.bands_hz.iter().zip(g.iter()).map(|(hz, g)| EqBand { label: (if *hz >= 1000.0 { format!("{}k", hz / 1000.0) } else { format!("{}", hz) }).into(), gain: *g as f32 }).collect::<Vec<_>>()));
+    app.set_eq_bgm(bands(&eq.bgm.gains)); app.set_eq_kar(bands(&eq.karaoke.gains));
+    app.set_eq_bgm_on(eq.bgm.enabled); app.set_eq_bgm_auto(eq.bgm.auto_enabled); app.set_eq_kar_on(eq.karaoke.enabled); app.set_eq_kar_auto(eq.karaoke.auto_enabled);
+    ui.eq_bgm = eq.bgm.gains.clone(); ui.eq_kar = eq.karaoke.gains.clone(); ui.eq_bgm_on = eq.bgm.enabled; ui.eq_kar_on = eq.karaoke.enabled;
     let st2 = panels::settings_view_data(dir, &ui.setting_query);
     app.set_set_status(st2.status.into());
     app.set_set_rows(ModelRc::new(VecModel::from(st2.rows.iter().map(|x| SettingItem { key: x.key.as_str().into(), value: x.value.as_str().into(), hidden: x.hidden }).collect::<Vec<_>>())));
@@ -92,6 +102,22 @@ fn main() {
     { let (w, c) = (app.as_weak(), ctl.clone()); app.on_c_disconnect(move || { c.borrow_mut().disconnect(); if let Some(a) = w.upgrade() { apply_control(&a, &c.borrow()); } }); }
     { let (w, c) = (app.as_weak(), ctl.clone()); app.on_c_send(move |label, cmd| { c.borrow().send(&label, &cmd); if let Some(a) = w.upgrade() { apply_control(&a, &c.borrow()); } }); }
     { let (w, c) = (app.as_weak(), ctl.clone()); app.on_c_changed(move || { if let Some(a) = w.upgrade() { apply_control(&a, &c.borrow()); } }); }
+    hook!(on_mus_search, music_query);
+    { let (w, c) = (app.as_weak(), ctl.clone());
+      app.on_mus_play(move |idx, name| { c.borrow().send_args(&format!("Play {name}"), "bg.play_track", &serde_json::json!({"index": idx as i64, "track": name.to_string()})); if let Some(a) = w.upgrade() { apply_control(&a, &c.borrow()); } }); }
+    { let (w, c) = (app.as_weak(), ctl.clone());
+      app.on_mus_volume(move |v| { let v = (v * 100.0).round() / 100.0; c.borrow().send_args(&format!("Music volume {}%", (v * 100.0).round()), "set_bg_volume", &serde_json::json!({"value": v})); if let Some(a) = w.upgrade() { apply_control(&a, &c.borrow()); } }); }
+    // eq: gains come from the file; a drag sends the whole list like the Qt page (enabled = true), the button flips `enabled`
+    fn eq_send(c: &control::Control, target: &str, gains: &[f64], enabled: bool, label: &str) {
+        let g: Vec<f64> = gains.iter().map(|x| (x.clamp(-12.0, 12.0) * 10.0).round() / 10.0).collect();
+        c.send_args(label, "eq.set", &serde_json::json!({"target": target, "gains": g, "enabled": enabled}));
+    }
+    { let (c, u) = (ctl.clone(), ui.clone());
+      app.on_eq_changed_bgm(move |i, g| { let mut u = u.borrow_mut(); if let Some(x) = u.eq_bgm.get_mut(i as usize) { *x = g as f64; } eq_send(&c.borrow(), "bgm", &u.eq_bgm, true, "Background music EQ"); }); }
+    { let (c, u) = (ctl.clone(), ui.clone());
+      app.on_eq_changed_kar(move |i, g| { let mut u = u.borrow_mut(); if let Some(x) = u.eq_kar.get_mut(i as usize) { *x = g as f64; } eq_send(&c.borrow(), "karaoke", &u.eq_kar, true, "Karaoke EQ"); }); }
+    { let (c, u) = (ctl.clone(), ui.clone());
+      app.on_eq_toggle(move |key| { let u = u.borrow(); if key == "bgm" { eq_send(&c.borrow(), "bgm", &u.eq_bgm, !u.eq_bgm_on, "Background music EQ"); } else { eq_send(&c.borrow(), "karaoke", &u.eq_kar, !u.eq_kar_on, "Karaoke EQ"); } }); }
     // library: search on every edit (the index answers in milliseconds; a typo falls back to the fuzzy pass, at most 1.5 s)
     { let (w, d, u) = (app.as_weak(), dir.clone(), ui.clone());
       app.on_lib_search(move |t| { u.borrow_mut().lib_query = t.to_string(); if let Some(a) = w.upgrade() { apply_library(&a, &d, &t); } }); }
@@ -100,7 +126,7 @@ fn main() {
     apply_library(&app, &dir, &std::env::var("SLINT_TRIAL_QUERY").unwrap_or_default());
     // the Qt shell's pages refresh every 3 s while visible
     let timer = slint::Timer::default();
-    let (weak, d, u) = (app.as_weak(), dir.clone(), ui.clone());
-    timer.start(slint::TimerMode::Repeated, Duration::from_secs(3), move || { if let Some(a) = weak.upgrade() { apply(&a, &d, &mut u.borrow_mut()); } });
+    let (weak, d, u, c) = (app.as_weak(), dir.clone(), ui.clone(), ctl.clone());
+    timer.start(slint::TimerMode::Repeated, Duration::from_secs(3), move || { if let Some(a) = weak.upgrade() { u.borrow_mut().cutoff = c.borrow().view().bg_index; apply(&a, &d, &mut u.borrow_mut()); } });
     app.run().unwrap();
 }

@@ -30,6 +30,8 @@ export struct HistItem { key: string, title: string, detail: string, selectable:
 export struct SettingItem { key: string, value: string, hidden: bool }
 export struct LibItem { id: int, artist: string, title: string, left: string, right: string }
 export struct DiagItem { ok: bool, label: string, detail: string }
+export struct MusicItem { index: int, filename: string }
+export struct EqBand { label: string, gain: float }
 export struct SingerItem { number: string, name: string }
 
 component TabButton inherits Rectangle {
@@ -75,6 +77,42 @@ component Btn inherits Rectangle {
     ta := TouchArea { enabled: root.enabled; clicked => { root.clicked(); } }
 }
 
+// horizontal slider (the std Slider is a different look); `released(value)` fires when the pointer lets go
+component HSlider inherits Rectangle {
+    in-out property <float> value: 0;   // 0..1
+    callback released(float);
+    height: 24px;
+    accessible-role: slider; accessible-value: round(value * 100) + "%";
+    Rectangle { y: 10px; height: 4px; border-radius: 2px; background: Theme.card-border; }
+    Rectangle { y: 10px; height: 4px; border-radius: 2px; background: Theme.accent; width: root.width * root.value; }
+    Rectangle { x: (root.width - 16px) * root.value; y: 4px; width: 16px; height: 16px; border-radius: 8px; background: #ffffff; }
+    ta := TouchArea {
+        function set() { root.value = max(0, min(1, self.mouse-x / root.width)); }
+        pointer-event(e) => { if (e.kind == PointerEventKind.down) { set(); } if (e.kind == PointerEventKind.up) { root.released(root.value); } }
+        moved => { if (self.pressed) { set(); } }
+    }
+}
+
+// one vertical EQ band: -12..+12 dB, centre line = 0; dragging sets the gain, releasing reports it
+component EqBar inherits Rectangle {
+    in-out property <float> gain: 0;
+    in property <bool> active: true;
+    in property <bool> dim: false;
+    callback released(float);
+    background: transparent;
+    Rectangle { x: parent.width / 2 - 2px; width: 4px; border-radius: 2px; background: Theme.card-border; }
+    Rectangle { x: parent.width / 2 - 2px; width: 4px; border-radius: 2px; background: Theme.accent; opacity: root.dim ? 0.55 : 1;
+        y: root.gain >= 0 ? root.height / 2 - root.height / 2 * root.gain / 12 : root.height / 2;
+        height: root.height / 2 * abs(root.gain) / 12; }
+    Rectangle { y: root.height / 2 - root.height * root.gain / 24 - 6px; x: parent.width / 2 - 8px; width: 16px; height: 12px; border-radius: 4px; background: #ffffff; opacity: root.dim ? 0.55 : 1; }
+    ta := TouchArea {
+        enabled: root.active;
+        function set() { root.gain = round(max(-12, min(12, 12 - 24 * self.mouse-y / root.height)) * 10) / 10; }
+        pointer-event(e) => { if (e.kind == PointerEventKind.down) { set(); } if (e.kind == PointerEventKind.up) { root.released(root.gain); } }
+        moved => { if (self.pressed) { set(); } }
+    }
+}
+
 component PageTitle inherits Text { color: Theme.text; font-size: 15px; font-weight: 600; }
 
 export component App inherits Window {
@@ -104,6 +142,12 @@ export component App inherits Window {
     callback set-search(string);
     in property <bool> st-all-passed; in property <[DiagItem]> st-diag;
     in property <bool> hero-has; in property <bool> hero-live; in property <string> hero-kicker; in property <string> hero-singer; in property <string> hero-sub; in property <string> hero-meta; in property <string> hero-format; in property <string> hero-left;
+    in property <string> mus-count; in property <string> mus-info; in property <string> mus-status; in property <[MusicItem]> mus-rows;
+    in property <string> bg-track; in property <bool> bg-playing; in-out property <float> bg-volume;
+    callback mus-search(string); callback mus-play(int, string); callback mus-volume(float);
+    in property <string> eq-status; in-out property <[EqBand]> eq-bgm; in-out property <[EqBand]> eq-kar;
+    in property <bool> eq-bgm-on; in property <bool> eq-bgm-auto; in property <bool> eq-kar-on; in property <bool> eq-kar-auto;
+    callback eq-toggle(string); callback eq-changed-bgm(int, float); callback eq-changed-kar(int, float);
     in property <string> lib-status; in property <[LibItem]> lib-rows;
     callback lib-search(string); callback lib-add(int, string);
     in-out property <string> lib-singer;
@@ -127,6 +171,8 @@ export component App inherits Window {
             TabButton { label: "Library"; width: 80px; selected: root.tab == 7; clicked => { root.tab = 7; } }
             TabButton { label: "Diagnostics"; width: 100px; selected: root.tab == 8; clicked => { root.tab = 8; } }
             TabButton { label: "Now playing"; width: 100px; selected: root.tab == 9; clicked => { root.tab = 9; } }
+            TabButton { label: "Music"; width: 70px; selected: root.tab == 10; clicked => { root.tab = 10; } }
+            TabButton { label: "EQ"; width: 60px; selected: root.tab == 11; clicked => { root.tab = 11; } }
         }
 
         if root.tab == 0 : VerticalLayout {
@@ -435,6 +481,80 @@ export component App inherits Window {
                     Text { text: hero-sub; color: Theme.text-row; font-size: 18px; wrap: word-wrap; }
                     if hero-meta != "" : Text { text: hero-meta; color: Theme.text-dim; font-size: 14px; overflow: elide; }
                     if hero-left != "" : Text { text: hero-left; color: Theme.good; font-size: 28px; font-weight: 600; }
+                }
+            }
+        }
+
+        if root.tab == 10 : VerticalLayout {
+            spacing: 8px;
+            HorizontalLayout { PageTitle { text: "BACKGROUND MUSIC"; horizontal-stretch: 1; } Text { text: mus-count; color: #a78bfa; font-size: 12px; font-weight: 600; } }
+            if !c-enabled && mus-info != "" : Text { text: mus-info; color: Theme.text-dim; font-size: 12px; wrap: word-wrap; }
+            if c-enabled : Rectangle {
+                border-radius: 10px; background: Theme.card; border-width: 1px; border-color: Theme.card-border; height: live-col.preferred-height;
+                live-col := VerticalLayout {
+                    padding: 10px; spacing: 8px;
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Text { text: bg-track != "" ? (bg-playing ? "Playing: " : "Paused: ") + bg-track : "Background music: no playlist"; color: #ffffff; font-size: 14px; font-weight: 600; overflow: elide; horizontal-stretch: 1; vertical-alignment: center; }
+                        Btn { label: "Next"; clicked => { root.c-send("Next track", "bg.next"); } }
+                        Btn { label: bg-playing ? "Pause" : "Play"; tone: Theme.accent; clicked => { root.c-send("Background music", "bg_play_pause"); } }
+                    }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Text { text: "Volume"; color: Theme.text-dim; font-size: 12px; width: 60px; vertical-alignment: center; }
+                        HSlider { value <=> root.bg-volume; horizontal-stretch: 1; released(v) => { root.mus-volume(v); } }
+                        Text { text: round(bg-volume * 100) + "%"; color: Theme.text-row; font-size: 12px; width: 44px; horizontal-alignment: right; vertical-alignment: center; }
+                    }
+                }
+            }
+            SearchBox { placeholder: "Search the playlist"; edited(t) => { root.mus-search(t); } }
+            if mus-status != "" : Text { text: mus-status; color: #f0b44c; font-size: 12px; }
+            Text { text: c-enabled ? "Tracks already played are hidden, as in the app." : "Shows every saved track. Connect on the Controls tab to follow the player: played tracks then hide, as in the app."; color: #7a77a0; font-size: 11px; wrap: word-wrap; }
+            ListView {
+                for r in mus-rows : Rectangle {
+                    height: 36px;
+                    accessible-role: list-item; accessible-label: r.filename;
+                    Rectangle {
+                        height: 34px; border-radius: 6px; background: Theme.row;
+                        HorizontalLayout {
+                            padding-left: 10px; padding-right: 6px;
+                            Text { text: r.filename; color: #ffffff; font-size: 13px; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; }
+                            if c-enabled : Btn { label: "Play"; tone: Theme.accent; y: 4px; height: 26px; clicked => { root.mus-play(r.index, r.filename); } }
+                        }
+                    }
+                }
+            }
+        }
+
+        if root.tab == 11 : VerticalLayout {
+            spacing: 12px;
+            HorizontalLayout { spacing: 10px; PageTitle { text: c-enabled ? "EQUALISERS" : "EQUALISERS (read-only)"; }
+                if !c-enabled : Text { text: "Connect on the Controls tab to change them."; color: #7a77a0; font-size: 12px; vertical-alignment: center; } }
+            if eq-status != "" : Text { text: eq-status; color: #f0b44c; font-size: 12px; wrap: word-wrap; }
+            for card[ci] in [{key: "bgm", title: "Background music"}, {key: "karaoke", title: "Karaoke"}] : Rectangle {
+                border-radius: 10px; background: Theme.card; border-width: 1px; border-color: Theme.card-border; vertical-stretch: 1;
+                property <bool> on: ci == 0 ? eq-bgm-on : eq-kar-on;
+                property <bool> auto: ci == 0 ? eq-bgm-auto : eq-kar-auto;
+                property <[EqBand]> bands: ci == 0 ? eq-bgm : eq-kar;
+                VerticalLayout {
+                    padding: 12px; spacing: 6px;
+                    HorizontalLayout {
+                        spacing: 10px;
+                        Text { text: card.title; color: #ffffff; font-size: 14px; font-weight: 600; vertical-alignment: center; }
+                        Text { text: on ? (auto ? "ON (the gains are not flat, so the app turned it on)" : "ON") : "OFF"; color: on ? #7ee787 : Theme.text-dim; font-size: 12px; vertical-alignment: center; }
+                        Rectangle { horizontal-stretch: 1; }
+                        if c-enabled : Btn { label: on ? "Turn off" : "Turn on"; tone: Theme.accent; clicked => { root.eq-toggle(card.key); } }
+                    }
+                    HorizontalLayout {
+                        spacing: 4px;
+                        for b[bi] in bands : VerticalLayout {
+                            spacing: 2px; horizontal-stretch: 1;
+                            Text { text: (b.gain > 0 ? "+" : "") + round(b.gain * 10) / 10; color: b.gain == 0 ? #6a678f : #e8e6f5; font-size: 11px; horizontal-alignment: center; }
+                            EqBar { gain: b.gain; active: c-enabled; dim: !on; vertical-stretch: 1;
+                                released(g) => { if (ci == 0) { root.eq-changed-bgm(bi, g); } else { root.eq-changed-kar(bi, g); } } }
+                            Text { text: b.label; color: Theme.text-dim; font-size: 11px; horizontal-alignment: center; }
+                        }
+                    }
                 }
             }
         }
