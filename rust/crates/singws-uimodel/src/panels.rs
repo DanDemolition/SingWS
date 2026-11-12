@@ -60,31 +60,57 @@ pub fn waitlist_view(dir: &str, now: SystemTime) -> WaitView {
 use crate::{history, rotation, settings_view};
 
 #[derive(Debug, Default, Clone, PartialEq)]
-pub struct RotRow { pub number: String, pub singer: String, pub combined: String, pub duet: bool }
+pub struct RotRow { pub number: String, pub singer: String, pub song: String, pub artist: String, pub combined: String, pub duet: bool }
 #[derive(Debug, Default, Clone, PartialEq)]
-pub struct RotationData { pub rows: Vec<RotRow>, pub title: String, pub count: String, pub now: String, pub next: String, pub status: String }
+pub struct RotationData {
+    pub rows: Vec<RotRow>, pub title: String, pub count: String, pub now: String, pub next: String, pub status: String,
+    /// false when the queue could not be read or the view could not be built: only `rows` (empty) and `status` are meaningful then (the Qt page leaves its labels as they were)
+    pub ok: bool,
+}
 
-/// Same inputs as the Qt shell's `rotation_panel.rs`, but stateless (the files are re-read each call).
-pub fn rotation_view(dir: &str) -> RotationData {
-    let queue_path = std::env::var("SINGWS_QUEUE").unwrap_or_else(|_| format!("{dir}/queue.json"));
-    let queue = match rotation::load_queue(std::path::Path::new(&queue_path)) { Ok(q) => q, Err(e) => return RotationData { status: format!("Rotation unavailable: {e}"), ..Default::default() } };
-    let tracks = rotation::load_tracks(std::path::Path::new(&format!("{dir}/tracks.json"))).unwrap_or_default();
-    let db = std::path::PathBuf::from(format!("{dir}/singws.db"));
-    let live = rotation::load_live_state(std::path::Path::new(&format!("{dir}/live_state.json")));
-    let (now, playing, active_id, live_title) = match &live { Some(l) => (l.singer.clone(), l.playing, l.singer_id.clone(), l.title.clone()), None => (String::new(), false, String::new(), String::new()) };
-    let inp = rotation::Inputs { db: Some(db.as_path()), tracks: &tracks, now_singing: if now.trim().is_empty() { "Singer Rotation" } else { &now }, playing, active_singer_id: &active_id, live_title: &live_title };
-    match rotation::view(&queue, &inp) {
-        Ok(v) => {
-            let note = if live.is_some() { "Live from the app" } else { "As of the app's last save (live stage state off)" };
-            RotationData {
-                status: if v.rows.is_empty() { format!("Nobody is waiting. {note}") } else { note.to_string() },
-                rows: v.rows.iter().map(|r| RotRow { number: r.number.clone(), singer: r.singer.clone(), combined: r.combined.clone(), duet: r.duet }).collect(),
-                title: v.title_label, count: v.count_label, now: v.now_strip, next: v.next_strip,
+/// The audience rotation from `queue.json` (re-read when its modification time changes), `tracks.json` (read once: it is the whole library) and `live_state.json`.
+/// Moved here from the Qt shell's `rotation_panel.rs` so every UI uses the same loader.
+pub struct RotationLoader { dir: String, queue: Option<Vec<Value>>, tracks: Option<Vec<Value>>, mtime: Option<SystemTime> }
+
+impl RotationLoader {
+    pub fn new(dir: &str) -> Self { RotationLoader { dir: dir.to_string(), queue: None, tracks: None, mtime: None } }
+
+    /// `now_singing` is the test override (`--now-singing`); empty means "from the app's live state, else the title".
+    pub fn view(&mut self, now_singing: &str) -> RotationData {
+        let dir = self.dir.clone();
+        let queue_path = std::env::var("SINGWS_QUEUE").unwrap_or_else(|_| format!("{dir}/queue.json"));
+        let mtime = std::fs::metadata(&queue_path).and_then(|m| m.modified()).ok();
+        if self.queue.is_none() || self.mtime != mtime {
+            match rotation::load_queue(std::path::Path::new(&queue_path)) {
+                Ok(q) => { self.queue = Some(q); self.mtime = mtime; }
+                Err(e) => return RotationData { status: format!("Rotation unavailable: {e}"), ..Default::default() },
             }
         }
-        Err(e) => RotationData { status: format!("Could not build the rotation: {e}"), ..Default::default() },
+        if self.tracks.is_none() { self.tracks = Some(rotation::load_tracks(std::path::Path::new(&format!("{dir}/tracks.json"))).unwrap_or_default()); }
+        let db = std::path::PathBuf::from(format!("{dir}/singws.db"));
+        let live = rotation::load_live_state(std::path::Path::new(&format!("{dir}/live_state.json")));
+        let mut now = now_singing.to_string();
+        let (playing, active_id, live_title) = match &live {
+            Some(l) => { if now.is_empty() { now = l.singer.clone(); } (l.playing, l.singer_id.clone(), l.title.clone()) }
+            None => (false, String::new(), String::new()),
+        };
+        let inp = rotation::Inputs { db: Some(db.as_path()), tracks: self.tracks.as_deref().unwrap_or(&[]), now_singing: if now.trim().is_empty() { "Singer Rotation" } else { &now }, playing, active_singer_id: &active_id, live_title: &live_title };
+        match rotation::view(self.queue.as_deref().unwrap_or(&[]), &inp) {
+            Ok(v) => {
+                let note = if live.is_some() { "Live from the app" } else { "As of the app's last save (live stage state off)" };
+                RotationData {
+                    status: if v.rows.is_empty() { format!("Nobody is waiting. {note}") } else { note.to_string() },
+                    rows: v.rows.iter().map(|r| RotRow { number: r.number.clone(), singer: r.singer.clone(), song: r.song.clone(), artist: r.artist.clone(), combined: r.combined.clone(), duet: r.duet }).collect(),
+                    title: v.title_label, count: v.count_label, now: v.now_strip, next: v.next_strip, ok: true,
+                }
+            }
+            Err(e) => RotationData { status: format!("Could not build the rotation: {e}"), ..Default::default() },
+        }
     }
 }
+
+/// One-shot convenience (reads everything again each call).
+pub fn rotation_view(dir: &str) -> RotationData { RotationLoader::new(dir).view("") }
 
 // ---- Singer history tab ----------------------------------------------------------------------------------------------------------------
 #[derive(Debug, Default, Clone, PartialEq)]
@@ -96,23 +122,61 @@ fn hist_rows(rows: &[history::Row]) -> Vec<HistRow> {
     rows.iter().map(|r| { let mut l = r.text.splitn(2, '\n'); HistRow { key: r.key.clone(), title: l.next().unwrap_or("").into(), detail: l.next().unwrap_or("").into(), selectable: r.selectable } }).collect()
 }
 
-/// `selected` is the singer key the user picked ("" or unknown: the first real singer, like the Qt page).
-pub fn history_view(dir: &str, singer_search: &str, selected: &str, song_query: &str, now_epoch: i64) -> HistoryData {
-    let path = std::env::var("SINGWS_HISTORY").unwrap_or_else(|_| format!("{dir}/singer_history.json"));
-    let store = match history::load(std::path::Path::new(&path)) { Ok(s) => s, Err(e) => return HistoryData { status: format!("Singer history unavailable: {e}"), ..Default::default() } };
-    let d = match history::directory(&store, singer_search, 700, 500) { Ok(d) => d, Err(e) => return HistoryData { status: format!("Could not list singers: {e}"), ..Default::default() } };
-    let singers = hist_rows(&d.rows);
-    let key = if singers.iter().any(|r| r.selectable && r.key == selected) { selected.to_string() } else { singers.iter().find(|r| r.selectable).map(|r| r.key.clone()).unwrap_or_default() };
-    let mut out = HistoryData { status: format!("{} singer{}", d.total_matches, if d.total_matches == 1 { "" } else { "s" }), singers, selected: key.clone(), name: "Select a singer".into(), summary: "No singer selected.".into(), song_meta: "0 entries".into(), ..Default::default() };
-    if !key.is_empty() {
-        let (name, summary) = history::details(&store, &key);
-        out.name = name; out.summary = summary;
-        match history::songs_view(&store, &key, song_query, 500, now_epoch) {
-            Ok(v) => { out.songs = hist_rows(&v.rows); out.song_meta = v.meta; }
-            Err(e) => out.song_meta = format!("Could not list songs: {e}"),
+/// The Singer history store from `singer_history.json`, reloaded when the file's modification time changes. Moved here from the Qt shell's `history_panel.rs`.
+pub struct HistoryLoader { path: String, store: Option<history::Store>, mtime: Option<SystemTime> }
+
+/// The Edit form's starting values for one song (`""` when not found): the same fields the app's Edit Song History dialog fills in.
+pub fn song_fields_json(store: &history::Store, singer_key: &str, song_key: &str) -> String {
+    let Some(song) = store.singers.iter().find(|s| s.key == singer_key).and_then(|s| s.songs.iter().find(|x| x.key == song_key)) else { return String::new() };
+    json!({"artist": song.artist, "title": song.title, "disc_id": song.disc_id, "song_type": song.song_type, "key": song.last_key, "tempo_percent": song.last_tempo_percent}).to_string()
+}
+
+impl HistoryLoader {
+    pub fn new(dir: &str) -> Self {
+        HistoryLoader { path: std::env::var("SINGWS_HISTORY").unwrap_or_else(|_| format!("{dir}/singer_history.json")), store: None, mtime: None }
+    }
+    fn ensure(&mut self) -> Result<&history::Store, String> {
+        let mtime = std::fs::metadata(&self.path).and_then(|m| m.modified()).ok();
+        if self.store.is_none() || self.mtime != mtime {
+            self.store = Some(history::load(std::path::Path::new(&self.path))?);
+            self.mtime = mtime;
         }
+        Ok(self.store.as_ref().unwrap())
+    }
+    /// The singer directory for a search; `Err` carries the text to show as the status.
+    pub fn singers(&mut self, search: &str) -> Result<(Vec<HistRow>, String), String> {
+        let store = self.ensure().map_err(|e| format!("Singer history unavailable: {e}"))?;
+        let d = history::directory(store, search, 700, 500).map_err(|e| format!("Could not list singers: {e}"))?;
+        Ok((hist_rows(&d.rows), format!("{} singer{}", d.total_matches, if d.total_matches == 1 { "" } else { "s" })))
+    }
+    /// (name, summary, song rows, meta line) for one singer; the meta line carries the error text when the songs cannot be listed.
+    pub fn select(&mut self, singer_key: &str, song_query: &str, now_epoch: i64) -> Option<(String, String, Vec<HistRow>, String)> {
+        let store = self.ensure().ok()?;
+        let (name, summary) = history::details(store, singer_key);
+        Some(match history::songs_view(store, singer_key, song_query, 500, now_epoch) {
+            Ok(v) => (name, summary, hist_rows(&v.rows), v.meta),
+            Err(e) => (name, summary, Vec::new(), format!("Could not list songs: {e}")),
+        })
+    }
+    pub fn song_fields(&mut self, singer_key: &str, song_key: &str) -> String {
+        match self.ensure() { Ok(store) => song_fields_json(store, singer_key, song_key), Err(_) => String::new() }
+    }
+}
+
+/// `selected` is the singer key the user picked ("" or unknown: the first real singer, like the Qt page).
+pub fn history_view_with(loader: &mut HistoryLoader, singer_search: &str, selected: &str, song_query: &str, now_epoch: i64) -> HistoryData {
+    let (singers, status) = match loader.singers(singer_search) { Ok(x) => x, Err(e) => return HistoryData { status: e, ..Default::default() } };
+    let key = if singers.iter().any(|r| r.selectable && r.key == selected) { selected.to_string() } else { singers.iter().find(|r| r.selectable).map(|r| r.key.clone()).unwrap_or_default() };
+    let mut out = HistoryData { status, singers, selected: key.clone(), name: "Select a singer".into(), summary: "No singer selected.".into(), song_meta: "0 entries".into(), ..Default::default() };
+    if !key.is_empty() {
+        if let Some((name, summary, songs, meta)) = loader.select(&key, song_query, now_epoch) { out.name = name; out.summary = summary; out.songs = songs; out.song_meta = meta; }
     }
     out
+}
+
+/// One-shot convenience (reads the file again each call).
+pub fn history_view(dir: &str, singer_search: &str, selected: &str, song_query: &str, now_epoch: i64) -> HistoryData {
+    history_view_with(&mut HistoryLoader::new(dir), singer_search, selected, song_query, now_epoch)
 }
 
 // ---- Settings viewer -------------------------------------------------------------------------------------------------------------------
@@ -136,7 +200,7 @@ pub fn settings_view_data(dir: &str, query: &str) -> SettingsData {
 
 // ---- Library tab -----------------------------------------------------------------------------------------------------------------------
 #[derive(Debug, Default, Clone, PartialEq)]
-pub struct LibRow { pub id: i64, pub artist: String, pub title: String, pub left: String, pub right: String }
+pub struct LibRow { pub id: i64, pub artist: String, pub title: String, pub duration: String, pub kind: String, pub left: String, pub right: String, pub tooltip: String }
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct LibraryData { pub rows: Vec<LibRow>, pub status: String }
 
@@ -147,11 +211,13 @@ pub fn library_view(db: &str, query: &str) -> LibraryData {
         Ok(res) => {
             let providers = crate::providers_for(path, &res.rows.iter().map(|r| r.id).collect::<Vec<_>>());
             let rows: Vec<LibRow> = res.rows.iter().map(|r| {
-                let (left, right) = match crate::rows::library_row(r, providers.get(&r.id).map(String::as_str)) {
-                    Ok(x) => (x.left, x.right),
-                    Err(_) => (if r.artist.is_empty() { r.title.clone() } else { format!("{} \u{2022} {}", r.artist, r.title) }, crate::format_duration(r.duration_secs)),
+                let duration = crate::format_duration(r.duration_secs);
+                let (left, right, tooltip) = match crate::rows::library_row(r, providers.get(&r.id).map(String::as_str)) {
+                    Ok(x) => (x.left, x.right, x.tooltip),
+                    // a row the app's rules cannot reproduce exactly (declined or raising): the plain text this page always had
+                    Err(_) => (if r.artist.is_empty() { r.title.clone() } else { format!("{} \u{2022} {}", r.artist, r.title) }, duration.clone(), String::new()),
                 };
-                LibRow { id: r.id, artist: r.artist.clone(), title: r.title.clone(), left, right }
+                LibRow { id: r.id, artist: r.artist.clone(), title: r.title.clone(), duration, kind: r.song_type.clone(), left, right, tooltip }
             }).collect();
             let n = rows.len();
             let status = if query.trim().is_empty() { "Type to search your library".to_string() } else if n == 0 { "No songs match".into() }
@@ -366,6 +432,17 @@ mod tests {
         let st = status_view(&d, 1_792_000_020);
         assert!(st.has && st.hero.is_some() && st.check_rows.len() == 7 && !st.all_passed && st.eta.contains("SINGERS"), "{st:?}");
         assert!(!status_view(&dir("none"), 0).has);
+    }
+    #[test]
+    fn the_edit_form_starts_from_the_stored_song_and_is_empty_for_anything_unknown() {
+        let raw = json!({"singers": {"ann": {"name": "Ann", "songs": {"queen|radio ga ga": {"artist": "Queen", "title": "Radio Ga Ga", "disc_id": "SC1", "song_type": "CDG", "last_key": -2, "last_tempo_percent": 90}}}}});
+        let store = history::normalize(&raw).unwrap();
+        let s = &store.singers[0];
+        let key = s.songs[0].key.clone();
+        let v: Value = serde_json::from_str(&song_fields_json(&store, &s.key, &key)).unwrap();
+        assert_eq!(v, json!({"artist": "Queen", "title": "Radio Ga Ga", "disc_id": "SC1", "song_type": "CDG", "key": -2, "tempo_percent": 90}));
+        assert_eq!(song_fields_json(&store, "nobody", &key), "");
+        assert_eq!(song_fields_json(&store, &s.key, "nope"), "");
     }
     #[test]
     fn missing_and_broken_files() {

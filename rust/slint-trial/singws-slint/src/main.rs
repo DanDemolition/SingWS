@@ -6,7 +6,7 @@ use std::rc::Rc;
 use std::time::{Duration, SystemTime};
 
 #[derive(Default)]
-struct Ui { chat_tab: i32, host_key: String, chat_sure: bool, chat_val: serde_json::Value, music_query: String, eq_bgm: Vec<f64>, eq_kar: Vec<f64>, eq_bgm_on: bool, eq_kar_on: bool, cutoff: i64, lib_query: String, singer_search: String, selected: String, song_query: String, setting_query: String }
+struct Ui { rot: Option<panels::RotationLoader>, hist: Option<panels::HistoryLoader>, chat_tab: i32, host_key: String, chat_sure: bool, chat_val: serde_json::Value, music_query: String, eq_bgm: Vec<f64>, eq_kar: Vec<f64>, eq_bgm_on: bool, eq_kar_on: bool, cutoff: i64, lib_query: String, singer_search: String, selected: String, song_query: String, setting_query: String }
 
 fn now_epoch() -> i64 { SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0) }
 
@@ -85,10 +85,11 @@ fn apply(app: &App, dir: &str, ui: &mut Ui) {
         None => app.set_hero_has(false),
     }
     app.set_st_checks(ModelRc::new(VecModel::from(st.checks.iter().map(|(ok, t)| CheckItem { ok: *ok, text: t.as_str().into() }).collect::<Vec<_>>())));
-    let r = panels::rotation_view(dir);
+    let r = ui.rot.get_or_insert_with(|| panels::RotationLoader::new(dir)).view("");
     app.set_rot_title(r.title.into()); app.set_rot_count(r.count.into()); app.set_rot_status(r.status.into()); app.set_rot_now(r.now.into()); app.set_rot_next(r.next.into());
     app.set_rot_rows(ModelRc::new(VecModel::from(r.rows.iter().map(|x| RotItem { number: x.number.as_str().into(), singer: x.singer.as_str().into(), combined: x.combined.as_str().into(), duet: x.duet }).collect::<Vec<_>>())));
-    let h = panels::history_view(dir, &ui.singer_search, &ui.selected, &ui.song_query, now_epoch());
+    let (ss, sel, sq) = (ui.singer_search.clone(), ui.selected.clone(), ui.song_query.clone());
+    let h = panels::history_view_with(ui.hist.get_or_insert_with(|| panels::HistoryLoader::new(dir)), &ss, &sel, &sq, now_epoch());
     ui.selected = h.selected.clone();
     app.set_h_status(h.status.into()); app.set_h_name(h.name.into()); app.set_h_summary(h.summary.into()); app.set_h_meta(h.song_meta.into());
     app.set_h_singers(ModelRc::new(VecModel::from(h.singers.iter().map(|x| HistItem { key: x.key.as_str().into(), title: x.title.as_str().into(), detail: x.detail.as_str().into(), selectable: x.selectable, selected: x.key == h.selected }).collect::<Vec<_>>())));
