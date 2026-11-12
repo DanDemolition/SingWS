@@ -32,6 +32,7 @@ export struct LibItem { id: int, artist: string, title: string, left: string, ri
 export struct DiagItem { ok: bool, label: string, detail: string }
 export struct MusicItem { index: int, filename: string }
 export struct EqBand { label: string, gain: float }
+export struct ChatEntry { header: bool, key: string, text: string, mine: bool }
 export struct SingerItem { number: string, name: string }
 
 component TabButton inherits Rectangle {
@@ -148,6 +149,8 @@ export component App inherits Window {
     in property <string> eq-status; in-out property <[EqBand]> eq-bgm; in-out property <[EqBand]> eq-kar;
     in property <bool> eq-bgm-on; in property <bool> eq-bgm-auto; in property <bool> eq-kar-on; in property <bool> eq-kar-auto;
     callback eq-toggle(string); callback eq-changed-bgm(int, float); callback eq-changed-kar(int, float);
+    in property <string> chat-status; in property <[string]> chat-tabs; in property <[ChatEntry]> chat-items; in property <int> chat-tab; in property <string> chat-hint; in property <bool> chat-can-say; in property <bool> chat-sure;
+    callback chat-set-tab(int); callback chat-pick(string); callback chat-say(string);
     in property <string> lib-status; in property <[LibItem]> lib-rows;
     callback lib-search(string); callback lib-add(int, string);
     in-out property <string> lib-singer;
@@ -173,6 +176,7 @@ export component App inherits Window {
             TabButton { label: "Now playing"; width: 100px; selected: root.tab == 9; clicked => { root.tab = 9; } }
             TabButton { label: "Music"; width: 70px; selected: root.tab == 10; clicked => { root.tab = 10; } }
             TabButton { label: "EQ"; width: 60px; selected: root.tab == 11; clicked => { root.tab = 11; } }
+            TabButton { label: "Chat"; width: 70px; selected: root.tab == 12; clicked => { root.tab = 12; } }
         }
 
         if root.tab == 0 : VerticalLayout {
@@ -556,6 +560,41 @@ export component App inherits Window {
                         }
                     }
                 }
+            }
+        }
+
+        if root.tab == 12 : VerticalLayout {
+            spacing: 10px;
+            PageTitle { text: c-enabled ? "CHAT" : "CHAT (read-only: not connected to the app)"; }
+            Text { text: chat-status; color: Theme.text-dim; font-size: 12px; wrap: word-wrap; }
+            if c-result != "" : Rectangle {
+                height: cres.preferred-height + 14px; border-radius: 6px; background: c-result-kind == "ok" ? #12301f : c-result-kind == "warn" ? #33290f : #3a1414;
+                cres := Text { x: 7px; y: 7px; width: parent.width - 14px; text: c-result; color: #ffffff; font-size: 13px; wrap: word-wrap; }
+            }
+            HorizontalLayout {
+                spacing: 8px; alignment: start;
+                for t[ti] in chat-tabs : Btn { label: t; tone: chat-tab == ti ? Theme.accent : Theme.card; clicked => { root.chat-set-tab(ti); } }
+            }
+            // plain text only (pictures and GIFs are not drawn here: see the design doc)
+            ScrollView {
+                VerticalLayout {
+                    spacing: 3px; alignment: start;
+                    for m in chat-items : Rectangle {
+                        border-radius: 6px; height: mt.preferred-height + 12px;
+                        background: m.header ? (m.mine ? #2d2a66 : #1f2540) : (m.mine ? #1b2a45 : Theme.row);
+                        accessible-role: list-item; accessible-label: m.text;
+                        mt := Text { x: 6px; y: 6px; width: parent.width - 12px; text: m.text; color: #ffffff; font-size: 13px; font-weight: m.header ? 600 : 400; wrap: word-wrap; }
+                        TouchArea { enabled: m.header && m.key != ""; clicked => { root.chat-pick(m.key); } }
+                    }
+                }
+            }
+            Text { text: chat-hint; color: Theme.text-dim; font-size: 12px; wrap: word-wrap; }
+            if chat-tab != 1 : HorizontalLayout {
+                spacing: 8px;
+                say-box := SearchBox { placeholder: c-enabled ? "Type a message…" : "Connect to the app to speak"; horizontal-stretch: 1;
+                    accepted => { if (chat-can-say) { root.chat-say(self.text); } } }
+                Btn { label: chat-sure ? "Sure?" : "Send"; tone: Theme.accent; enabled: chat-can-say && say-box.text != "";
+                    clicked => { root.chat-say(say-box.text); if (!chat-sure && chat-tab != 0) { say-box.text = ""; } } }
             }
         }
     }

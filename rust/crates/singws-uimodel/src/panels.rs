@@ -238,6 +238,75 @@ pub fn eq_data(dir: &str) -> EqData {
     }
 }
 
+// ---- Chat tab --------------------------------------------------------------------------------------------------------------------------
+use crate::chat;
+
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct ChatItem { pub header: bool, pub key: String, pub text: String, pub mine: bool, pub media_ref: String }
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct ChatData { pub status: String, pub tab_labels: Vec<String>, pub items: Vec<ChatItem>, pub group_enabled: bool, pub hint: String }
+
+/// The machine's UTC offset in minutes (what the Qt page gets from the JS clock), for the message time stamps.
+pub fn local_utc_offset_min(now: i64) -> i64 {
+    // SAFETY: localtime_r writes into the zeroed tm we pass; `now` is a plain integer.
+    unsafe {
+        let t: libc::time_t = now as libc::time_t;
+        let mut tm: libc::tm = std::mem::zeroed();
+        if libc::localtime_r(&t, &mut tm).is_null() { return 0; }
+        (tm.tm_gmtoff as i64) / 60
+    }
+}
+
+/// The Chat tab as a flat list (a header per conversation, then its rows). `chat_json` is the `chat` member of the control view model (null until the app sends one);
+/// `tab` is "group" | "dm" | "host"; `host_key` the Host chat conversation the operator picked.
+pub fn chat_data(chat_json: &Value, tab: &str, host_key: &str, utc_offset_min: i64) -> ChatData {
+    if chat_json.is_null() {
+        return ChatData { status: "Waiting for the app to send the chat. It does when remote control (shell_commands) is on and the chat page has loaded.".into(), tab_labels: vec!["Everyone".into(), "Private".into(), "Host chat".into()], ..Default::default() };
+    }
+    let v = chat::view(chat_json, tab, utc_offset_min);
+    let g = |k: &str| v.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+    let rows_of = |rows: &Value, out: &mut Vec<ChatItem>| {
+        for r in rows.as_array().cloned().unwrap_or_default() {
+            let who = r["who"].as_str().unwrap_or("");
+            let tags: Vec<&str> = r["tags"].as_array().map(|a| a.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
+            let stamp = r["stamp"].as_str().unwrap_or("");
+            let body = r["body"].as_str().unwrap_or("");
+            let att = r["attachment"].as_str().unwrap_or("");
+            let head = format!("{who}{}{}", if tags.is_empty() { String::new() } else { format!("   {}", tags.join(" \u{b7} ")) }, if stamp.is_empty() { String::new() } else { format!("   {stamp}") });
+            let text = format!("{head}\n{body}{}", if att.is_empty() { String::new() } else { format!("{}{att}", if body.is_empty() { "" } else { " " }) });
+            out.push(ChatItem { header: false, key: String::new(), text, mine: r["mine"].as_bool().unwrap_or(false), media_ref: r["media_ref"].as_str().unwrap_or("").into() });
+        }
+    };
+    let mut items = Vec::new();
+    match tab {
+        "group" => rows_of(&v["group"], &mut items),
+        "dm" => for t in v["dm"].as_array().cloned().unwrap_or_default() {
+            items.push(ChatItem { header: true, text: t["title"].as_str().unwrap_or("").into(), ..Default::default() });
+            rows_of(&t["rows"], &mut items);
+        },
+        _ => for t in v["host"].as_array().cloned().unwrap_or_default() {
+            let unread = t["unread"].as_i64().unwrap_or(0);
+            let key = t["key"].as_str().unwrap_or("").to_string();
+            let title = format!("{}{}{}", t["title"].as_str().unwrap_or(""), if unread > 0 { format!("   \u{2022}   {unread} new") } else { String::new() }, if key.is_empty() { "" } else { "   (click to talk to this singer)" });
+            items.push(ChatItem { header: true, mine: !key.is_empty() && key == host_key, key, text: title, ..Default::default() });
+            rows_of(&t["rows"], &mut items);
+        },
+    }
+    let group_enabled = v["group_enabled"].as_bool().unwrap_or(false);
+    let more = v["more"][tab].as_str().unwrap_or("");
+    let base = match tab {
+        "dm" => "Private conversations are read-only here; speak in them from the app.".to_string(),
+        "host" => if host_key.is_empty() { "Click a singer above to talk to them.".into() } else { "Talking to this singer only.".into() },
+        _ => if group_enabled { "Everyone in the room will see this.".into() } else { "Everyone chat is off in the web dashboard.".into() },
+    };
+    ChatData {
+        status: g("status"),
+        tab_labels: v["tabs"].as_array().map(|a| a.iter().map(|t| t["label"].as_str().unwrap_or("").to_string()).collect()).unwrap_or_default(),
+        items, group_enabled,
+        hint: if tab != "group" && !more.is_empty() { format!("{base}  {more}.") } else { base },
+    }
+}
+
 // ---- Status tab ------------------------------------------------------------------------------------------------------------------------
 pub const STATUS_STALE_SECS: i64 = 300;
 
@@ -361,5 +430,16 @@ mod tests {
         assert_eq!(music_view(&d, "zzz", -1).status, "No tracks match");
         let e = eq_data(&d);
         assert_eq!((e.bgm.gains[2], e.bgm.enabled, e.bgm.auto_enabled, e.karaoke.flat), (3.0, true, true, true), "{e:?}");
+    }
+    #[test]
+    fn chat_rows_headers_and_hints() {
+        assert!(chat_data(&Value::Null, "group", "", 0).status.starts_with("Waiting for the app"));
+        let c: Value = serde_json::from_str(r#"{"group_enabled":true,"dm_enabled":true,"unread":{"group":1},"group":[{"id":1,"from":"Ann","text":"hi all","at":1793405109}],"dm":[],"host":[{"key":"ann","singer":"Ann","unread":2,"messages":[{"id":2,"from":"Ann","text":"hello host","at":1793405109}]}]}"#).unwrap();
+        let g = chat_data(&c, "group", "", 0);
+        assert_eq!((g.items.len(), g.hint.as_str()), (1, "Everyone in the room will see this."));
+        assert!(g.items[0].text.starts_with("Ann   GROUP   12:05:09 AM\nhi all"), "{:?}", g.items[0]);
+        let h = chat_data(&c, "host", "ann", 0);
+        assert!(h.items[0].header && h.items[0].mine && h.items[0].text.contains("2 new"), "{h:?}");
+        assert_eq!(h.hint, "Talking to this singer only.");
     }
 }

@@ -6,9 +6,24 @@ use std::rc::Rc;
 use std::time::{Duration, SystemTime};
 
 #[derive(Default)]
-struct Ui { music_query: String, eq_bgm: Vec<f64>, eq_kar: Vec<f64>, eq_bgm_on: bool, eq_kar_on: bool, cutoff: i64, lib_query: String, singer_search: String, selected: String, song_query: String, setting_query: String }
+struct Ui { chat_tab: i32, host_key: String, chat_sure: bool, chat_val: serde_json::Value, music_query: String, eq_bgm: Vec<f64>, eq_kar: Vec<f64>, eq_bgm_on: bool, eq_kar_on: bool, cutoff: i64, lib_query: String, singer_search: String, selected: String, song_query: String, setting_query: String }
 
 fn now_epoch() -> i64 { SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0) }
+
+fn apply_chat(app: &App, ui: &Ui, c: &control::Control) {
+    let v = c.view();
+    let tab = ["group", "dm", "host"][ui.chat_tab.clamp(0, 2) as usize];
+    let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+    // test hook (like the Qt shell's --chat-demo): show this summary instead of the app's
+    let demo = std::env::var("SLINT_TRIAL_CHAT_DEMO").ok().and_then(|p| std::fs::read_to_string(p).ok()).and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok());
+    let d = panels::chat_data(demo.as_ref().unwrap_or(&v.chat), tab, &ui.host_key, panels::local_utc_offset_min(now));
+    app.set_chat_status(d.status.into());
+    app.set_chat_tabs(ModelRc::new(VecModel::from(d.tab_labels.iter().map(|t| SharedString::from(t.as_str())).collect::<Vec<_>>())));
+    app.set_chat_items(ModelRc::new(VecModel::from(d.items.iter().map(|i| ChatEntry { header: i.header, key: i.key.as_str().into(), text: i.text.as_str().into(), mine: i.mine }).collect::<Vec<_>>())));
+    app.set_chat_tab(ui.chat_tab); app.set_chat_hint(d.hint.into());
+    app.set_chat_can_say(v.enabled && ((tab == "group" && d.group_enabled) || (tab == "host" && !ui.host_key.is_empty())));
+    app.set_chat_sure(ui.chat_sure);
+}
 
 fn apply_control(app: &App, c: &control::Control) {
     let v = c.view();
@@ -101,8 +116,28 @@ fn main() {
       }); }
     { let (w, c) = (app.as_weak(), ctl.clone()); app.on_c_disconnect(move || { c.borrow_mut().disconnect(); if let Some(a) = w.upgrade() { apply_control(&a, &c.borrow()); } }); }
     { let (w, c) = (app.as_weak(), ctl.clone()); app.on_c_send(move |label, cmd| { c.borrow().send(&label, &cmd); if let Some(a) = w.upgrade() { apply_control(&a, &c.borrow()); } }); }
-    { let (w, c) = (app.as_weak(), ctl.clone()); app.on_c_changed(move || { if let Some(a) = w.upgrade() { apply_control(&a, &c.borrow()); } }); }
+    { let (w, c, u) = (app.as_weak(), ctl.clone(), ui.clone()); app.on_c_changed(move || { if let Some(a) = w.upgrade() { apply_control(&a, &c.borrow()); apply_chat(&a, &u.borrow(), &c.borrow()); } }); }
+    apply_chat(&app, &ui.borrow(), &ctl.borrow());
     hook!(on_mus_search, music_query);
+    { let (w, c, u) = (app.as_weak(), ctl.clone(), ui.clone());
+      app.on_chat_set_tab(move |t| { { let mut u = u.borrow_mut(); u.chat_tab = t; u.chat_sure = false; } if let Some(a) = w.upgrade() { apply_chat(&a, &u.borrow(), &c.borrow()); } }); }
+    { let (w, c, u) = (app.as_weak(), ctl.clone(), ui.clone());
+      app.on_chat_pick(move |k| { { let mut u = u.borrow_mut(); u.host_key = k.to_string(); } if let Some(a) = w.upgrade() { apply_chat(&a, &u.borrow(), &c.borrow()); } }); }
+    { let (w, c, u) = (app.as_weak(), ctl.clone(), ui.clone());
+      app.on_chat_say(move |text| {
+          let text = text.trim().to_string();
+          if text.is_empty() { return; }
+          { let mut u = u.borrow_mut();
+            let group = u.chat_tab == 0;
+            if group && !u.chat_sure { u.chat_sure = true; } // the Everyone send waits for a second tap, like the Qt page
+            else {
+                u.chat_sure = false;
+                let mut args = serde_json::json!({"channel": if group { "group" } else { "host" }, "text": text});
+                if !group { args["singer_key"] = serde_json::json!(u.host_key); }
+                c.borrow().send_args(if group { "Say to Everyone" } else { "Say in Host chat" }, "chat.say", &args);
+            } }
+          if let Some(a) = w.upgrade() { apply_control(&a, &c.borrow()); apply_chat(&a, &u.borrow(), &c.borrow()); }
+      }); }
     { let (w, c) = (app.as_weak(), ctl.clone());
       app.on_mus_play(move |idx, name| { c.borrow().send_args(&format!("Play {name}"), "bg.play_track", &serde_json::json!({"index": idx as i64, "track": name.to_string()})); if let Some(a) = w.upgrade() { apply_control(&a, &c.borrow()); } }); }
     { let (w, c) = (app.as_weak(), ctl.clone());
@@ -127,6 +162,6 @@ fn main() {
     // the Qt shell's pages refresh every 3 s while visible
     let timer = slint::Timer::default();
     let (weak, d, u, c) = (app.as_weak(), dir.clone(), ui.clone(), ctl.clone());
-    timer.start(slint::TimerMode::Repeated, Duration::from_secs(3), move || { if let Some(a) = weak.upgrade() { u.borrow_mut().cutoff = c.borrow().view().bg_index; apply(&a, &d, &mut u.borrow_mut()); } });
+    timer.start(slint::TimerMode::Repeated, Duration::from_secs(3), move || { if let Some(a) = weak.upgrade() { u.borrow_mut().cutoff = c.borrow().view().bg_index; apply(&a, &d, &mut u.borrow_mut()); apply_chat(&a, &u.borrow(), &c.borrow()); } });
     app.run().unwrap();
 }

@@ -16,6 +16,7 @@ pub struct ControlView {
     pub status: String, pub enabled: bool, pub logged_in: bool, pub login_error: String,
     pub now: String, pub clock: String, pub playing: bool, pub result_text: String, pub result_kind: String,
     pub bg_playing: bool, pub bg_volume: f64, pub bg_track: String, pub bg_index: i64,
+    pub chat: Value,
 }
 
 pub fn config_path() -> std::path::PathBuf {
@@ -48,6 +49,7 @@ pub fn flatten(v: &Value) -> ControlView {
         clock: if dur > 0.0 { format!("{} / {}   Key {:+}   Tempo {}%", clock(pb["position"].as_f64().unwrap_or(0.0)), clock(dur), pb["key"].as_i64().unwrap_or(0), (pb["tempo"].as_f64().unwrap_or(1.0) * 100.0).round() as i64) } else { "No song loaded".into() },
         playing: pb["playing"].as_bool().unwrap_or(false),
         bg_playing: v["bg"]["playing"].as_bool().unwrap_or(false), bg_volume: v["bg"]["volume"].as_f64().unwrap_or(0.0), bg_track: v["bg"]["track"].as_str().unwrap_or("").into(), bg_index: v["bg"]["index"].as_i64().unwrap_or(-1),
+        chat: v.get("chat").cloned().unwrap_or(Value::Null),
         result_text: v["result"]["text"].as_str().unwrap_or("").into(), result_kind: v["result"]["kind"].as_str().unwrap_or("").into(),
     }
 }
