@@ -32,7 +32,7 @@ export struct LibItem { id: int, artist: string, title: string, left: string, ri
 export struct DiagItem { ok: bool, label: string, detail: string }
 export struct MusicItem { index: int, filename: string }
 export struct EqBand { label: string, gain: float }
-export struct ChatEntry { header: bool, key: string, text: string, mine: bool }
+export struct ChatEntry { header: bool, key: string, text: string, mine: bool, picture: image, has-picture: bool }
 export struct SingerItem { number: string, name: string }
 
 component TabButton inherits Rectangle {
@@ -148,7 +148,7 @@ export component App inherits Window {
     callback mus-search(string); callback mus-play(int, string); callback mus-volume(float);
     in property <string> eq-status; in-out property <[EqBand]> eq-bgm; in-out property <[EqBand]> eq-kar;
     in property <bool> eq-bgm-on; in property <bool> eq-bgm-auto; in property <bool> eq-kar-on; in property <bool> eq-kar-auto; in property <bool> eq-bgm-flat; in property <bool> eq-kar-flat;
-    callback eq-toggle(string); callback eq-changed-bgm(int, float); callback eq-changed-kar(int, float);
+    callback eq-toggle(string); callback eq-preset(string, int); in property <[string]> eq-presets; callback eq-changed-bgm(int, float); callback eq-changed-kar(int, float);
     in property <string> chat-status; in property <[string]> chat-tabs; in property <[ChatEntry]> chat-items; in property <int> chat-tab; in property <string> chat-hint; in property <bool> chat-can-say; in property <bool> chat-sure;
     callback chat-set-tab(int); callback chat-pick(string); callback chat-say(string);
     in property <string> lib-status; in property <[LibItem]> lib-rows;
@@ -550,6 +550,11 @@ export component App inherits Window {
                         Rectangle { horizontal-stretch: 1; }
                         if c-enabled : Btn { label: on ? "Turn off" : "Turn on"; tone: Theme.accent; clicked => { root.eq-toggle(card.key); } }
                     }
+                    if c-enabled : HorizontalLayout {
+                        spacing: 4px; alignment: start;
+                        Text { text: "Preset"; color: Theme.text-dim; font-size: 12px; vertical-alignment: center; }
+                        for pn[pi] in eq-presets : Btn { label: pn; height: 26px; clicked => { root.eq-preset(card.key, pi); } }
+                    }
                     HorizontalLayout {
                         spacing: 4px;
                         for b[bi] in bands : VerticalLayout {
@@ -581,10 +586,11 @@ export component App inherits Window {
                 VerticalLayout {
                     spacing: 3px; alignment: start;
                     for m in chat-items : Rectangle {
-                        border-radius: 6px; height: mt.preferred-height + 12px;
+                        border-radius: 6px; height: mt.preferred-height + 12px + (m.has-picture ? 246px : 0px);
                         background: m.header ? (m.mine ? #2d2a66 : #1f2540) : (m.mine ? #1b2a45 : Theme.row);
                         accessible-role: list-item; accessible-label: m.text;
                         mt := Text { x: 6px; y: 6px; width: parent.width - 12px; text: m.text; color: #ffffff; font-size: 13px; font-weight: m.header ? 600 : 400; wrap: word-wrap; }
+                        if m.has-picture : Image { x: 6px; y: mt.preferred-height + 10px; width: min(240px, parent.width - 12px); height: 234px; source: m.picture; image-fit: contain; horizontal-alignment: left; accessible-role: image; accessible-label: "Picture in the chat"; }
                         TouchArea { enabled: m.header && m.key != ""; clicked => { root.chat-pick(m.key); } }
                     }
                 }

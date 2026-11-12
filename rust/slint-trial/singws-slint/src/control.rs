@@ -72,6 +72,13 @@ impl Control {
         save(&url, &user);
         self.handle = Some(spawn(Config::new(url, user, pin.to_string()), move |out| { vm.lock().unwrap().apply(&out); on_change(); }));
     }
+    /// The thumbnail data address of a chat picture/GIF ("" until the app has sent it).
+    pub fn media_uri(&self, media_ref: &str) -> String { self.vm.lock().unwrap().media_uri(media_ref) }
+    /// Ask the app for a thumbnail (`chat.media`, read-only, no result banner).
+    pub fn request_media(&self, media_ref: &str) {
+        if !singws_control::protocol::valid_media_ref(media_ref) { return; }
+        if let Some(h) = &self.handle { let _ = h.send("chat.media", &json!({"ref": media_ref}), None); }
+    }
     pub fn disconnect(&mut self) {
         if let Some(h) = self.handle.take() { h.stop(); }
         let mut vm = ViewModel::new();
@@ -92,8 +99,28 @@ impl Control {
     }
 }
 
+/// `data:image/jpeg;base64,....` -> the bytes (standard alphabet, padding optional); None for anything else.
+pub fn decode_data_uri(uri: &str) -> Option<Vec<u8>> {
+    let b64 = uri.split_once(";base64,")?.1;
+    let mut out = Vec::with_capacity(b64.len() * 3 / 4);
+    let (mut acc, mut bits) = (0u32, 0u32);
+    for ch in b64.bytes() {
+        let v = match ch { b'A'..=b'Z' => ch - b'A', b'a'..=b'z' => ch - b'a' + 26, b'0'..=b'9' => ch - b'0' + 52, b'+' => 62, b'/' => 63, b'=' | b'\n' | b'\r' => continue, _ => return None } as u32;
+        acc = (acc << 6) | v; bits += 6;
+        if bits >= 8 { bits -= 8; out.push((acc >> bits) as u8); acc &= (1 << bits) - 1; }
+    }
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn data_uris_decode() {
+        assert_eq!(super::decode_data_uri("data:image/jpeg;base64,SGVsbG8=").unwrap(), b"Hello");
+        assert_eq!(super::decode_data_uri("data:image/jpeg;base64,SGVsbG8").unwrap(), b"Hello");
+        assert!(super::decode_data_uri("nope").is_none());
+        assert!(super::decode_data_uri("data:x;base64,@@").is_none());
+    }
     use super::*;
     #[test]
     fn a_fresh_client_is_not_connected_and_a_send_says_so() {

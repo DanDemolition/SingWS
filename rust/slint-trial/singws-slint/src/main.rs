@@ -10,6 +10,18 @@ struct Ui { chat_tab: i32, host_key: String, chat_sure: bool, chat_val: serde_js
 
 fn now_epoch() -> i64 { SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0) }
 
+/// Decode a thumbnail data address to a file in the temp dir and load it (the file name comes from the ref, which `valid_media_ref` limits to safe characters).
+fn media_image(uri: &str, media_ref: &str) -> Option<slint::Image> {
+    if uri.is_empty() { return None; }
+    let bytes = control::decode_data_uri(uri)?;
+    let dir = std::env::temp_dir().join("singws-slint-media");
+    std::fs::create_dir_all(&dir).ok()?;
+    let name: String = media_ref.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
+    let path = dir.join(format!("{name}.jpg"));
+    if !path.exists() { std::fs::write(&path, bytes).ok()?; }
+    slint::Image::load_from_path(&path).ok()
+}
+
 fn apply_chat(app: &App, ui: &Ui, c: &control::Control) {
     let v = c.view();
     let tab = ["group", "dm", "host"][ui.chat_tab.clamp(0, 2) as usize];
@@ -19,7 +31,12 @@ fn apply_chat(app: &App, ui: &Ui, c: &control::Control) {
     let d = panels::chat_data(demo.as_ref().unwrap_or(&v.chat), tab, &ui.host_key, panels::local_utc_offset_min(now));
     app.set_chat_status(d.status.into());
     app.set_chat_tabs(ModelRc::new(VecModel::from(d.tab_labels.iter().map(|t| SharedString::from(t.as_str())).collect::<Vec<_>>())));
-    app.set_chat_items(ModelRc::new(VecModel::from(d.items.iter().map(|i| ChatEntry { header: i.header, key: i.key.as_str().into(), text: i.text.as_str().into(), mine: i.mine }).collect::<Vec<_>>())));
+    // pictures: ask the app for up to 6 missing thumbnails (newest first), draw those that arrived
+    if v.enabled { for it in d.items.iter().rev().filter(|i| !i.media_ref.is_empty() && c.media_uri(&i.media_ref).is_empty()).take(6) { c.request_media(&it.media_ref); } }
+    app.set_chat_items(ModelRc::new(VecModel::from(d.items.iter().map(|i| {
+        let pic = if i.media_ref.is_empty() { None } else { media_image(&c.media_uri(&i.media_ref), &i.media_ref) };
+        ChatEntry { header: i.header, key: i.key.as_str().into(), text: i.text.as_str().into(), mine: i.mine, has_picture: pic.is_some(), picture: pic.unwrap_or_default() }
+    }).collect::<Vec<_>>())));
     app.set_chat_tab(ui.chat_tab); app.set_chat_hint(d.hint.into());
     app.set_chat_can_say(v.enabled && ((tab == "group" && d.group_enabled) || (tab == "host" && !ui.host_key.is_empty())));
     app.set_chat_sure(ui.chat_sure);
@@ -151,6 +168,9 @@ fn main() {
       app.on_eq_changed_bgm(move |i, g| { let mut u = u.borrow_mut(); if let Some(x) = u.eq_bgm.get_mut(i as usize) { *x = g as f64; } eq_send(&c.borrow(), "bgm", &u.eq_bgm, true, "Background music EQ"); }); }
     { let (c, u) = (ctl.clone(), ui.clone());
       app.on_eq_changed_kar(move |i, g| { let mut u = u.borrow_mut(); if let Some(x) = u.eq_kar.get_mut(i as usize) { *x = g as f64; } eq_send(&c.borrow(), "karaoke", &u.eq_kar, true, "Karaoke EQ"); }); }
+    app.set_eq_presets(ModelRc::new(VecModel::from(singws_uimodel::eq_view::PRESETS.iter().map(|(n, _)| SharedString::from(*n)).collect::<Vec<_>>())));
+    { let c = ctl.clone();
+      app.on_eq_preset(move |key, i| { if let Some((name, g)) = singws_uimodel::eq_view::PRESETS.get(i as usize) { eq_send(&c.borrow(), if key == "bgm" { "bgm" } else { "karaoke" }, g, true, &format!("{} preset {name}", if key == "bgm" { "Background music" } else { "Karaoke" })); } }); }
     { let (c, u) = (ctl.clone(), ui.clone());
       app.on_eq_toggle(move |key| { let u = u.borrow(); if key == "bgm" { eq_send(&c.borrow(), "bgm", &u.eq_bgm, !u.eq_bgm_on, "Background music EQ"); } else { eq_send(&c.borrow(), "karaoke", &u.eq_kar, !u.eq_kar_on, "Karaoke EQ"); } }); }
     // library: search on every edit (the index answers in milliseconds; a typo falls back to the fuzzy pass, at most 1.5 s)
