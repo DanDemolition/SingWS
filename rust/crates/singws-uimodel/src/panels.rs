@@ -45,34 +45,14 @@ pub fn ticker_view(dir: &str) -> TickerView {
 }
 
 pub fn waitlist_view(dir: &str, now: SystemTime) -> WaitView {
-    let path = format!("{dir}/waitlist_snapshot.json");
-    let text = match std::fs::read_to_string(&path) {
-        Ok(t) => t,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return WaitView { status: "No waitlist snapshot yet. Turn on \"waitlist_snapshot\" in the app's settings; it then writes the file whenever the waitlist changes.".into(), ..Default::default() },
-        Err(e) => return WaitView { status: format!("Waitlist unavailable: {e}"), ..Default::default() },
-    };
-    let age = std::fs::metadata(&path).and_then(|m| m.modified()).ok().and_then(|t| now.duration_since(t).ok()).map(|d| d.as_secs());
-    let snapshot: Value = match serde_json::from_str(&text) {
-        Ok(v) => v,
-        Err(e) => return WaitView { status: format!("Waitlist unavailable: the snapshot is not valid JSON ({e})"), ..Default::default() },
-    };
-    match waitlist::sections_from_snapshot(&snapshot) {
-        Ok(secs) => {
-            let n: usize = secs.iter().map(|s| s.rows.len()).sum();
-            let mut status = if n == 0 { "Nobody is waiting".to_string() } else { format!("{n} request{}", if n == 1 { "" } else { "s" }) };
-            match age {
-                Some(a) if a > STALE_SECS => status.push_str(&format!("   •   snapshot is {}m old, the app may be closed", a / 60)),
-                Some(a) => status.push_str(&format!("   •   updated {a}s ago")),
-                None => {}
-            }
-            let sections = secs.iter().map(|s| WaitSection {
-                key: s.key.into(), title: s.title.into(), helper: s.helper.unwrap_or("").into(),
-                rows: s.rows.iter().map(|r| WaitRow { text: r.text.clone(), kind: r.status_kind.clone(), first_time: r.first_time_singer }).collect(),
-            }).collect();
-            WaitView { sections, status }
-        }
-        Err(e) => WaitView { status: format!("Waitlist unavailable: {e}"), ..Default::default() },
-    }
+    // one loader: the JSON one below (also what the Qt shell calls) does the reading and the wording
+    let (sections, status) = waitlist_json(dir, now);
+    let text = |v: &Value, k: &str| v.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+    let sections = sections.as_array().cloned().unwrap_or_default().iter().map(|sec| WaitSection {
+        key: text(sec, "key"), title: text(sec, "title"), helper: text(sec, "helper"),
+        rows: sec["rows"].as_array().cloned().unwrap_or_default().iter().map(|r| WaitRow { text: text(r, "text"), kind: text(r, "status_kind"), first_time: r["first_time_singer"].as_bool().unwrap_or(false) }).collect(),
+    }).collect();
+    WaitView { sections, status }
 }
 
 
@@ -334,30 +314,21 @@ pub fn strip_tags(html: &str) -> String {
 }
 
 pub fn status_view(dir: &str, now: i64) -> StatusViewData {
-    let path = format!("{dir}/status_snapshot.json");
-    let note = |t: String| StatusViewData { note: t, ..Default::default() };
-    let text = match std::fs::read_to_string(&path) {
-        Ok(t) => t,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return note("No status snapshot yet. Turn on \"status_snapshot\" in the app's settings; it then writes the file whenever the header refreshes.".into()),
-        Err(e) => return note(format!("Status unavailable: {e}")),
-    };
-    let snapshot: Value = match serde_json::from_str(&text) { Ok(v) => v, Err(e) => return note(format!("Status unavailable: the snapshot is not valid JSON ({e})")) };
-    match status::view(&snapshot) {
-        Ok(v) => {
-            let age = (now - v.taken_at).max(0);
-            StatusViewData {
-                note: if age > STATUS_STALE_SECS { format!("snapshot is {}m old, the app may be closed", age / 60) } else { format!("updated {age}s ago") },
-                stale: age > STATUS_STALE_SECS, has: true,
-                chips: v.chips.iter().map(|c| StatusChip { text: c.text.clone(), tone: c.tone.to_string() }).collect(),
-                status_text: v.status.text.clone(), warn_dot: v.status.dot_token == "warning", location: v.status.location.clone(), tooltip: v.status.tooltip.clone(),
-                eta: strip_tags(&v.eta.html), summary: v.summary.clone(), report_title: v.report.title.clone(),
-                checks: v.report.checks.iter().map(|c| (c.ok, format!("{}   {}", c.label, c.detail))).collect(),
-                all_passed: v.report.all_passed,
-                check_rows: v.report.checks.iter().map(|c| StatusCheck { ok: c.ok, label: c.label.to_string(), detail: c.detail.to_string() }).collect(),
-                hero: v.hero.as_ref().map(|h| StatusHero { kicker: h.kicker.clone(), singer: h.singer.clone(), subtitle: h.subtitle.clone(), meta: h.meta.clone(), format: h.format_text.clone(), remaining: h.remaining.clone() }),
-            }
-        }
-        Err(e) => note(format!("Status unavailable: {e}")),
+    // one loader: `status_json` (also what the Qt shell calls) does the reading and the wording
+    let (v, note) = status_json(dir, now);
+    if v.as_object().is_none_or(|o| o.is_empty()) { return StatusViewData { note, ..Default::default() }; }
+    let t = |x: &Value, k: &str| x.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+    let checks = v["checks"].as_array().cloned().unwrap_or_default();
+    let hero = v.get("hero").filter(|h| h.is_object()).map(|h| StatusHero { kicker: t(h, "kicker"), singer: t(h, "singer"), subtitle: t(h, "subtitle"), meta: t(h, "meta"), format: t(h, "format"), remaining: t(h, "remaining") });
+    StatusViewData {
+        note, stale: v["stale"].as_bool().unwrap_or(false), has: true,
+        chips: v["chips"].as_array().cloned().unwrap_or_default().iter().map(|c| StatusChip { text: t(c, "text"), tone: t(c, "tone") }).collect(),
+        status_text: t(&v, "statusText"), warn_dot: t(&v, "dotToken") == "warning", location: t(&v, "location"), tooltip: t(&v, "tooltip"),
+        eta: strip_tags(&t(&v, "etaHtml")), summary: t(&v, "summary"), report_title: t(&v, "reportTitle"),
+        checks: checks.iter().map(|c| (c["ok"].as_bool().unwrap_or(false), format!("{}   {}", t(c, "label"), t(c, "detail")))).collect(),
+        all_passed: v["allPassed"].as_bool().unwrap_or(false),
+        check_rows: checks.iter().map(|c| StatusCheck { ok: c["ok"].as_bool().unwrap_or(false), label: t(c, "label"), detail: t(c, "detail") }).collect(),
+        hero,
     }
 }
 
@@ -383,6 +354,18 @@ mod tests {
         let v = status_view(&d, 1_792_000_020);
         assert_eq!(v.hero.as_ref().map(|h| h.singer.as_str()), Some("Ann"));
         assert!(v.has && v.note == "updated 20s ago" && v.location == "Joe's" && v.checks.len() == 7, "{v:?}");
+    }
+    #[test]
+    fn the_flat_views_are_built_from_the_json_loaders() {
+        let d = dir("flat");
+        std::fs::write(format!("{d}/waitlist_snapshot.json"), r#"{"version":1,"waiting":{"5":{"request_id":5,"singer":"Ann","artist":"Queen","title":"Radio","request_time":1792000000}},"show_removed":false,"removed":{},"local_ids":[],"accepted_ids":[],"first_time_names":["Ann"]}"#).unwrap();
+        let w = waitlist_view(&d, SystemTime::now());
+        assert_eq!((w.sections.len(), w.sections[0].rows.len(), w.sections[0].rows[0].first_time), (1, 1, true), "{w:?}");
+        assert!(w.sections[0].rows[0].text.contains("Singer: Ann"), "{w:?}");
+        std::fs::write(format!("{d}/status_snapshot.json"), STATUS_FIXTURE).unwrap();
+        let st = status_view(&d, 1_792_000_020);
+        assert!(st.has && st.hero.is_some() && st.check_rows.len() == 7 && !st.all_passed && st.eta.contains("SINGERS"), "{st:?}");
+        assert!(!status_view(&dir("none"), 0).has);
     }
     #[test]
     fn missing_and_broken_files() {
@@ -443,3 +426,229 @@ mod tests {
         assert_eq!(h.hint, "Talking to this singer only.");
     }
 }
+
+// ---- JSON loaders shared by the Qt shell (moved here unchanged from its `waitlist_panel.rs` / `status_panel.rs`) --------------------------------------
+use serde_json::json;
+use std::time::UNIX_EPOCH;
+
+/// older than this the status says the snapshot may be stale (the app is closed, or the setting was turned off)
+const WAITLIST_JSON_STALE_SECS: u64 = 120;
+
+/// What the Edit form starts from: the request's key and tempo as the app's own dialog reads them (`int(req.get("key") or req.get("key_change") or 0)`, `int(req.get("tempo") or 0)`),
+/// from the snapshot's raw request with the same id (`waiting` is an object keyed by id). A value that is not a whole number counts as 0, like the dialog's `except`.
+fn with_edit_fields(mut row: Value, snapshot: &Value) -> Value {
+    let id = row.get("request_id").and_then(Value::as_i64).unwrap_or(0);
+    let raw = snapshot.get("waiting").and_then(Value::as_object).and_then(|m| m.get(&id.to_string()));
+    let whole = |v: Option<&Value>| v.and_then(Value::as_i64).filter(|n| *n != 0);
+    let key = raw.and_then(|r| whole(r.get("key")).or_else(|| whole(r.get("key_change")))).unwrap_or(0);
+    let tempo = raw.and_then(|r| whole(r.get("tempo"))).unwrap_or(0);
+    row["key"] = json!(key);
+    row["tempo"] = json!(tempo);
+    row
+}
+
+/// (sections as JSON, status line) for the snapshot in `dir`; `now` is the clock the file's age is measured against
+pub fn waitlist_json(dir: &str, now: SystemTime) -> (Value, String) {
+    let path = format!("{dir}/waitlist_snapshot.json");
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return (json!([]), "No waitlist snapshot yet. Turn on \"waitlist_snapshot\" in the app's settings; it then writes the file whenever the waitlist changes.".into());
+        }
+        Err(e) => return (json!([]), format!("Waitlist unavailable: {e}")),
+    };
+    let age = std::fs::metadata(&path).and_then(|m| m.modified()).ok().and_then(|t| now.duration_since(t).ok()).map(|d| d.as_secs());
+    let snapshot: Value = match serde_json::from_str(&text) {
+        Ok(v) => v,
+        Err(e) => return (json!([]), format!("Waitlist unavailable: the snapshot is not valid JSON ({e})")),
+    };
+    match waitlist::sections_from_snapshot(&snapshot) {
+        Ok(sections) => {
+            let rows: usize = sections.iter().map(|s| s.rows.len()).sum();
+            let json_sections: Vec<Value> = sections
+                .iter()
+                .map(|s| json!({"key": s.key, "title": s.title, "helper": s.helper, "rows": s.rows.iter().map(|r| with_edit_fields(waitlist::row_json(r), &snapshot)).collect::<Vec<_>>()}))
+                .collect();
+            let mut status = if rows == 0 { "Nobody is waiting".to_string() } else { format!("{rows} request{}", if rows == 1 { "" } else { "s" }) };
+            match age {
+                Some(a) if a > WAITLIST_JSON_STALE_SECS => status.push_str(&format!("   •   snapshot is {}m old, the app may be closed", a / 60)),
+                Some(a) => status.push_str(&format!("   •   updated {a}s ago")),
+                None => {}
+            }
+            (Value::Array(json_sections), status)
+        }
+        Err(e) => (json!([]), format!("Waitlist unavailable: {e}")),
+    }
+}
+
+
+/// older than this the status says the snapshot may be stale (the app is closed, or the setting was turned off). The app writes the file when its header refreshes,
+/// which on an idle night can be minutes apart, so the limit is generous.
+const STATUS_JSON_STALE_SECS: i64 = 300;
+
+/// (view as JSON, status line) for the snapshot in `dir`; `now` is the clock (Unix seconds) the snapshot's own `taken_at` is measured against
+pub fn status_json(dir: &str, now: i64) -> (Value, String) {
+    let path = format!("{dir}/status_snapshot.json");
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return (json!({}), "No status snapshot yet. Turn on \"status_snapshot\" in the app's settings; it then writes the file whenever the header refreshes.".into());
+        }
+        Err(e) => return (json!({}), format!("Status unavailable: {e}")),
+    };
+    let snapshot: Value = match serde_json::from_str(&text) {
+        Ok(v) => v,
+        Err(e) => return (json!({}), format!("Status unavailable: the snapshot is not valid JSON ({e})")),
+    };
+    match status::view(&snapshot) {
+        Ok(v) => {
+            let age = (now - v.taken_at).max(0);
+            let status = if age > STATUS_JSON_STALE_SECS { format!("snapshot is {}m old, the app may be closed", age / 60) } else { format!("updated {age}s ago") };
+            let view = json!({
+                "chips": v.chips.iter().map(|c| json!({"text": c.text, "tone": c.tone})).collect::<Vec<_>>(),
+                "statusText": v.status.text, "dotToken": v.status.dot_token, "tooltip": v.status.tooltip, "location": v.status.location,
+                "etaHtml": v.eta.html, "summary": v.summary, "stale": age > STATUS_JSON_STALE_SECS,
+                "hero": v.hero.as_ref().map(|h| json!({"kicker": h.kicker, "singer": h.singer, "subtitle": h.subtitle, "meta": h.meta, "format": h.format_text, "remaining": h.remaining})),
+                "reportTitle": v.report.title, "allPassed": v.report.all_passed,
+                "checks": v.report.checks.iter().map(|c| json!({"ok": c.ok, "label": c.label, "detail": c.detail})).collect::<Vec<_>>(),
+            });
+            (view, status)
+        }
+        Err(e) => (json!({}), format!("Status unavailable: {e}")),
+    }
+}
+
+fn unix_now() -> i64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
+}
+
+
+#[cfg(test)]
+mod waitlist_json_tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn dir(name: &str) -> String {
+        let d = std::env::temp_dir().join(format!("singws-waitlist-panel-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        d.to_string_lossy().to_string()
+    }
+
+    const SNAP: &str = r#"{"version":1,"pending_acceptance":null,"waiting":{"5":{"request_id":5,"singer":"Ann","artist":"Queen","title":"Radio","request_time":1792000000},
+        "6":{"request_id":6,"singer":"Bo","artist":"A","title":"B"}},"show_removed":false,"removed":{},"local_ids":[6],"accepted_ids":[],"pending_accepted_ids":[],"first_time_names":["Ann"]}"#;
+
+    #[test]
+    fn the_waitlist_snapshot_becomes_sections_and_a_status() {
+        let d = dir("a");
+        std::fs::write(format!("{d}/waitlist_snapshot.json"), SNAP).unwrap();
+        let (sections, status) = waitlist_json(&d, std::time::SystemTime::now());
+        let secs = sections.as_array().unwrap();
+        assert_eq!(secs.len(), 1);
+        assert_eq!(secs[0]["key"], "waitlist");
+        assert_eq!(secs[0]["rows"].as_array().unwrap().len(), 1, "the queued request (6) is not waiting any more");
+        assert_eq!(secs[0]["rows"][0]["singer"], "Ann");
+        assert!(status.starts_with("1 request   •   updated "), "{status}");
+    }
+
+    #[test]
+    fn an_old_snapshot_is_called_stale() {
+        let d = dir("b");
+        std::fs::write(format!("{d}/waitlist_snapshot.json"), SNAP).unwrap();
+        let later = std::time::SystemTime::now() + Duration::from_secs(600);
+        assert!(waitlist_json(&d, later).1.contains("10m old"), "{}", waitlist_json(&d, later).1);
+    }
+
+    #[test]
+    fn a_missing_or_broken_snapshot_says_so_instead_of_failing() {
+        let d = dir("c");
+        let (sections, status) = waitlist_json(&d, std::time::SystemTime::now());
+        assert_eq!((sections, status.contains("waitlist_snapshot")), (json!([]), true));
+        std::fs::write(format!("{d}/waitlist_snapshot.json"), "{nope").unwrap();
+        assert!(waitlist_json(&d, std::time::SystemTime::now()).1.contains("not valid JSON"));
+        std::fs::write(format!("{d}/waitlist_snapshot.json"), "[1]").unwrap();
+        assert!(waitlist_json(&d, std::time::SystemTime::now()).1.starts_with("Waitlist unavailable"));
+        std::fs::write(format!("{d}/waitlist_snapshot.json"), r#"{"waiting":{},"removed":{}}"#).unwrap();
+        assert!(waitlist_json(&d, std::time::SystemTime::now()).1.starts_with("Nobody is waiting"));
+    }
+
+    #[test]
+    fn edit_fields_come_from_the_raw_request_like_the_dialog_reads_them() {
+        let snap = json!({"waiting": {"5": {"request_id": 5, "key": 0, "key_change": 3, "tempo": -4}, "6": {"request_id": 6, "key": "x", "tempo": 2.5}, "7": {"request_id": 7, "key": -2}}});
+        let f = |id: i64| with_edit_fields(json!({"request_id": id}), &snap);
+        assert_eq!((f(5)["key"].clone(), f(5)["tempo"].clone()), (json!(3), json!(-4)), "key 0 falls through to key_change, like `req.get(\"key\") or req.get(\"key_change\")`");
+        assert_eq!((f(6)["key"].clone(), f(6)["tempo"].clone()), (json!(0), json!(0)), "not a whole number counts as 0");
+        assert_eq!((f(7)["key"].clone(), f(7)["tempo"].clone()), (json!(-2), json!(0)));
+        assert_eq!((f(99)["key"].clone(), f(99)["tempo"].clone()), (json!(0), json!(0)), "unknown id");
+    }
+}
+
+
+#[cfg(test)]
+mod status_json_tests {
+    use super::*;
+
+    fn dir(name: &str) -> String {
+        let d = std::env::temp_dir().join(format!("singws-status-panel-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        d.to_string_lossy().to_string()
+    }
+
+    fn snapshot() -> String {
+        json!({
+            "version": 1, "taken_at": 1_000_000, "settings": {"venue_name": "Joe's"}, "connection": "Connected", "network_configured": true, "last": {}, "attention": null, "queue_rev": 3,
+            "queue": [{"name": "Ann", "rotation_marker": false}], "total_secs": 200, "locked": false, "looping": false,
+            "diagnostics": {"local_name": "Speakers", "screen_count": 2, "karafun_path": null, "output_host": true, "preview_host": true, "show_ticker": true, "qr_url": "https://x/", "bg_files": []}
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn a_snapshot_becomes_pills_status_eta_and_seven_checks() {
+        let d = dir("a");
+        std::fs::write(format!("{d}/status_snapshot.json"), snapshot()).unwrap();
+        let (v, status) = status_json(&d, 1_000_020);
+        assert_eq!(status, "updated 20s ago");
+        assert_eq!(v["chips"][0]["text"], "Requests open");
+        assert_eq!(v["statusText"], "Requests Open \u{2022} Waitlist Off \u{2022} Connected");
+        assert_eq!(v["location"], "Joe's");
+        assert_eq!(v["checks"].as_array().unwrap().len(), 7);
+        assert_eq!(v["reportTitle"], "6 of 7 checks passed");
+        assert_eq!(v["checks"][2]["detail"], "Application not found");
+        assert_eq!(v["summary"], "1 singer \u{b7} 3 min");
+    }
+
+    #[test]
+    fn the_hero_card_travels_to_the_page_and_is_null_for_an_older_snapshot() {
+        let d = dir("d");
+        std::fs::write(format!("{d}/status_snapshot.json"), snapshot()).unwrap();
+        assert!(status_json(&d, 1_000_020).0["hero"].is_null());
+        let mut s: Value = serde_json::from_str(&snapshot()).unwrap();
+        s["hero"] = json!({"kicker": "NOW SINGING", "singer": "Ann", "subtitle": "Radio Ga Ga \u{b7} Queen", "meta": "SC8671", "format": "ZIP", "remaining": "03:21"});
+        std::fs::write(format!("{d}/status_snapshot.json"), s.to_string()).unwrap();
+        let h = status_json(&d, 1_000_020).0["hero"].clone();
+        assert_eq!((h["singer"].as_str(), h["remaining"].as_str(), h["format"].as_str()), (Some("Ann"), Some("-03:21"), Some("ZIP")));
+    }
+
+    #[test]
+    fn an_old_snapshot_is_called_old_and_a_future_one_counts_as_just_written() {
+        let d = dir("b");
+        std::fs::write(format!("{d}/status_snapshot.json"), snapshot()).unwrap();
+        let (v, status) = status_json(&d, 1_000_000 + 301);
+        assert_eq!((status.as_str(), v["stale"].as_bool()), ("snapshot is 5m old, the app may be closed", Some(true)));
+        let (v, status) = status_json(&d, 1_000_000 + 300);
+        assert_eq!((status.as_str(), v["stale"].as_bool()), ("updated 300s ago", Some(false)));
+        assert_eq!(status_json(&d, 5).1, "updated 0s ago");
+    }
+
+    #[test]
+    fn a_missing_or_broken_snapshot_says_so_instead_of_drawing_guesses() {
+        let d = dir("c");
+        let (v, status) = status_json(&d, 0);
+        assert!(v.as_object().unwrap().is_empty() && status.contains("status_snapshot"));
+        std::fs::write(format!("{d}/status_snapshot.json"), "{not json").unwrap();
+        assert!(status_json(&d, 0).1.starts_with("Status unavailable: the snapshot is not valid JSON"));
+        std::fs::write(format!("{d}/status_snapshot.json"), r#"{"version":2}"#).unwrap();
+        assert!(status_json(&d, 0).1.starts_with("Status unavailable: decline"));
+    }
+}
+
