@@ -1,6 +1,8 @@
-import { Button, CheckBox, TabWidget, ListView, ScrollView } from "std-widgets.slint";
+import { Button, CheckBox, TabWidget, ListView, ScrollView, LineEdit } from "std-widgets.slint";
 export struct RowData { status: string, text: string }
 export struct SectionData { title: string, rows: [RowData] }
+export struct SongData { artist: string, title: string, meta: string }
+export struct ChatMsg { who: string, host: bool, body: styled-text, has-image: bool, pic: image }
 export component App inherits Window {
     title: "SingWS toolkit spike (Slint)";
     preferred-width: 900px; preferred-height: 600px;
@@ -11,7 +13,12 @@ export component App inherits Window {
     in property <string> hero-kicker; in property <string> hero-singer; in property <string> hero-sub; in property <string> hero-left;
     in-out property <bool> custom-on: true;
     in property <int> start-tab: 0;
+    in property <[SongData]> songs;
+    in property <string> lib-status;
+    in property <[ChatMsg]> chat;
     callback custom-toggled(bool);
+    callback search(string);
+    callback add(int);
     VerticalLayout {
         padding: 12px; spacing: 10px;
         Rectangle {
@@ -23,6 +30,29 @@ export component App inherits Window {
             }
         }
         TabWidget { current-index: root.start-tab;
+            Tab { title: "Library";
+                VerticalLayout { padding: 10px; spacing: 6px;
+                    LineEdit { placeholder-text: "Search artist or title (typo-tolerant)"; edited(t) => { root.search(t); } }
+                    Text { text: lib-status; color: #cfc6ee; }
+                    ListView {
+                        for s[i] in songs : Rectangle { background: #231a3d; height: 44px;
+                            HorizontalLayout { padding: 6px; spacing: 10px;
+                                VerticalLayout { horizontal-stretch: 1; Text { text: s.title; color: white; font-size: 14px; overflow: elide; } Text { text: s.artist; color: #cfc6ee; font-size: 11px; overflow: elide; } }
+                                Text { text: s.meta; color: #b6ff3b; font-size: 11px; vertical-alignment: center; }
+                                Button { text: "+"; width: 36px; clicked => { root.add(i); } } } }
+                    }
+                }
+            }
+            Tab { title: "Chat";
+                ListView {
+                    for m in chat : Rectangle { background: m.host ? #3b2a6e : #231a3d; border-radius: 10px;
+                        VerticalLayout { padding: 8px; spacing: 4px;
+                            Text { text: m.who; color: m.host ? #b6ff3b : #cfc6ee; font-size: 11px; font-weight: 800; }
+                            StyledText { text: m.body; }
+                            if m.has-image : Image { source: m.pic; height: 90px; image-fit: contain; horizontal-alignment: left; }
+                        } }
+                }
+            }
             Tab { title: "Ticker";
                 VerticalLayout { padding: 10px; spacing: 10px;
                     CheckBox { text: "Show the custom message"; checked <=> root.custom-on; toggled => { root.custom-toggled(self.checked); } }

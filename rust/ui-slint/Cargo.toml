@@ -1,0 +1,11 @@
+# Slint host-window port (Stage E). A SEPARATE workspace on purpose: adding slint (winit, femtovg, ...) to rust/Cargo.toml would rewrite the shared Cargo.lock that every
+# shipped crate builds from. Nothing the app builds or ships depends on this crate. Build: cd rust/ui-slint && cargo build --release
+[workspace]
+resolver = "2"
+members = ["singws-ui-slint"]
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true

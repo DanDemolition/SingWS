@@ -28,7 +28,7 @@ MAX_RECOVERIES = 3
 SAT_AT_END_S = 2.5
 END_MARGIN_S = 1.5
 SEEK_END_GUARD_S = 8.0
-FRAME_INTERVAL_MS = 33
+FRAME_INTERVAL_MS = 16
 
 
 def song_id_from_entry(entry, song_path: str = "") -> Optional[int]:

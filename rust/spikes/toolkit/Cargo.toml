@@ -1,7 +1,7 @@
 # Toolkit spike (2026-11-10). A SEPARATE workspace: not a member of rust/Cargo.toml, so nothing the app builds or ships depends on it.
 [workspace]
 resolver = "2"
-members = ["core", "slint-proto", "dioxus-proto"]
+members = ["core", "slint-proto", "dioxus-proto", "overlay-proto"]
 
 [profile.release]
 opt-level = 3

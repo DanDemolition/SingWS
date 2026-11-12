@@ -3,9 +3,11 @@ name = "slint-proto"
 version = "0.0.0"
 edition = "2024"
 publish = false
+license = "GPL-3.0-only"
 build = "build.rs"
 [dependencies]
 spike-core = { path = "../core" }
 slint = { version = "1", default-features = false, features = ["compat-1-18", "std", "backend-winit", "renderer-femtovg", "renderer-software", "accessibility"] }
+image = { version = "0.25", default-features = false, features = ["gif"] }
 [build-dependencies]
 slint-build = "1"

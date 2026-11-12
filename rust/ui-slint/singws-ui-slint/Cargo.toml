@@ -1,0 +1,24 @@
+[package]
+name = "singws-ui-slint"
+version = "0.0.1"
+edition = "2024"
+description = "Slint host window, first slice: the read-only Ticker and Waitlist pages. Rules come from singws-uimodel; this crate only reads files and draws."
+publish = false
+build = "build.rs"
+
+[lib]
+name = "singws_ui_slint"
+path = "src/lib.rs"
+
+[[bin]]
+name = "singws-ui-slint"
+path = "src/main.rs"
+
+[dependencies]
+singws-uimodel = { path = "../../crates/singws-uimodel" }
+singws-control = { path = "../../crates/singws-control", features = ["tls"] }
+serde_json = "1"
+slint = { version = "1", default-features = false, features = ["compat-1-18", "std", "backend-winit", "renderer-femtovg", "renderer-software", "accessibility"] }
+
+[build-dependencies]
+slint-build = "1"

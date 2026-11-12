@@ -3,6 +3,7 @@ name = "dioxus-proto"
 version = "0.0.0"
 edition = "2024"
 publish = false
+license = "GPL-3.0-only"
 [dependencies]
 spike-core = { path = "../core" }
 dioxus = { version = "0.7", default-features = false, features = ["launch", "desktop", "macro", "hooks", "signals", "html"] }

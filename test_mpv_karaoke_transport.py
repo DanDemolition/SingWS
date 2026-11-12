@@ -152,3 +152,31 @@ class MpvTransportTests(unittest.TestCase):
             bridge,
         )
         self.assertIn('"[bridge] detected media format=%s"', bridge)
+
+
+class VoiceOnlyWhenThePictureFailsTests(unittest.TestCase):
+    def test_a_failed_picture_keeps_the_sound_and_the_clock_on_the_voice(self):
+        from unittest import mock
+        import mpv_karaoke_transport as t
+        voice = mock.MagicMock()
+        voice.is_ready.return_value = True
+        voice.position_seconds.return_value = 12.5
+        voice.duration_seconds.return_value = 200.0
+        voice.is_playing.return_value = True
+        voice.is_finished.return_value = False
+        plugin = mock.MagicMock()
+        plugin.loadSingWSMedia.return_value = False
+        plugin.picture_failed = True
+        tr = t.MpvKaraokeTransport.__new__(t.MpvKaraokeTransport)
+        tr.__dict__.update(plugin=plugin, _voice=voice, _voice_phase="", mode="mp4", video_path="/x/a.mp4", audio_path="/x/a.mp4",
+                           _pitch_semitones=0.0, _tempo_ratio=1.0, _volume=1.0, _loop=None, _cdg_zones=None, _user_paused=False,
+                           _voice_log=lambda *_: None, _voice_norm=1.0)
+        tr._voice_load = lambda s: True
+        tr._timer = mock.MagicMock(); tr._vtimer = mock.MagicMock()
+        tr.start(0.0)
+        self.assertIsInstance(tr.plugin, t.VoiceOnlyClock)
+        voice.play.assert_called()
+        self.assertEqual(tr.position_seconds(), 12.5)
+        self.assertFalse(tr.plugin.atEnd())
+        voice.is_finished.return_value = True
+        self.assertTrue(tr.plugin.atEnd())
