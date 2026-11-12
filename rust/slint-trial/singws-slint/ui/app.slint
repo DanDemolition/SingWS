@@ -147,7 +147,7 @@ export component App inherits Window {
     in property <string> bg-track; in property <bool> bg-playing; in-out property <float> bg-volume;
     callback mus-search(string); callback mus-play(int, string); callback mus-volume(float);
     in property <string> eq-status; in-out property <[EqBand]> eq-bgm; in-out property <[EqBand]> eq-kar;
-    in property <bool> eq-bgm-on; in property <bool> eq-bgm-auto; in property <bool> eq-kar-on; in property <bool> eq-kar-auto;
+    in property <bool> eq-bgm-on; in property <bool> eq-bgm-auto; in property <bool> eq-kar-on; in property <bool> eq-kar-auto; in property <bool> eq-bgm-flat; in property <bool> eq-kar-flat;
     callback eq-toggle(string); callback eq-changed-bgm(int, float); callback eq-changed-kar(int, float);
     in property <string> chat-status; in property <[string]> chat-tabs; in property <[ChatEntry]> chat-items; in property <int> chat-tab; in property <string> chat-hint; in property <bool> chat-can-say; in property <bool> chat-sure;
     callback chat-set-tab(int); callback chat-pick(string); callback chat-say(string);
@@ -532,20 +532,21 @@ export component App inherits Window {
 
         if root.tab == 11 : VerticalLayout {
             spacing: 12px;
-            HorizontalLayout { spacing: 10px; PageTitle { text: c-enabled ? "EQUALISERS" : "EQUALISERS (read-only)"; }
+            HorizontalLayout { spacing: 10px; alignment: start; PageTitle { text: c-enabled ? "EQUALISERS" : "EQUALISERS (read-only)"; }
                 if !c-enabled : Text { text: "Connect on the Controls tab to change them."; color: #7a77a0; font-size: 12px; vertical-alignment: center; } }
             if eq-status != "" : Text { text: eq-status; color: #f0b44c; font-size: 12px; wrap: word-wrap; }
             for card[ci] in [{key: "bgm", title: "Background music"}, {key: "karaoke", title: "Karaoke"}] : Rectangle {
                 border-radius: 10px; background: Theme.card; border-width: 1px; border-color: Theme.card-border; vertical-stretch: 1;
                 property <bool> on: ci == 0 ? eq-bgm-on : eq-kar-on;
                 property <bool> auto: ci == 0 ? eq-bgm-auto : eq-kar-auto;
+                property <bool> flat: ci == 0 ? eq-bgm-flat : eq-kar-flat;
                 property <[EqBand]> bands: ci == 0 ? eq-bgm : eq-kar;
                 VerticalLayout {
                     padding: 12px; spacing: 6px;
                     HorizontalLayout {
                         spacing: 10px;
                         Text { text: card.title; color: #ffffff; font-size: 14px; font-weight: 600; vertical-alignment: center; }
-                        Text { text: on ? (auto ? "ON (the gains are not flat, so the app turned it on)" : "ON") : "OFF"; color: on ? #7ee787 : Theme.text-dim; font-size: 12px; vertical-alignment: center; }
+                        Text { text: on ? (auto ? "ON (the gains are not flat, so the app turned it on)" : "ON") : (flat ? "OFF (flat)" : "OFF"); color: on ? #7ee787 : Theme.text-dim; font-size: 12px; vertical-alignment: center; }
                         Rectangle { horizontal-stretch: 1; }
                         if c-enabled : Btn { label: on ? "Turn off" : "Turn on"; tone: Theme.accent; clicked => { root.eq-toggle(card.key); } }
                     }

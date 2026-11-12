@@ -83,7 +83,7 @@ fn apply(app: &App, dir: &str, ui: &mut Ui) {
     app.set_eq_status(eq.status.clone().into());
     let bands = |g: &Vec<f64>| ModelRc::new(VecModel::from(eq.bands_hz.iter().zip(g.iter()).map(|(hz, g)| EqBand { label: (if *hz >= 1000.0 { format!("{}k", hz / 1000.0) } else { format!("{}", hz) }).into(), gain: *g as f32 }).collect::<Vec<_>>()));
     app.set_eq_bgm(bands(&eq.bgm.gains)); app.set_eq_kar(bands(&eq.karaoke.gains));
-    app.set_eq_bgm_on(eq.bgm.enabled); app.set_eq_bgm_auto(eq.bgm.auto_enabled); app.set_eq_kar_on(eq.karaoke.enabled); app.set_eq_kar_auto(eq.karaoke.auto_enabled);
+    app.set_eq_bgm_flat(eq.bgm.flat); app.set_eq_kar_flat(eq.karaoke.flat); app.set_eq_bgm_on(eq.bgm.enabled); app.set_eq_bgm_auto(eq.bgm.auto_enabled); app.set_eq_kar_on(eq.karaoke.enabled); app.set_eq_kar_auto(eq.karaoke.auto_enabled);
     ui.eq_bgm = eq.bgm.gains.clone(); ui.eq_kar = eq.karaoke.gains.clone(); ui.eq_bgm_on = eq.bgm.enabled; ui.eq_kar_on = eq.karaoke.enabled;
     let st2 = panels::settings_view_data(dir, &ui.setting_query);
     app.set_set_status(st2.status.into());
