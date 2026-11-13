@@ -22,7 +22,7 @@ from pathlib import Path
 sys.setswitchinterval(0.001)
 
 _GST_RUNTIME_DEBUG = {}
-APP_VERSION = "1.0.3.5"
+APP_VERSION = "1.0.3.6"
 PROCESS_STARTUP_UTC = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
 PROCESS_SESSION_UUID = str(uuid.uuid4())
 PROCESSING_NOTIFICATION_TIMEOUT_MS = 15000
