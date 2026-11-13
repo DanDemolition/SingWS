@@ -198,6 +198,10 @@ if find -L "$STAGING/dist/$APP_NAME.app" -type l -print -quit | grep -q .; then
     exit 1
 fi
 
+# Chromium (KaraFun's player), run inside an app bundle, starts its page/graphics processes from standard helper bundles: without them KaraFun is a black
+# screen (found 2026-11-13). Made on the staged app before signing, so --deep signs them too.
+./tools/make_karafun_helpers.sh "$STAGING/dist/$APP_NAME.app"
+
 codesign --force --deep --sign "$CODE_SIGN_IDENTITY" \
     --entitlements SingWS.entitlements "$STAGING/dist/$APP_NAME.app"
 codesign --verify --deep --strict "$STAGING/dist/$APP_NAME.app"

@@ -314,6 +314,9 @@ impl Chrome {
             external_message_pump: 1,
             windowless_rendering_enabled: 1,
             framework_dir_path: dir.join(FRAMEWORK).to_string_lossy().as_ref().into(),
+            // Inside an app bundle Chromium looks for its resources and locales relative to the BUNDLE (and the page process stops with code 1003): say where they are.
+            resources_dir_path: dir.join(FRAMEWORK).join("Resources").to_string_lossy().as_ref().into(),
+            locales_dir_path: dir.join(FRAMEWORK).join("Resources").to_string_lossy().as_ref().into(),
             browser_subprocess_path: exe.to_string_lossy().as_ref().into(),
             root_cache_path: profile.to_string_lossy().as_ref().into(),
             cache_path: profile.to_string_lossy().as_ref().into(),
@@ -515,6 +518,20 @@ wrap_app! {
                 "use-fake-ui-for-media-stream",
             ] { command_line.append_switch(Some(&switch.into())); }
             command_line.append_switch_with_value(Some(&"autoplay-policy".into()), Some(&"no-user-gesture-required".into()));
+            // For debugging only: SINGWS_CEF_SWITCHES="single-process,v=1" adds Chromium switches (name or name=value, comma separated).
+            if let Ok(extra) = std::env::var("SINGWS_CEF_SWITCHES") {
+                for item in extra.split(',').filter(|i| !i.is_empty()) {
+                    match item.split_once('=') {
+                        Some((name, value)) => command_line.append_switch_with_value(Some(&name.into()), Some(&value.into())),
+                        None => command_line.append_switch(Some(&item.into())),
+                    }
+                }
+            }
+            // SINGWS_CEF_TRACE=1: every process (page, graphics, network) logs to this program's stderr, to see why one stops.
+            if trace() {
+                command_line.append_switch_with_value(Some(&"enable-logging".into()), Some(&"stderr".into()));
+                command_line.append_switch_with_value(Some(&"v".into()), Some(&"1".into()));
+            }
             // The Mac's media controls (the play/pause key, headphones or
             // AirPods taken out, Now Playing) never reach KaraFun's page: one
             // paused a song mid-show. SingWS alone pauses it.
