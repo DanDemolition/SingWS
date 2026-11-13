@@ -29,7 +29,7 @@ SAT_AT_END_S = 2.5
 END_MARGIN_S = 1.5
 SEEK_END_GUARD_S = 8.0
 KARAFUN_CAPTURE_WIDTH, KARAFUN_CAPTURE_HEIGHT, KARAFUN_CAPTURE_QUALITY = 1280, 720, 85
-FRAME_INTERVAL_MS = 16
+FRAME_INTERVAL_MS = 33   # ~30 fps: less CPU on the Intel Mac (was 16 ms)
 
 
 def song_id_from_entry(entry, song_path: str = "") -> Optional[int]:
