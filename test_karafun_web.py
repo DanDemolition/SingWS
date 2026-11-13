@@ -36,88 +36,89 @@ class Response(io.BytesIO):
     def __exit__(self, *a): self.close()
 
 
-def chromium_zip(root, version_text="Chromium 160.0.1.2", with_app=True):
-    src = root / "zipsrc"
-    if with_app:
-        binary = src / "chrome-mac" / "Chromium.app" / "Contents" / "MacOS" / "Chromium"
-        binary.parent.mkdir(parents=True)
-        binary.write_text(f"#!/bin/sh\necho '{version_text}'\n")
-        binary.chmod(0o755)
-    else:
-        (src / "elsewhere").mkdir(parents=True)
-        (src / "elsewhere" / "x").write_text("x")
-    out = root / "fake.zip"
-    subprocess.run(["/usr/bin/ditto", "-c", "-k", "--sequesterRsrc", str(src), str(out)], check=True)
-    return out.read_bytes()
-
-
-def chromium_server(zip_bytes, revision="1744193", length=None):
-    def opener(url, timeout=None):
-        return Response(revision.encode()) if url.endswith("LAST_CHANGE") else Response(zip_bytes, length)
-    return opener
+FAKE_HELPER = """#!/bin/sh
+# a stand-in for singws-karafun-display: `installed` looks for a flag file, `get` makes it (and says how it is going)
+case "$1" in
+  installed) [ -f "$FAKE_FLAG" ] && exit 0 || exit 3 ;;
+  get) echo x >> "$FAKE_GETS"
+       if [ -n "$FAKE_FAIL" ]; then echo '{"type":"failed","error":"the download did not match its checksum"}'; exit 1; fi
+       echo '{"type":"progress","text":"Getting KaraFun player (Chromium, once): 25 of 100 MB"}'
+       echo '{"type":"progress","text":"Getting KaraFun player: unpacking"}'
+       touch "$FAKE_FLAG"; echo '{"type":"got"}'; exit 0 ;;
+esac
+exit 1
+"""
 
 
 class BrowserTests(unittest.TestCase):
-    """Chromium is downloaded only after the user agreed; Chrome and Chrome for Testing are never used."""
+    """The player runs in singws-karafun-display; Chromium's framework is fetched by it only after the user agreed. Never Chrome."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
-        patcher = mock.patch.dict(os.environ, {"SINGWS_HOME": str(self.root / "home"), "HOME": str(self.root / "nohome")})
-        patcher.start(); self.addCleanup(patcher.stop); self.addCleanup(self.tmp.cleanup)
-        # an installed /Applications/Chromium.app on this Mac must not change the results
-        no_app = mock.patch.object(karafun_web, "_installed_bases", return_value=[])
-        no_app.start(); self.addCleanup(no_app.stop)
+        self.addCleanup(self.tmp.cleanup)
+        self.helper = self.root / "singws-karafun-display"
+        self.helper.write_text(FAKE_HELPER)
+        self.helper.chmod(0o755)
+        self.flag, self.gets = self.root / "installed.flag", self.root / "gets.log"
+        env = mock.patch.dict(os.environ, {"FAKE_FLAG": str(self.flag), "FAKE_GETS": str(self.gets), "SINGWS_KARAFUN_DISPLAY": str(self.helper)})
+        env.start(); self.addCleanup(env.stop)
+
+    def gets_run(self):
+        return len(self.gets.read_text().split()) if self.gets.exists() else 0
 
     def test_without_chromium_nothing_downloads_until_the_user_agrees(self):
-        opener = mock.Mock(side_effect=AssertionError("must not download"))
         with self.assertRaises(karafun_web.BrowserMissing):
-            karafun_web.ensure_browser(urlopen=opener)
+            karafun_web.ensure_browser()
+        self.assertEqual(self.gets_run(), 0)
+        self.assertIsNone(karafun_web.find_browser())
 
-    def test_it_downloads_once_after_consent_checks_it_runs_and_reuses_it(self):
-        data = chromium_zip(self.root)
+    def test_it_downloads_once_after_consent_says_how_it_goes_and_reuses_it(self):
         seen = []
-        got = karafun_web.ensure_browser(lambda d, t: seen.append((d, t)), urlopen=chromium_server(data), allow_download=True)
-        self.assertTrue(got.is_file())
-        self.assertEqual(got.parent.parent.parent.parent.name, "r1744193")
-        self.assertEqual(seen[-1][0], len(data))
-        again = karafun_web.ensure_browser(urlopen=mock.Mock(side_effect=AssertionError("downloaded twice")))
-        self.assertEqual(again, got)
-        leftovers = [p.name for p in karafun_web.browser_root().iterdir() if p.name.startswith(".download")]
-        self.assertEqual(leftovers, [])
+        got = karafun_web.ensure_browser(seen.append, allow_download=True)
+        self.assertEqual(got, self.helper)
+        self.assertEqual(seen, ["Getting KaraFun player (Chromium, once): 25 of 100 MB", "Getting KaraFun player: unpacking"])
+        self.assertEqual(karafun_web.ensure_browser(), self.helper)
+        self.assertEqual(karafun_web.find_browser(), self.helper)
+        self.assertEqual(self.gets_run(), 1)
 
-    def test_a_revision_that_is_not_a_number_installs_nothing(self):
-        with self.assertRaises(RuntimeError):
-            karafun_web.ensure_browser(urlopen=chromium_server(chromium_zip(self.root), revision="../evil"), allow_download=True)
-        self.assertFalse((karafun_web.browser_root().parent / "evil").exists())
-
-    def test_a_short_download_installs_nothing(self):
-        data = chromium_zip(self.root)
-        with self.assertRaises(RuntimeError):
-            karafun_web.ensure_browser(urlopen=chromium_server(data, length=len(data) + 10), allow_download=True)
+    def test_a_failed_download_says_why_and_installs_nothing(self):
+        with mock.patch.dict(os.environ, {"FAKE_FAIL": "1"}):
+            with self.assertRaisesRegex(RuntimeError, "did not match its checksum"):
+                karafun_web.ensure_browser(allow_download=True)
         self.assertIsNone(karafun_web.find_browser())
 
-    def test_a_zip_without_chromium_installs_nothing(self):
-        with self.assertRaises(RuntimeError):
-            karafun_web.ensure_browser(urlopen=chromium_server(chromium_zip(self.root, with_app=False)), allow_download=True)
-        self.assertIsNone(karafun_web.find_browser())
+    def test_a_missing_display_program_is_said_plainly(self):
+        with mock.patch.dict(os.environ, {"SINGWS_KARAFUN_DISPLAY": str(self.root / "nope")}), mock.patch.object(karafun_web, "find_display_helper", return_value=None):
+            with self.assertRaisesRegex(RuntimeError, "not found"):
+                karafun_web.ensure_browser(allow_download=True)
 
-    def test_a_program_that_is_not_chromium_installs_nothing(self):
-        with self.assertRaises(RuntimeError):
-            karafun_web.ensure_browser(urlopen=chromium_server(chromium_zip(self.root, version_text="Google Chrome 1")), allow_download=True)
-        self.assertIsNone(karafun_web.find_browser())
-
-    def test_only_the_chromium_projects_host_and_https_are_used(self):
-        with mock.patch.object(karafun_web, "_snapshot_base", return_value="https://evil.example.com/x"):
-            with self.assertRaisesRegex(RuntimeError, "not the Chromium project"):
-                karafun_web.ensure_browser(urlopen=chromium_server(b"x"), allow_download=True)
-        with mock.patch.object(karafun_web, "_snapshot_base", return_value="http://commondatastorage.googleapis.com/x"):
-            with self.assertRaises(RuntimeError):
-                karafun_web.ensure_browser(urlopen=chromium_server(b"x"), allow_download=True)
-
-    def test_no_chrome_or_chrome_for_testing_code_is_left(self):
-        for gone in ("find_chrome", "downloaded_chrome", "_cft_binary", "bundled_browser"):
+    def test_no_chrome_or_old_helper_code_is_left(self):
+        for gone in ("find_chrome", "downloaded_chrome", "_download_browser", "_cft_binary", "bundled_browser", "find_helper", "browser_root"):
             self.assertFalse(hasattr(karafun_web, gone), gone)
+
+
+class OutputCommandTests(unittest.TestCase):
+    """`output(...)` once failed (a field named `name` collided with command()'s own argument, and the host swallowed the error)."""
+
+    def test_output_sends_the_device_name_as_a_json_line(self):
+        web = karafun_web.KaraFunWeb.__new__(karafun_web.KaraFunWeb)
+        sent = []
+        web.command = lambda name, **fields: sent.append((name, fields))
+        web.output("MacBook Pro Speakers (Built-in)")
+        web.output("")
+        self.assertEqual(sent, [("output", {"device": "MacBook Pro Speakers (Built-in)"}), ("output", {"device": ""})])
+
+    def test_it_really_goes_through_the_command_writer(self):
+        import io, json as _json
+        web = karafun_web.KaraFunWeb.__new__(karafun_web.KaraFunWeb)
+        web._write_lock = karafun_web.threading.Lock()
+        buf = io.BytesIO()
+        class P:
+            stdin = type("S", (), {"write": lambda self, b: buf.write(b), "flush": lambda self: None})()
+        web._proc = P()
+        web.output("Scarlett 2i2")
+        self.assertEqual(_json.loads(buf.getvalue()), {"cmd": "output", "device": "Scarlett 2i2"})
 
 
 class CommandTests(unittest.TestCase):
@@ -155,7 +156,7 @@ class ServiceTests(unittest.TestCase):
             holder["web"] = self.FakeWeb(**kw)
             return holder["web"]
         service = karafun_web.KaraFunWebService(lambda s, d: states.append((s, d)), profile_dir="/tmp/x", make_web=make_web,
-                                                find_browser=find or (lambda progress, **kw: Path("/x/chrome")), credentials=credentials)
+                                                find_browser=find or (lambda progress, **kw: Path("/x/display")), credentials=credentials)
         return service, states, holder
 
     def go(self, service):
@@ -166,14 +167,14 @@ class ServiceTests(unittest.TestCase):
         self.go(service)
         self.assertEqual([s for s, _ in states], ["preparing", "starting"])
         self.assertTrue(holder["web"].started)
-        self.assertEqual(holder["web"].kw["chrome_path"], Path("/x/chrome"))
+        self.assertEqual(holder["web"].kw["helper_path"], Path("/x/display"))
 
     def test_a_missing_chromium_asks_instead_of_downloading(self):
         def find(progress, allow_download=False, **kw):
             if not allow_download:
                 raise karafun_web.BrowserMissing("needs Chromium")
-            progress(50, 200)
-            return Path("/x/chrome")
+            progress("Downloading Chromium (25%)")
+            return Path("/x/display")
         service, states, holder = self.make(find)
         self.go(service)
         self.assertEqual(states[-1][0], "needs_browser")
@@ -281,6 +282,6 @@ class ServiceTests(unittest.TestCase):
     def test_the_players_messages_still_reach_the_host(self):
         got = []
         service = karafun_web.KaraFunWebService(lambda s, d: None, on_message=got.append, profile_dir="/tmp/x", make_web=lambda **kw: self.FakeWeb(**kw),
-                                                find_browser=lambda p, **kw: Path("/x/chrome"))
+                                                find_browser=lambda p, **kw: Path("/x/display"))
         service._message({"type": "log", "message": "hello"})
         self.assertEqual(got, [{"type": "log", "message": "hello"}])

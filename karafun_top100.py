@@ -66,9 +66,9 @@ def read_chart(chart_id: int = CHART_ID, *, make_web: Optional[Callable] = None,
             box["error"] = text
             done.set()
 
-    browser = (find_browser or karafun_web.ensure_browser)(lambda done_bytes, total: None)
-    profile = Path(profile_dir) if profile_dir else _home() / "Chrome-KaraFun-Top"
-    web = (make_web or karafun_web.KaraFunWeb)(profile, on_message=on_message, on_log=on_log, chrome_path=browser)
+    browser = (find_browser or karafun_web.ensure_browser)(lambda text: None)
+    profile = Path(profile_dir) if profile_dir else _home() / "KaraFun-Display-Top"
+    web = (make_web or karafun_web.KaraFunWeb)(profile, on_message=on_message, on_log=on_log, helper_path=browser)
     try:
         web.start()
         started = time.monotonic()

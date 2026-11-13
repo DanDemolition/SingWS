@@ -283,8 +283,14 @@
         sinkId = match.deviceId;
       }
       let applied = 0;
-      for (const el of document.querySelectorAll('audio,video')) { if (el.sinkId !== sinkId && el.setSinkId) { await el.setSinkId(sinkId); applied += 1; } }
-      for (const ctx of sinkContexts) { if (ctx.sinkId !== sinkId && ctx.setSinkId) { await ctx.setSinkId(sinkId); applied += 1; } }
+      // One that fails (a closed context, an element that went away) must not stop the others: each song makes new ones.
+      for (const el of document.querySelectorAll('audio,video')) {
+        try { if (el.sinkId !== sinkId && el.setSinkId) { await el.setSinkId(sinkId); applied += 1; } } catch (error) { /* tried again next time */ }
+      }
+      for (const ctx of [...sinkContexts]) {
+        if (ctx.state === 'closed') { sinkContexts.delete(ctx); continue; }
+        try { if (ctx.sinkId !== sinkId && ctx.setSinkId) { await ctx.setSinkId(sinkId); applied += 1; } } catch (error) { /* tried again next time */ }
+      }
       if (applied) post({ type: 'log', message: `audio output set to "${wantedOutput || 'system default'}" on ${applied} player(s)` });
     } catch (error) { post({ type: 'log', message: `audio output change failed: ${error && error.message || error}` }); }
   }

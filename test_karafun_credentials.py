@@ -93,8 +93,8 @@ class SourceGuards(unittest.TestCase):
     def test_the_password_is_never_in_settings_or_the_log(self):
         src = open("0.2.18.1.py", encoding="utf-8").read()
         self.assertNotIn('self.settings["karafun_web_password"', src)
-        helper = open("rust/crates/singws-karafun-web/src/main.rs", encoding="utf-8").read()
-        self.assertIn('"cmd": value.get("cmd")', helper)           # an unknown/malformed command is reported without its fields
+        helper = open("rust/crates/singws-karafun-display/src/main.rs", encoding="utf-8").read()
+        self.assertIn('"cmd": line.get("cmd")', helper)           # an unknown/malformed command is reported without its fields
         bridge = open("karafun_bridge.js", encoding="utf-8").read()
         login = bridge[bridge.index("window.singwsLogin"):][:900]
         self.assertNotIn("${email}", login)

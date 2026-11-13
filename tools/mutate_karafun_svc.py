@@ -22,11 +22,9 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 if not os.environ.get("SINGWS_HOME") or Path(os.environ["SINGWS_HOME"]).resolve() == (Path.home() / "SingWS").resolve():
     os.environ["SINGWS_HOME"] = tempfile.mkdtemp(prefix="kf_svc_mut_home_")
-import karafun_browser_parity as bp  # noqa: E402
 import karafun_credentials_parity as cp  # noqa: E402
 import karafun_match_parity as mp  # noqa: E402
 import karafun_top100_parity as tp  # noqa: E402
-import karafun_frames_parity as fp  # noqa: E402
 import karafun_host_parity as hp  # noqa: E402
 import karafun_service_parity as sp  # noqa: E402
 
@@ -49,16 +47,6 @@ NOTES: dict = {
     'matching.rs|same.sort_by_key(|&i| if words(list[i].title) == want_words { 0 } else|1->2': 'equivalent: only the order 0 before non-0 matters in the stable sort, not the second weight',
     'credentials.rs|if stored.iter().any(|&b| b < 0x20 || b >= 0x7f) {|>=->>': 'equivalent: a DEL byte (0x7f) is neither a hex digit nor whitespace, so the hex parse rejects it anyway',
     'credentials.rs|if i + 1 >= raw.len() || !raw[i].is_ascii_hexdigit() || !raw[i + 1].is|||->&&': 'equivalent: a non-hex digit in a pair is also rejected by from_str_radix(...).ok()?, so the explicit digit tests are redundant',
-    'browser.rs|names.sort_by(|a, b| b.0.as_bytes().cmp(a.0.as_bytes())); // UTF-8 byt|==->!=': 'equivalent: the mutated text is inside a trailing comment',
-    'browser.rs|names.sort_by(|a, b| b.0.as_bytes().cmp(a.0.as_bytes())); // UTF-8 byt|8->9': 'equivalent: the mutated text is inside a trailing comment',
-    'browser.rs|.map(|f| (f[0].as_str().unwrap_or("").to_string(), f[1].as_bool().unwr|false->true': 'equivalent: the driver always supplies a bool for is_dir/has_binary/has_complete; the default is for malformed input only',
-    'browser.rs|.map(|f| (f[0].as_str().unwrap_or("").to_string(), f[1].as_bool().unwr|false->true': 'equivalent: the driver always supplies a bool for is_dir/has_binary/has_complete; the default is for malformed input only',
-    'browser.rs|.map(|f| (f[0].as_str().unwrap_or("").to_string(), f[1].as_bool().unwr|false->true': 'equivalent: the driver always supplies a bool for is_dir/has_binary/has_complete; the default is for malformed input only',
-    'browser.rs|let bytes = dl.get("bytes").and_then(|b| b.as_i64()).unwrap_or(0);|0->1': 'equivalent: the request always carries bytes when a download happens',
-    'browser.rs|let dit = req.get("ditto").cloned().unwrap_or(json!({"rc": 0, "stderr"|0->1': 'equivalent: the request always carries a ditto answer when the download reaches it',
-    'browser.rs|if dit.get("rc").and_then(|r| r.as_i64()).unwrap_or(0) != 0 {|0->1': 'equivalent: the request always carries a ditto rc',
-    'browser.rs|if !req.get("binary_present").and_then(|b| b.as_bool()).unwrap_or(true|true->false': 'equivalent: the request always carries binary_present',
-    'browser.rs|if req.get("verify").and_then(|v| v.as_bool()).unwrap_or(true) {|true->false': 'equivalent: the request always carries verify',
     'host.rs|if position > 0.0 {|>->>=': "equivalent: last_position Some(0.0) and None both resume at 0.0 (recover reads `last or 0.0`)",
     'lib.rs|Value::Number(n) => n.as_f64().map(|f| f != 0.0).unwrap_or(true),|true->false': "equivalent: serde_json's as_f64 is always Some for a JSON number, so the default is never used",
     'lib.rs|reload_at: 0.0,|0.0->1.0': 'equivalent: reload_at is written (with reload_after_login) before it is ever read',
@@ -110,15 +98,6 @@ def generate(name, text):
     return out
 
 
-def browser_corpus(n):
-    rng = random.Random(303)
-    out = []
-    for _ in range(n):
-        sc = bp.gen(rng)
-        out.append((sc, bp.python_result(sc)))
-    return out
-
-
 def corpora(n_svc, n_host):
     import random as r
     svc = []
@@ -153,15 +132,6 @@ def top_corpus(n):
     for _ in range(n):
         req, kind = tp.gen(rng)
         out.append((dict(req, kind="top100"), tp.python_answer(req, kind)))
-    return out
-
-
-def frames_corpus(n):
-    rng = random.Random(606)
-    out = []
-    for _ in range(n):
-        ev = fp.gen(rng)
-        out.append(({"kind": "frames", "events": fp.fix_decode(ev)}, fp.python_trace(ev)))
     return out
 
 
@@ -226,7 +196,6 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--svc", type=int, default=700)
     ap.add_argument("--host", type=int, default=1200)
-    ap.add_argument("--browser", type=int, default=1500)
     ap.add_argument("--only")
     ap.add_argument("--file", default="")
     a = ap.parse_args()
@@ -236,13 +205,11 @@ def main():
     (WORK / "crate" / "Cargo.toml").write_text((CRATE / "Cargo.toml").read_text() + "\n[workspace]\n")
     shutil.copy(ROOT / "rust/Cargo.lock", WORK / "crate" / "Cargo.lock")
     svc, host = corpora(a.svc, a.host)
-    brw = browser_corpus(a.browser) if a.file != "credentials.rs" else []
+    brw = []   # the browser model is gone (Chromium is fetched by the display program now)
     cred = cp.oracle_cases() if a.file in ("", "credentials.rs") else []
     mtc = match_corpus(6000) if a.file in ("", "matching.rs") else []
     if a.file in ("", "top100.rs"):
         mtc = mtc + top_corpus(4000)
-    if a.file in ("", "frames.rs"):
-        mtc = mtc + frames_corpus(1500)
     print(f"corpus: {len(svc)} service + {len(host)} host scenarios (oracle = the real Python)", flush=True)
     cli = os.path.join(TARGET, "release", "singws-karafun-svc")
 
@@ -251,9 +218,9 @@ def main():
 
     assert build() and rust_all(cli, svc, host, brw, cred, mtc), "the unmutated crate must equal the Python first"
     only = {int(x) for x in a.only.split(",")} if a.only else None
-    ORIG = {f: (CRATE / "src" / f).read_text() for f in ("lib.rs", "host.rs", "browser.rs", "credentials.rs", "matching.rs", "top100.rs", "frames.rs")}  # snapshot: later edits of the repo must not shift the line numbers
+    ORIG = {f: (CRATE / "src" / f).read_text() for f in ("lib.rs", "host.rs", "credentials.rs", "matching.rs", "top100.rs")}  # snapshot: later edits of the repo must not shift the line numbers
     muts = []
-    for fname in ("lib.rs", "host.rs", "browser.rs", "credentials.rs", "matching.rs", "top100.rs", "frames.rs"):
+    for fname in ("lib.rs", "host.rs", "credentials.rs", "matching.rs", "top100.rs"):
         if a.file and a.file != fname:
             continue
         muts += generate(fname, ORIG[fname])

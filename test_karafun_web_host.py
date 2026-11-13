@@ -109,6 +109,63 @@ class HostTests(unittest.TestCase):
         self.assertIn(("play", (3241559, "NOFX Linoleum", ["NOFX Linoleum", "Linoleum NOFX", "Linoleum", "NOFX"], "NOFX", "Linoleum")), service.web.calls)
         self.assertEqual(app.statuses[0], ("launching", "Starting KaraFun..."))
 
+    def _picture_host(self):
+        """A host whose real _start_frames/_stop_frames/_place_picture run, over a fake audience window."""
+        app, entry, service, host = make()
+        host.service = service
+        host._start_frames = KaraFunWebHost._start_frames.__get__(host)
+        host._stop_frames = KaraFunWebHost._stop_frames.__get__(host)
+        class Area:
+            def width(self): return 1920
+            def height(self): return 1080
+            def mapToGlobal(self, point): return type("P", (), {"x": lambda s: 1440, "y": lambda s: 0})()
+        class Screen:
+            def refreshRate(self): return 120.0
+        app.video_window = type("VW", (), {"video_area": Area(), "idle": True, "screen": lambda s: Screen(), "winId": lambda s: 0})()
+        app._set_mpv_hosts_visible = lambda on: None
+        class FakeTimer:
+            def __init__(self, parent=None):
+                self.timeout = type("Sig", (), {"connect": lambda s, fn: None})()
+            def setInterval(self, ms): self.ms = ms
+            def start(self): self.running = True
+            def stop(self): self.running = False
+        patcher = mock.patch("PyQt6.QtCore.QTimer", FakeTimer)
+        patcher.start(); self.addCleanup(patcher.stop)
+        return app, service, host
+
+    def test_starting_the_picture_asks_for_720p_places_the_window_and_sets_the_refresh(self):
+        app, service, host = self._picture_host()
+        with mock.patch.object(host_module, "_ns_window_number", return_value=77):
+            host._start_frames()
+        calls = {name: args for name, args in service.web.calls}
+        self.assertEqual(calls["start_screencast"], (1280, 720))
+        self.assertEqual(calls["window"], (True, 1440, 0, 1920, 1080, 0, 77))
+        self.assertEqual(calls["refresh"], (120,))
+        self.assertFalse(app.video_window.idle)
+        host._picture_timer.stop()
+
+    def test_the_picture_window_is_not_resent_unless_the_audience_window_moved(self):
+        app, service, host = self._picture_host()
+        with mock.patch.object(host_module, "_ns_window_number", return_value=77):
+            host._start_frames()
+            before = len([c for c in service.web.calls if c[0] == "window"])
+            host._place_picture()
+            self.assertEqual(len([c for c in service.web.calls if c[0] == "window"]), before)
+            host._picture_placed = None
+            host._place_picture()
+            self.assertEqual(len([c for c in service.web.calls if c[0] == "window"]), before + 1)
+        host._picture_timer.stop()
+
+    def test_stopping_hides_the_picture_window_and_restores_the_slideshow(self):
+        app, service, host = self._picture_host()
+        with mock.patch.object(host_module, "_ns_window_number", return_value=77):
+            host._start_frames()
+        host._stop_frames()
+        names = [name for name, _ in service.web.calls]
+        self.assertIn("stop_screencast", names)
+        self.assertEqual([a for n, a in service.web.calls if n == "window"][-1][0], False)
+        self.assertTrue(app.video_window.idle)
+
     def test_the_players_sound_follows_singwss_own_output_not_the_system_default(self):
         app, entry, service, host = make()
         app._safe_local_audio_output_name = lambda: "MacBook Pro Speakers"

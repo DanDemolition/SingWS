@@ -64,10 +64,15 @@ if settingsmig_bin.is_file() and "arm64" in subprocess.getoutput(f"/usr/bin/lipo
 songend_bin = project_root / "native" / "singws_songend" / "arm64" / "singws-songend"
 if songend_bin.is_file() and "arm64" in subprocess.getoutput(f"/usr/bin/lipo -archs '{songend_bin}'"):
     binaries.append((str(songend_bin), "."))
-# Rust KaraFun web player driver (rust/build_karafun_web.sh). Required for KaraFun songs: they all play in the web player.
-karafun_web_bin = project_root / "native" / "singws_karafun_web" / "arm64" / "singws-karafun-web"
-if karafun_web_bin.is_file() and "arm64" in subprocess.getoutput(f"/usr/bin/lipo -archs '{karafun_web_bin}'"):
-    binaries.append((str(karafun_web_bin), "."))
+# Rust KaraFun display program (rust/build_karafun_display.sh): KaraFun's web player in Chromium (CEF), drawn on the graphics chip. Required for KaraFun songs.
+# Chromium's graphics libraries sit beside it (it looks for them there); Chromium's framework itself is fetched once, after the user agrees.
+karafun_display_dir = project_root / "native" / "singws_karafun_display" / "arm64"
+karafun_display_bin = karafun_display_dir / "singws-karafun-display"
+if karafun_display_bin.is_file() and "arm64" in subprocess.getoutput(f"/usr/bin/lipo -archs '{karafun_display_bin}'"):
+    binaries.append((str(karafun_display_bin), "."))
+    for _kf_lib in ("libEGL.dylib", "libGLESv2.dylib", "libvk_swiftshader.dylib"):
+        binaries.append((str(karafun_display_dir / _kf_lib), "."))
+    extra_datas.append((str(karafun_display_dir / "vk_swiftshader_icd.json"), "."))
 
 # Rust update rules (rust/build_update.sh). Optional: without it update_shadow is silently skipped.
 update_bin = project_root / "native" / "singws_update" / "arm64" / "singws-update"

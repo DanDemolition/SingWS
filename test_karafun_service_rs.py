@@ -58,9 +58,9 @@ class ServiceParity(unittest.TestCase):
         self.assertTrue(p.TEST.startswith("SingWS-TEST-"))
         self.assertNotEqual(p.TEST, p.REAL)
 
-    def test_top100_and_frames_parity_small_corpus(self):
+    def test_top100_parity_small_corpus(self):
         os.environ.setdefault("SINGWS_HOME", tempfile.mkdtemp(prefix="kf_svc_test_home_"))
-        for tool in ("karafun_top100_parity.py", "karafun_frames_parity.py"):
+        for tool in ("karafun_top100_parity.py",):
             r = subprocess.run([sys.executable, str(ROOT / "tools" / tool), "--cases", "300", "--seed", "3"], capture_output=True, text=True, env={**os.environ}, timeout=300)
             if "not built" in (r.stdout + r.stderr):
                 self.skipTest("singws-karafun-svc not built")

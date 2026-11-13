@@ -1,0 +1,18 @@
+[package]
+name = "singws-karafun-display"
+version = "0.1.0"
+edition = "2021"
+description = "KaraFun's web player drawn straight on the graphics chip: Chromium (CEF) runs inside this program with no window of its own, each frame arrives as an IOSurface and is shown in a native window with no copy and no JPEG. Same JSON-line commands and messages as singws-karafun-web. Based on the approach of SingWS 2's karafun_cef.rs."
+publish = false
+
+[[bin]]
+name = "singws-karafun-display"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = "1"
+cef = { version = "=150.2.1", default-features = false }
+ureq = "3"
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "objc2-core-foundation", "NSApplication", "NSRunningApplication", "NSResponder", "NSView", "NSWindow", "NSGraphics", "NSScreen", "NSColor", "NSEvent", "block2"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSString", "NSGeometry", "NSData"] }

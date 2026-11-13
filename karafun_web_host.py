@@ -28,8 +28,8 @@ MAX_RECOVERIES = 3
 SAT_AT_END_S = 2.5
 END_MARGIN_S = 1.5
 SEEK_END_GUARD_S = 8.0
-KARAFUN_CAPTURE_WIDTH, KARAFUN_CAPTURE_HEIGHT, KARAFUN_CAPTURE_QUALITY = 1280, 720, 85
-FRAME_INTERVAL_MS = 33   # ~30 fps: less CPU on the Intel Mac (was 16 ms)
+KARAFUN_PAGE_WIDTH, KARAFUN_PAGE_HEIGHT = 1280, 720   # the page is drawn at 720p (the display program never goes above it); the window scales it up to the TV
+PICTURE_REPLACE_MS = 500    # how often the picture window is put back over the audience window if that moved or was resized
 
 
 def song_id_from_entry(entry, song_path: str = "") -> Optional[int]:
@@ -54,9 +54,8 @@ class KaraFunWebHost:
         self.state = ("idle", "")
         self.asked: Optional[dict] = None
         self.status: dict = {}
-        self._frame_lock = threading.Lock()
-        self._latest_frame: Optional[bytes] = None
-        self._frame_timer = None
+        self._picture_timer = None
+        self._picture_placed = None
         self._frames_shown = False
         self._sat_at_end_since: Optional[float] = None
         self._song_open = False          # a song was handed to the web player and has not been finished by the app yet
@@ -81,7 +80,7 @@ class KaraFunWebHost:
             else:
                 import karafun_web
                 factory = karafun_web.KaraFunWebService
-            self.service = factory(self._service_state, on_message=self._on_message, on_frame=self._on_frame, on_log=self._log,
+            self.service = factory(self._service_state, on_message=self._on_message, on_log=self._log,
                                    credentials=self._saved_login)
         if self.service.state in ("idle", "error", "needs_browser"):
             self.service.start()
@@ -499,16 +498,6 @@ class KaraFunWebHost:
         return True
 
     # ---- the picture
-    def _audience_size(self):
-        vw = getattr(self.app, "video_window", None)
-        try:
-            size = vw.video_area.size() if vw is not None else None
-            if size is not None and size.width() > 100 and size.height() > 100:
-                return min(int(size.width()), 1920), min(int(size.height()), 1080)
-        except Exception:
-            pass
-        return 1280, 720
-
     def _route_sound(self) -> None:
         """Play the player's sound on the output SingWS itself uses, not whatever macOS made the default: an AirPlay display flips the system default to
         the TV, and SingWS already resolves its output without following it (a pinned device, else the headphone jack / built-in speakers)."""
@@ -525,67 +514,93 @@ class KaraFunWebHost:
         except Exception:
             pass
 
+    def _audience_rect(self):
+        """The audience picture's place in global points from the top left of the main screen (Qt's own), and the number of the audience window so the
+        picture window can sit directly over it (the ticker and QR windows above that stay over the picture). None without an audience window."""
+        vw = getattr(self.app, "video_window", None)
+        area = getattr(vw, "video_area", None) if vw is not None else None
+        if area is None:
+            return None
+        from PyQt6.QtCore import QPoint
+        top_left = area.mapToGlobal(QPoint(0, 0))
+        return (top_left.x(), top_left.y(), area.width(), area.height()), _ns_window_number(vw)
+
+    def _place_picture(self, force: bool = False) -> None:
+        try:
+            placed = self._audience_rect()
+            if placed is None or self.service is None or self.service.web is None:
+                return
+            if not force and placed == self._picture_placed:
+                return
+            (x, y, w, h), above = placed
+            self._picture_placed = placed
+            self.service.web.window(True, x, y, w, h, 0, above)
+        except Exception as error:
+            self._log(f"could not place the picture: {error!r}")
+
     def _start_frames(self) -> None:
         if self.service is None or self.service.web is None:
             return
         from PyQt6.QtCore import QTimer
         app = self.app
         try:
-            app._set_mpv_hosts_visible(False)   # a retained mpv view can cover Qt's painted audience and preview
+            app._set_mpv_hosts_visible(False)   # a retained mpv view can cover the picture
         except Exception:
             pass
-        # Captured at 720p: 1080p at JPEG 92 made the KaraFun picture slow and froze the whole screen at song start/end (2026-11-12 show),
-        # and could slow the Mac for a minute. Qt scales the 720p picture up to the audience window.
-        self.service.web.audience(True)
+        web = self.service.web
+        web.audience(True)
         self._route_sound()
-        self.service.web.start_screencast(KARAFUN_CAPTURE_WIDTH, KARAFUN_CAPTURE_HEIGHT, KARAFUN_CAPTURE_QUALITY)
-        if self._frame_timer is None:
-            self._frame_timer = QTimer(app)
-            self._frame_timer.setInterval(FRAME_INTERVAL_MS)
-            self._frame_timer.timeout.connect(self._paint_latest)
-        self._frame_timer.start()
+        web.start_screencast(KARAFUN_PAGE_WIDTH, KARAFUN_PAGE_HEIGHT)
+        try:
+            vw = getattr(app, "video_window", None)
+            rate = int(round(float(vw.screen().refreshRate()))) if vw is not None and vw.screen() is not None else 0
+            if rate > 0:
+                web.refresh(rate)               # the page is drawn at the audience screen's own pace
+            if vw is not None:
+                vw.idle = False                 # the picture window covers it: no slideshow drawing underneath
+        except Exception:
+            pass
+        self._place_picture(force=True)
+        self._frames_shown = True
+        if self._picture_timer is None:
+            self._picture_timer = QTimer(app)
+            self._picture_timer.setInterval(PICTURE_REPLACE_MS)
+            self._picture_timer.timeout.connect(self._place_picture)
+        self._picture_timer.start()
 
     def _stop_frames(self) -> None:
-        timer = self._frame_timer
+        timer = self._picture_timer
         if timer is not None:
             timer.stop()
+        self._picture_placed = None
         try:
             if self.service is not None and self.service.web is not None:
                 self.service.web.stop_screencast()
+                self.service.web.window(False)
         except Exception:
             pass
-        with self._frame_lock:
-            self._latest_frame = None
         if self._frames_shown:
             self._frames_shown = False
-            from PyQt6.QtGui import QImage
             vw = getattr(self.app, "video_window", None)
             if vw is not None:
-                vw.video_area.set_karaoke_frame(QImage())
                 vw.idle = True
-            preview = getattr(self.app, "preview_window", None)
-            if preview is not None:
-                preview.video_area.set_karaoke_frame(QImage())
 
-    def _on_frame(self, jpeg: bytes) -> None:
-        with self._frame_lock:
-            self._latest_frame = jpeg           # only the newest is kept: a slow paint never queues old pictures
 
-    def _paint_latest(self) -> None:
-        with self._frame_lock:
-            data, self._latest_frame = self._latest_frame, None
-        if not data:
-            return
-        from PyQt6.QtGui import QImage
-        frame = QImage.fromData(data, "JPEG")
-        if frame.isNull():
-            return
-        vw = getattr(self.app, "video_window", None)
-        preview = getattr(self.app, "preview_window", None)
-        if vw is None or preview is None:
-            return
-        vw.idle = False
-        vw.video_area.set_karaoke_frame(frame, stretch_fill=True)
-        preview.force_black = False
-        preview.video_area.set_karaoke_frame(frame)
-        self._frames_shown = True
+def _ns_window_number(widget) -> int:
+    """The macOS window number of a Qt window (0 if it cannot be found): [[view window] windowNumber], so the picture window can be ordered directly over it."""
+    try:
+        import ctypes
+        import ctypes.util
+        objc = ctypes.cdll.LoadLibrary(ctypes.util.find_library("objc"))
+        objc.sel_registerName.restype = ctypes.c_void_p
+        objc.sel_registerName.argtypes = [ctypes.c_char_p]
+        send = objc.objc_msgSend
+        send.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        send.restype = ctypes.c_void_p
+        window = send(int(widget.winId()), objc.sel_registerName(b"window"))
+        if not window:
+            return 0
+        send.restype = ctypes.c_long
+        return int(send(window, objc.sel_registerName(b"windowNumber")))
+    except Exception:
+        return 0

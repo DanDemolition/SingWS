@@ -1,19 +1,19 @@
-"""Python client of the singws-karafun-web helper: KaraFun through its web player (karafun.com/web) in a windowless Google Chrome.
+"""Python client of the singws-karafun-display program: KaraFun through its web player (karafun.com/web), run by Chromium (CEF) inside that program.
 
-The helper (rust/crates/singws-karafun-web) owns Chrome and the page (DevTools pipe, the page script karafun_bridge.js); this module only starts
-it, turns its JSON lines into callbacks, and sends it JSON-line commands. Native code owns the player; Python owns the show.
+The program (rust/crates/singws-karafun-display) owns Chromium and the page (the page script karafun_bridge.js) and draws the picture straight on the
+graphics chip in a native window of its own (no JPEG, no copy); this module only starts it, turns its JSON lines into callbacks, and sends it JSON-line
+commands, including `window` (where the picture goes) and `output` (which sound device the player uses). Native code owns the player; Python owns the show.
 
 Callbacks (they run on this module's reader thread): `on_message(dict)` for what the page says (`ready`, `status` twice a second with signedIn,
 plan, playing, state, position, duration, song, queue; `log`; `error`; `fullscreen`; `raise`; and `helper` lines from the program itself),
-`on_frame(bytes)` for each picture frame (a JPEG) while the screencast is on, `on_log(str)` for this module's own lines.
+`on_log(str)` for this module's own lines.
 
-Google Chrome must be installed: Apple's web view cannot run KaraFun's player (its song database needs a cross-origin isolated page, which
-KaraFun asks for with a header WebKit does not support). KaraFun has not approved driving its site and can change it at any time.
-Nothing in SingWS uses this yet; tools/karafun_web_probe.py runs it by hand.
+Chromium's framework is fetched once (about 125 MB, `singws-karafun-display get`) after the user says yes; Apple's web view cannot run KaraFun's
+player (its song database needs a cross-origin isolated page, which KaraFun asks for with a header WebKit does not support). KaraFun has not
+approved driving its site and can change it at any time. tools/karafun_web_probe.py runs it by hand.
 """
 from __future__ import annotations
 
-import base64
 import json
 import os
 import re
@@ -24,168 +24,93 @@ import time
 from pathlib import Path
 from typing import Callable, Optional
 
-_HELPER_NAME = "singws-karafun-web"
+# ---- the player's program: singws-karafun-display runs KaraFun's web player in Chromium (CEF) inside itself and draws it on the graphics chip.
+# Chromium's framework (about 125 MB) is fetched once by that program (`get`), only after the user agreed; never Google Chrome.
+_DISPLAY_NAME = "singws-karafun-display"
 
 
-def find_helper() -> Optional[Path]:
-    """The helper binary: SINGWS_KARAFUN_WEB, the app bundle's Frameworks, native/singws_karafun_web/<arch>, or a cargo build."""
+class BrowserMissing(RuntimeError):
+    """Chromium's framework is not on this Mac yet; the caller asks the user before calling ensure_browser(allow_download=True)."""
+
+
+def find_display_helper() -> Optional[Path]:
+    """The display program: SINGWS_KARAFUN_DISPLAY, the app bundle's Frameworks, native/singws_karafun_display/<arch>, or a cargo build."""
     import platform
     arch = "arm64" if platform.machine() in ("arm64", "aarch64") else "x86_64"
     here = Path(__file__).resolve().parent
-    candidates = [os.environ.get("SINGWS_KARAFUN_WEB", "")]
-    meipass = getattr(sys, "_MEIPASS", None)      # the frozen app: PyInstaller puts the helper in its Frameworks/bundle folder
+    candidates = [os.environ.get("SINGWS_KARAFUN_DISPLAY", "")]
+    meipass = getattr(sys, "_MEIPASS", None)
     if meipass:
-        candidates += [str(Path(meipass) / _HELPER_NAME), str(Path(meipass) / "Frameworks" / _HELPER_NAME)]
-    candidates += [str(here / "Frameworks" / _HELPER_NAME), str(here.parent / "Frameworks" / _HELPER_NAME),
-                   str(here / "native" / "singws_karafun_web" / arch / _HELPER_NAME)]
-    candidates += [str(Path.home() / ".cache" / d / "release" / _HELPER_NAME) for d in ("singws-rust-target-kfweb", "singws-rust-target")]
+        candidates += [str(Path(meipass) / _DISPLAY_NAME), str(Path(meipass) / "Frameworks" / _DISPLAY_NAME)]
+    candidates += [str(here / "Frameworks" / _DISPLAY_NAME), str(here.parent / "Frameworks" / _DISPLAY_NAME),
+                   str(here / "native" / "singws_karafun_display" / arch / _DISPLAY_NAME)]
+    candidates += [str(Path.home() / ".cache" / d / "release" / _DISPLAY_NAME) for d in ("singws-rust-target-kfdisplay", "singws-rust-target")]
+    candidates += [str(here / "rust" / "target" / kind / _DISPLAY_NAME) for kind in ("release", "debug")]
     for c in candidates:
         if c and Path(c).is_file() and os.access(c, os.X_OK):
             return Path(c)
     return None
 
 
-# ---- the browser: Chromium, downloaded into ~/SingWS only after the user says yes (never Google Chrome, never Chrome for Testing)
-# Chromium builds are published by the Chromium project on this host only.
-_CHROMIUM_HOST = "commondatastorage.googleapis.com"
-
-
-class BrowserMissing(RuntimeError):
-    """Chromium is not on this Mac yet; the caller asks the user before calling ensure_browser(allow_download=True)."""
-
-
-def _snapshot_base() -> str:
-    import platform
-    bucket = "Mac_Arm" if platform.machine() in ("arm64", "aarch64") else "Mac"
-    return f"https://{_CHROMIUM_HOST}/chromium-browser-snapshots/{bucket}"
-
-
-def browser_root() -> Path:
-    """Where the downloaded Chromium lives (~/SingWS/Chromium, or under SINGWS_HOME)."""
-    home = os.environ.get("SINGWS_HOME")
-    return (Path(home) if home else Path.home() / "SingWS") / "Chromium"
-
-
-def _chromium_binary(folder: Path) -> Path:
-    return folder / "Chromium.app" / "Contents" / "MacOS" / "Chromium"
+def display_installed(helper) -> bool:
+    """Whether Chromium's framework is here (the program says: exit 0 yes, 3 no)."""
+    try:
+        return subprocess.run([str(helper), "installed"], capture_output=True, timeout=30).returncode == 0
+    except Exception:
+        return False
 
 
 def find_browser() -> Optional[Path]:
-    """The Chromium already on this Mac: the newest one SingWS downloaded, else an installed /Applications/Chromium.app. None if there is none."""
-    root = browser_root()
-    if root.is_dir():
-        for folder in sorted((d for d in root.iterdir() if d.is_dir() and not d.name.startswith(".")), reverse=True):
-            binary = _chromium_binary(folder)
-            if binary.is_file() and (folder / ".complete").is_file():
-                return binary
-    app = Path("Chromium.app/Contents/MacOS/Chromium")
-    for base in _installed_bases():
-        if (base / app).is_file():
-            return base / app
-    return None
+    """The display program, when it and Chromium's framework are both here; None otherwise."""
+    helper = find_display_helper()
+    return helper if helper is not None and display_installed(helper) else None
 
 
-def _installed_bases() -> list:
-    return [Path("/Applications"), Path.home() / "Applications"]
-
-
-def _default_open(url: str, timeout: float = 30):
-    """urlopen with the same root certificates the rest of SingWS uses (certifi)."""
-    import ssl
-    import urllib.request
+def _get_framework(helper, progress: Callable[[str], None]) -> None:
+    """Run `helper get`: it downloads Chromium's framework (checked against its published checksum) and says how it is going."""
+    proc = subprocess.Popen([str(helper), "get"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+    failure = "the download did not finish"
     try:
-        import certifi
-        context = ssl.create_default_context(cafile=certifi.where())
-    except Exception:
-        context = ssl.create_default_context()
-    return urllib.request.urlopen(url, timeout=timeout, context=context)
+        for raw in proc.stdout:
+            try:
+                message = json.loads(raw)
+            except ValueError:
+                continue
+            if message.get("type") == "progress":
+                progress(str(message.get("text") or ""))
+            elif message.get("type") == "failed":
+                failure = str(message.get("error") or failure)
+    finally:
+        code = proc.wait()
+    if code != 0:
+        raise RuntimeError(failure)
 
 
-def ensure_browser(progress: Callable[[int, int], None] = lambda done, total: None, *, urlopen=None, allow_download: bool = False) -> Path:
-    """The browser KaraFun's player runs in. An existing Chromium is used as is. Without one, nothing is downloaded unless `allow_download` (the user said yes):
-    BrowserMissing is raised instead so the caller can ask. `progress(bytes_done, bytes_total)` is called while it downloads.
-    Raises RuntimeError (nothing half-installed is left behind) when the download fails."""
-    have = find_browser()
-    if have is not None:
-        return have
+def ensure_browser(progress: Callable[[str], None] = lambda text: None, *, allow_download: bool = False) -> Path:
+    """The program KaraFun's player runs in. Chromium's framework already here: used as is. Without it nothing is downloaded unless `allow_download` (the
+    user said yes): BrowserMissing is raised instead so the caller can ask. Raises RuntimeError with a plain reason otherwise."""
+    helper = find_display_helper()
+    if helper is None:
+        raise RuntimeError("SingWS's KaraFun display program was not found (reinstall SingWS from the installer)")
+    if display_installed(helper):
+        return helper
     if not allow_download:
         raise BrowserMissing("KaraFun's player needs Chromium, which is not on this Mac yet")
     try:
-        return _download_browser(progress, urlopen)
+        _get_framework(helper, progress)
     except RuntimeError as error:
         raise RuntimeError(f"Chromium could not be downloaded (internet needed once): {error}") from error
-
-
-def _download_browser(progress, urlopen) -> Path:
-    import re
-    import shutil
-    import tempfile
-    opener = urlopen or _default_open
-    base = _snapshot_base()
-    try:
-        with opener(base + "/LAST_CHANGE", timeout=30) as response:
-            revision = response.read().decode("utf-8").strip()
-    except Exception as error:
-        raise RuntimeError(f"could not find the newest Chromium: {error}") from error
-    if not re.fullmatch(r"[0-9]{1,12}", revision):      # the revision names a folder under the browser root: only digits may
-        raise RuntimeError("the Chromium revision is not a plain number")
-    url = f"{base}/{revision}/chrome-mac.zip"
-    host = url.split("/")[2] if url.startswith("https://") else ""
-    if host != _CHROMIUM_HOST:
-        raise RuntimeError(f"the Chromium download address is not the Chromium project's ({host or url[:40]})")
-    root = browser_root()
-    root.mkdir(parents=True, exist_ok=True)
-    work = Path(tempfile.mkdtemp(prefix=".download-", dir=root))
-    try:
-        archive = work / "chromium.zip"
-        try:
-            with opener(url, timeout=60) as response:
-                total = int(response.headers.get("Content-Length") or 0)
-                done = 0
-                with open(archive, "wb") as out:
-                    while True:
-                        block = response.read(1024 * 1024)
-                        if not block:
-                            break
-                        out.write(block)
-                        done += len(block)
-                        progress(done, total)
-        except Exception as error:
-            raise RuntimeError(f"the download failed: {error}") from error
-        if total and done != total:
-            raise RuntimeError(f"the download was cut short ({done} of {total} bytes)")
-        unpacked = work / "unpacked"
-        result = subprocess.run(["/usr/bin/ditto", "-x", "-k", str(archive), str(unpacked)], capture_output=True, text=True, timeout=300)
-        if result.returncode != 0:
-            raise RuntimeError("Chromium could not be unpacked: " + (result.stderr or "").strip()[:200])
-        found = next(unpacked.rglob("Chromium.app"), None)
-        if found is None or not _chromium_binary(found.parent).is_file():
-            raise RuntimeError("the download has no Chromium in it")
-        try:
-            said = subprocess.run([str(_chromium_binary(found.parent)), "--version"], capture_output=True, text=True, timeout=60).stdout
-        except Exception as error:
-            raise RuntimeError(f"the downloaded Chromium would not run: {error}") from error
-        if "Chromium" not in said:
-            raise RuntimeError("the download is not Chromium: " + said.strip()[:120])
-        final = root / f"r{revision}"
-        if final.exists() or final.is_symlink():
-            shutil.rmtree(final, ignore_errors=True) if final.is_dir() and not final.is_symlink() else final.unlink()
-        final.mkdir()
-        found.rename(final / "Chromium.app")
-        (final / ".complete").write_text(said.strip())
-        return _chromium_binary(final)
-    finally:
-        shutil.rmtree(work, ignore_errors=True)
+    if not display_installed(helper):
+        raise RuntimeError("Chromium could not be set up after the download")
+    return helper
 
 
 class KaraFunWeb:
     def __init__(self, profile_dir=None, *, on_message: Callable[[dict], None] = lambda m: None,
-                 on_frame: Callable[[bytes], None] = lambda b: None, on_log: Callable[[str], None] = lambda s: None,
-                 helper_path=None, chrome_path=None):
+                 on_log: Callable[[str], None] = lambda s: None, helper_path=None):
         self.profile_dir = Path(profile_dir) if profile_dir else None
-        self.on_message, self.on_frame, self.on_log = on_message, on_frame, on_log
-        self.helper_path = Path(helper_path) if helper_path else find_helper()
-        self.chrome_path = Path(chrome_path) if chrome_path else None
+        self.on_message, self.on_log = on_message, on_log
+        self.helper_path = Path(helper_path) if helper_path else find_display_helper()
         self._proc: Optional[subprocess.Popen] = None
         self._write_lock = threading.Lock()
         self._reader: Optional[threading.Thread] = None
@@ -195,12 +120,10 @@ class KaraFunWeb:
         if self._proc is not None:
             return
         if self.helper_path is None:
-            raise RuntimeError("the singws-karafun-web helper was not found (build it: cargo build --release -p singws-karafun-web)")
+            raise RuntimeError("the singws-karafun-display program was not found (build it: cargo build --release -p singws-karafun-display)")
         args = [str(self.helper_path)]
         if self.profile_dir is not None:
             args += ["--profile", str(self.profile_dir)]
-        if self.chrome_path is not None:
-            args += ["--chrome", str(self.chrome_path)]
         self._proc = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
         self.running = True
         self._reader = threading.Thread(target=self._read, name="karafun-web-reader", daemon=True)
@@ -237,10 +160,7 @@ class KaraFunWeb:
                 if not isinstance(message, dict):
                     continue
                 try:
-                    if message.get("type") == "frame":
-                        self.on_frame(base64.b64decode(message.get("jpeg") or ""))
-                    else:
-                        self.on_message(message)
+                    self.on_message(message)
                 except Exception as error:  # a callback's fault must not end the reader
                     self.on_log(f"callback error: {error!r}")
         finally:
@@ -289,12 +209,20 @@ class KaraFunWeb:
     def login(self, email: str, password: str) -> None: self.command("login", email=str(email), password=str(password))
     def sign_out(self) -> None: self.command("signout")
     def audience(self, on: bool = True) -> None: self.command("audience", on=bool(on))
-    def output(self, name: str = "") -> None: self.command("output", name=str(name or ""))   # route the player's sound to this output device ('' = system default)
+    def output(self, name: str = "") -> None: self.command("output", device=str(name or ""))   # route the player's sound to this output device ('' = system default)
     def reload(self) -> None: self.command("reload")
 
     def start_screencast(self, width: int, height: int, quality: int = 80) -> None:
-        """Size the page like the audience picture and stream it as JPEG frames to `on_frame`."""
-        self.command("screencast", on=True, width=int(width), height=int(height), quality=int(quality))
+        """Size the page (the program keeps it at or under 720p) and start drawing it in its picture window. `quality` is unused: there is no JPEG."""
+        self.command("screencast", on=True, width=int(width), height=int(height))
+
+    def window(self, on: bool = True, x: float = 0, y: float = 0, w: float = 1280, h: float = 720, level: int = 0, above: int = 0) -> None:
+        """Show / place / hide the picture window (x, y from the top left of the main screen; `above` = window number to sit directly over)."""
+        self.command("window", on=bool(on), x=float(x), y=float(y), w=float(w), h=float(h), level=int(level), above=int(above))
+
+    def refresh(self, rate: int) -> None: self.command("refresh", rate=int(rate))
+
+    def stats(self) -> None: self.command("stats")
 
     def stop_screencast(self) -> None:
         self.command("screencast", on=False)
@@ -316,18 +244,18 @@ class KaraFunWebService:
       "ready"      "Signed in to <plan>"     (the player is up and signed in)
       "sign_in"    "Sign in to KaraFun in your browser, then come back"
       "error"      the reason (the caller can start() again to retry)
-    The player's own messages and picture frames go to `on_message` and `on_frame` as in KaraFunWeb."""
+    The player's own messages go to `on_message` as in KaraFunWeb."""
 
     def __init__(self, on_state: Callable[[str, str], None], *, on_message: Callable[[dict], None] = lambda m: None,
-                 on_frame: Callable[[bytes], None] = lambda b: None, on_log: Callable[[str], None] = lambda s: None,
+                 on_log: Callable[[str], None] = lambda s: None,
                  profile_dir=None, make_web=None, find_browser=None, credentials=None):
-        self.on_state, self.on_message, self.on_frame, self.on_log = on_state, on_message, on_frame, on_log
+        self.on_state, self.on_message, self.on_log = on_state, on_message, on_log
         self._credentials = credentials          # () -> (email, password) or None: the saved login, if the user saved one
         self._login_tried = False
         self._reload_after_login = False
         self._reload_at = 0.0
         home = os.environ.get("SINGWS_HOME")
-        self.profile_dir = Path(profile_dir) if profile_dir else (Path(home) if home else Path.home() / "SingWS") / "Chrome-KaraFun"
+        self.profile_dir = Path(profile_dir) if profile_dir else (Path(home) if home else Path.home() / "SingWS") / "KaraFun-Display"
         self._make_web = make_web or (lambda **kw: KaraFunWeb(self.profile_dir, **kw))
         self._find_browser = find_browser or ensure_browser
         self.web: Optional[KaraFunWeb] = None
@@ -365,9 +293,8 @@ class KaraFunWebService:
             web.close()
         self.state = "idle"
 
-    def _progress(self, done: int, total: int) -> None:
-        percent = f" ({done * 100 // total}%)" if total else ""
-        self._set("preparing", f"Downloading Chromium{percent}")
+    def _progress(self, text: str) -> None:
+        self._set("preparing", text or "Downloading Chromium")
 
     def _run(self) -> None:
         try:
@@ -378,7 +305,7 @@ class KaraFunWebService:
                 self._set("needs_browser", str(missing))
                 return
             self._set("starting", "Starting KaraFun's player")
-            web = self._make_web(on_message=self._message, on_frame=self.on_frame, on_log=self.on_log, chrome_path=browser)
+            web = self._make_web(on_message=self._message, on_log=self.on_log, helper_path=browser)
             self.web = web
             web.start()
         except Exception as error:

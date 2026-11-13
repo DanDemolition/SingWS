@@ -100,7 +100,7 @@ class UploadTests(unittest.TestCase):
 class ReaderTests(unittest.TestCase):
     class FakeWeb:
         script = []
-        def __init__(self, profile, *, on_message, on_log, chrome_path):
+        def __init__(self, profile, *, on_message, on_log, helper_path):
             self.on_message, self.asked, self.closed = on_message, 0, False
         def start(self): pass
         def top(self, chart_id):
@@ -126,7 +126,7 @@ class ReaderTests(unittest.TestCase):
         orig_wait = T.threading.Event.wait
         try:
             T.threading.Event.wait = lambda self_, timeout=None: (clock.__setitem__("t", clock["t"] + (timeout or 0)) or self_.is_set())
-            songs = T.read_chart(make_web=make, find_browser=lambda p: Path("/x/chrome"), profile_dir="/tmp/x", timeout=60)
+            songs = T.read_chart(make_web=make, find_browser=lambda p: Path("/x/display"), profile_dir="/tmp/x", timeout=60)
         finally:
             T.time.monotonic = real
             T.threading.Event.wait = orig_wait
@@ -138,7 +138,7 @@ class ReaderTests(unittest.TestCase):
             def top(self, chart_id):
                 self.on_message({"type": "error", "message": "Top: the chart 7 did not load"})
         with self.assertRaises(RuntimeError) as ctx:
-            T.read_chart(make_web=lambda *a, **k: Broken(*a, **k), find_browser=lambda p: Path("/x/chrome"), profile_dir="/tmp/x", timeout=5)
+            T.read_chart(make_web=lambda *a, **k: Broken(*a, **k), find_browser=lambda p: Path("/x/display"), profile_dir="/tmp/x", timeout=5)
         self.assertIn("did not load", str(ctx.exception))
 
 

@@ -86,7 +86,6 @@ native/singws_scan/*/singws-scan-cli
 native/singws_relaymsg/*/singws-relaymsg
 native/singws_settingsmig/*/singws-settingsmig
 native/singws_songend/*/singws-songend
-native/singws_karafun_web/*/singws-karafun-web
 
 # Built update-rules helper; produced by rust/build_update.sh
 native/singws_update/*/singws-update
@@ -103,3 +102,7 @@ native/singws_video/
 SingWS-*-media-runtime-source.tar.xz
 wild-style-karaoke-logo.png
 native/mpv_runtime/artifacts/*/Frameworks/libsingws_mpv_bridge.dylib
+
+# CEF development files (KaraFun display build); downloaded per build machine, never committed
+native/cef150-*/
+native/singws_karafun_display/

@@ -95,7 +95,7 @@ def python_trace(sc: dict) -> dict:
 
     def find(progress, **_kw):
         for d, t in sc.get("progress", []):
-            progress(d, t)
+            progress(f"Downloading Chromium ({d * 100 // t}%)" if t else "Downloading Chromium")
         if sc.get("find_fail"):
             raise RuntimeError(sc["error"])
         return Path("/x/chrome")

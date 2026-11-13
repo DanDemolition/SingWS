@@ -152,7 +152,7 @@ def py_read_chart(req):
     asks = []
 
     class Web:
-        def __init__(self, profile, on_message, on_log, chrome_path):
+        def __init__(self, profile, on_message, on_log, helper_path):
             holder["cb"] = on_message
         def start(self): pass
         def top(self, cid): asks.append(clock[0] - 1000.0)
