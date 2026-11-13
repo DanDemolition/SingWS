@@ -102,3 +102,4 @@ native/singws_video/
 # local copies of release assets
 SingWS-*-media-runtime-source.tar.xz
 wild-style-karaoke-logo.png
+native/mpv_runtime/artifacts/*/Frameworks/libsingws_mpv_bridge.dylib
