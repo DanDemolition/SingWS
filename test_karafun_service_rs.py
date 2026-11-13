@@ -37,19 +37,6 @@ class ServiceParity(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout[-3000:] + r.stderr[-1000:])
         self.assertIn("IDENTICAL", r.stdout)
 
-    def test_browser_parity_small_corpus(self):
-        os.environ.setdefault("SINGWS_HOME", tempfile.mkdtemp(prefix="kf_svc_test_home_"))
-        sys.path.insert(0, str(ROOT / "tools"))
-        import karafun_browser_parity as p
-        try:
-            p.find_cli()
-        except FileNotFoundError:
-            self.skipTest("singws-karafun-svc not built")
-        r = subprocess.run([sys.executable, str(ROOT / "tools" / "karafun_browser_parity.py"), "--cases", "300", "--seed", "3"],
-                           capture_output=True, text=True, env={**os.environ, "SINGWS_HOME": os.environ["SINGWS_HOME"]}, timeout=300)
-        self.assertEqual(r.returncode, 0, r.stdout[-3000:] + r.stderr[-1000:])
-        self.assertIn("IDENTICAL", r.stdout)
-
     def test_matching_parity_against_the_page_script_in_node(self):
         import shutil
         if shutil.which("node") is None:

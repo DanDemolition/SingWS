@@ -135,7 +135,7 @@ impl Machine {
                     return Err("negative progress".into());
                 }
                 let percent = if total != 0 { format!(" ({}%)", done.saturating_mul(100) / total) } else { String::new() };
-                self.put(&mut out, "preparing", &format!("Downloading the browser{percent}"));
+                self.put(&mut out, "preparing", &format!("Downloading Chromium{percent}"));
             }
             Event::BrowserFound => self.put(&mut out, "starting", "Starting KaraFun's player"),
             Event::WebMade => self.has_web = true,

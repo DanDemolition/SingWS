@@ -93,7 +93,7 @@ def python_trace(sc: dict) -> dict:
             raise {"Err": Err, "Err2": Err2, "ValueError": ValueError}[s["kind"]]("secret-ish text must not be logged")
         return s.get("empty")  # None or () (both falsy)
 
-    def find(progress):
+    def find(progress, **_kw):
         for d, t in sc.get("progress", []):
             progress(d, t)
         if sc.get("find_fail"):
