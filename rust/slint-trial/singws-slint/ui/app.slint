@@ -1,0 +1,608 @@
+import { ScrollView, ListView } from "std-widgets.slint";
+
+// Colours copied from singws-shell's QML (Main.qml, TickerPage.qml, WaitlistPage.qml). One place, so a theme change is one edit.
+global Theme {
+    out property <color> canvas: #0b0a16;
+    out property <color> card: #12102a;
+    out property <color> card-border: #2a2650;
+    out property <color> row: #1a1838;
+    out property <color> row-first-time: #16341f;
+    out property <color> header: #1f2540;
+    out property <color> header-pending: #0e3a52;
+    out property <color> header-removed: #4a1d1d;
+    out property <color> accent: #4b2bb0;
+    out property <color> text: #e8e6f5;
+    out property <color> text-dim: #9a97c0;
+    out property <color> text-row: #c9c6e8;
+    out property <color> label: #6d6a99;
+    out property <color> good: #34e08a;
+    out property <color> warn: #f5c84b;
+    out property <color> purple: #a855f7;
+    out property <color> mute: #969cb8;
+    pure public function tone(t: string) -> color { return t == "good" ? good : t == "warn" ? warn : t == "purple" ? purple : mute; }
+}
+
+export struct WaitItem { is-header: bool, key: string, title: string, helper: string, text: string, first-time: bool }
+export struct ChipItem { text: string, tone: string }
+export struct CheckItem { ok: bool, text: string }
+export struct RotItem { number: string, singer: string, combined: string, duet: bool }
+export struct HistItem { key: string, title: string, detail: string, selectable: bool, selected: bool }
+export struct SettingItem { key: string, value: string, hidden: bool }
+export struct LibItem { id: int, artist: string, title: string, left: string, right: string }
+export struct DiagItem { ok: bool, label: string, detail: string }
+export struct MusicItem { index: int, filename: string }
+export struct EqBand { label: string, gain: float }
+export struct ChatEntry { header: bool, key: string, text: string, mine: bool, picture: image, has-picture: bool }
+export struct SingerItem { number: string, name: string }
+
+component TabButton inherits Rectangle {
+    in property <string> label;
+    in property <bool> selected;
+    callback clicked;
+    height: 30px;
+    border-radius: 6px;
+    background: selected ? Theme.accent : Theme.card;
+    accessible-role: tab;
+    accessible-label: label;
+    Text { text: label; color: selected ? #ffffff : Theme.text-dim; font-size: 13px; horizontal-alignment: center; vertical-alignment: center; }
+    TouchArea { clicked => { root.clicked(); } }
+}
+
+// themed text box (the std LineEdit is a different look): border #2a2650 on #12102a like the QML TextFields
+component SearchBox inherits Rectangle {
+    in property <string> placeholder;
+    in property <bool> password: false;
+    in-out property <string> text <=> input.text;
+    callback edited(string);
+    callback accepted();
+    height: 40px; border-radius: 8px; background: Theme.card; border-width: 1px; border-color: input.has-focus ? Theme.accent : Theme.card-border;
+    accessible-role: text-input; accessible-label: placeholder;
+    input := TextInput {
+        x: 14px; width: parent.width - 28px; height: parent.height; vertical-alignment: center;
+        color: #ffffff; font-size: 14px; input-type: root.password ? InputType.password : InputType.text; single-line: true;
+        edited => { root.edited(self.text); }
+        accepted => { root.accepted(); }
+    }
+    if input.text == "" : Text { x: 14px; height: parent.height; vertical-alignment: center; text: placeholder; color: Theme.label; font-size: 14px; }
+}
+
+component Btn inherits Rectangle {
+    in property <string> label;
+    in property <color> tone: Theme.card;
+    in property <bool> enabled: true;
+    callback clicked;
+    height: 32px; border-radius: 6px; background: ta.pressed ? tone.darker(0.3) : tone; opacity: enabled ? 1 : 0.45;
+    border-width: 1px; border-color: Theme.card-border;
+    accessible-role: button; accessible-label: label; accessible-enabled: enabled;
+    HorizontalLayout { padding-left: 14px; padding-right: 14px; Text { text: label; color: #ffffff; font-size: 13px; vertical-alignment: center; } }
+    ta := TouchArea { enabled: root.enabled; clicked => { root.clicked(); } }
+}
+
+// horizontal slider (the std Slider is a different look); `released(value)` fires when the pointer lets go
+component HSlider inherits Rectangle {
+    in-out property <float> value: 0;   // 0..1
+    callback released(float);
+    height: 24px;
+    accessible-role: slider; accessible-value: round(value * 100) + "%";
+    Rectangle { y: 10px; height: 4px; border-radius: 2px; background: Theme.card-border; }
+    Rectangle { y: 10px; height: 4px; border-radius: 2px; background: Theme.accent; width: root.width * root.value; }
+    Rectangle { x: (root.width - 16px) * root.value; y: 4px; width: 16px; height: 16px; border-radius: 8px; background: #ffffff; }
+    ta := TouchArea {
+        function set() { root.value = max(0, min(1, self.mouse-x / root.width)); }
+        pointer-event(e) => { if (e.kind == PointerEventKind.down) { set(); } if (e.kind == PointerEventKind.up) { root.released(root.value); } }
+        moved => { if (self.pressed) { set(); } }
+    }
+}
+
+// one vertical EQ band: -12..+12 dB, centre line = 0; dragging sets the gain, releasing reports it
+component EqBar inherits Rectangle {
+    in-out property <float> gain: 0;
+    in property <bool> active: true;
+    in property <bool> dim: false;
+    callback released(float);
+    background: transparent;
+    Rectangle { x: parent.width / 2 - 2px; width: 4px; border-radius: 2px; background: Theme.card-border; }
+    Rectangle { x: parent.width / 2 - 2px; width: 4px; border-radius: 2px; background: Theme.accent; opacity: root.dim ? 0.55 : 1;
+        y: root.gain >= 0 ? root.height / 2 - root.height / 2 * root.gain / 12 : root.height / 2;
+        height: root.height / 2 * abs(root.gain) / 12; }
+    Rectangle { y: root.height / 2 - root.height * root.gain / 24 - 6px; x: parent.width / 2 - 8px; width: 16px; height: 12px; border-radius: 4px; background: #ffffff; opacity: root.dim ? 0.55 : 1; }
+    ta := TouchArea {
+        enabled: root.active;
+        function set() { root.gain = round(max(-12, min(12, 12 - 24 * self.mouse-y / root.height)) * 10) / 10; }
+        pointer-event(e) => { if (e.kind == PointerEventKind.down) { set(); } if (e.kind == PointerEventKind.up) { root.released(root.gain); } }
+        moved => { if (self.pressed) { set(); } }
+    }
+}
+
+component PageTitle inherits Text { color: Theme.text; font-size: 15px; font-weight: 600; }
+
+export component App inherits Window {
+    title: "SingWS (Slint trial, read-only)";
+    preferred-width: 980px; preferred-height: 720px;
+    background: Theme.canvas;
+    default-font-size: 13px;
+
+    in-out property <int> tab: 0;
+    in property <string> ticker-text;
+    in property <string> ticker-message;
+    in property <string> ticker-status;
+    in property <[SingerItem]> singers;
+    in property <string> wait-status;
+    in property <[WaitItem]> wait-items;
+    in property <string> st-note; in property <bool> st-stale; in property <bool> st-has;
+    in property <[ChipItem]> st-chips;
+    in property <string> st-status; in property <bool> st-warn; in property <string> st-location; in property <string> st-tooltip;
+    in property <string> st-eta; in property <string> st-summary; in property <string> st-report;
+    in property <[CheckItem]> st-checks;
+    in property <string> rot-title; in property <string> rot-count; in property <string> rot-status; in property <string> rot-now; in property <string> rot-next;
+    in property <[RotItem]> rot-rows;
+    in property <string> h-status; in property <string> h-name; in property <string> h-summary; in property <string> h-meta;
+    in property <[HistItem]> h-singers; in property <[HistItem]> h-songs;
+    callback h-search(string); callback h-pick(string); callback h-song-search(string);
+    in property <string> set-status; in property <[SettingItem]> set-rows;
+    callback set-search(string);
+    in property <bool> st-all-passed; in property <[DiagItem]> st-diag;
+    in property <bool> hero-has; in property <bool> hero-live; in property <string> hero-kicker; in property <string> hero-singer; in property <string> hero-sub; in property <string> hero-meta; in property <string> hero-format; in property <string> hero-left;
+    in property <string> mus-count; in property <string> mus-info; in property <string> mus-status; in property <[MusicItem]> mus-rows;
+    in property <string> bg-track; in property <bool> bg-playing; in-out property <float> bg-volume;
+    callback mus-search(string); callback mus-play(int, string); callback mus-volume(float);
+    in property <string> eq-status; in-out property <[EqBand]> eq-bgm; in-out property <[EqBand]> eq-kar;
+    in property <bool> eq-bgm-on; in property <bool> eq-bgm-auto; in property <bool> eq-kar-on; in property <bool> eq-kar-auto; in property <bool> eq-bgm-flat; in property <bool> eq-kar-flat;
+    callback eq-toggle(string); callback eq-preset(string, int); in property <[string]> eq-presets; callback eq-changed-bgm(int, float); callback eq-changed-kar(int, float);
+    in property <string> chat-status; in property <[string]> chat-tabs; in property <[ChatEntry]> chat-items; in property <int> chat-tab; in property <string> chat-hint; in property <bool> chat-can-say; in property <bool> chat-sure;
+    callback chat-set-tab(int); callback chat-pick(string); callback chat-say(string);
+    in property <string> lib-status; in property <[LibItem]> lib-rows;
+    callback lib-search(string); callback lib-add(int, string);
+    in-out property <string> lib-singer;
+    // controls (live)
+    in-out property <string> c-url; in-out property <string> c-user;
+    in property <string> c-status; in property <bool> c-enabled; in property <bool> c-logged-in; in property <string> c-login-error;
+    in property <string> c-now; in property <string> c-clock; in property <bool> c-playing; in property <string> c-result; in property <string> c-result-kind;
+    callback c-connect(string, string, string); callback c-disconnect(); callback c-send(string, string); callback c-changed();
+
+    VerticalLayout {
+        padding: 12px; spacing: 10px;
+        HorizontalLayout {
+            spacing: 4px; alignment: start;
+            TabButton { label: "Ticker"; width: 80px; selected: root.tab == 0; clicked => { root.tab = 0; } }
+            TabButton { label: "Waitlist"; width: 80px; selected: root.tab == 1; clicked => { root.tab = 1; } }
+            TabButton { label: "Status"; width: 80px; selected: root.tab == 2; clicked => { root.tab = 2; } }
+            TabButton { label: "Rotation"; width: 80px; selected: root.tab == 3; clicked => { root.tab = 3; } }
+            TabButton { label: "Singer history"; width: 110px; selected: root.tab == 4; clicked => { root.tab = 4; } }
+            TabButton { label: "Settings"; width: 80px; selected: root.tab == 5; clicked => { root.tab = 5; } }
+            TabButton { label: "Controls"; width: 80px; selected: root.tab == 6; clicked => { root.tab = 6; } }
+            TabButton { label: "Library"; width: 80px; selected: root.tab == 7; clicked => { root.tab = 7; } }
+            TabButton { label: "Diagnostics"; width: 100px; selected: root.tab == 8; clicked => { root.tab = 8; } }
+            TabButton { label: "Now playing"; width: 100px; selected: root.tab == 9; clicked => { root.tab = 9; } }
+            TabButton { label: "Music"; width: 70px; selected: root.tab == 10; clicked => { root.tab = 10; } }
+            TabButton { label: "EQ"; width: 60px; selected: root.tab == 11; clicked => { root.tab = 11; } }
+            TabButton { label: "Chat"; width: 70px; selected: root.tab == 12; clicked => { root.tab = 12; } }
+        }
+
+        if root.tab == 0 : VerticalLayout {
+            spacing: 10px;
+            PageTitle { text: "TICKER (read-only: not connected to the app)"; }
+            Text { text: ticker-status; color: Theme.text-dim; font-size: 12px; wrap: word-wrap; }
+            Rectangle {
+                height: 56px; border-radius: 8px; background: Theme.card; border-width: 1px; border-color: Theme.card-border; clip: true;
+                Text {
+                    x: 14px; width: parent.width - 28px; height: parent.height;
+                    text: ticker-text; color: #ffffff; font-size: 17px; vertical-alignment: center; overflow: elide;
+                    accessible-label: "Ticker text: " + ticker-text;
+                }
+            }
+            if ticker-message != "" : Text { text: "Custom message: " + ticker-message; color: #c9c6e8; font-size: 13px; wrap: word-wrap; }
+            ScrollView {
+                VerticalLayout {
+                    spacing: 2px; alignment: start;
+                    for s in singers : Rectangle {
+                        height: 32px; border-radius: 6px; background: Theme.row;
+                        accessible-role: list-item; accessible-label: s.number + " " + s.name;
+                        Text { x: 10px; height: parent.height; vertical-alignment: center; text: s.number + "  " + s.name; color: Theme.text-row; font-size: 13px; }
+                    }
+                }
+            }
+        }
+
+        if root.tab == 1 : VerticalLayout {
+            spacing: 10px;
+            PageTitle { text: "WAITLIST (read-only: not connected to the app)"; }
+            Text { text: wait-status; color: Theme.text-dim; font-size: 12px; wrap: word-wrap; }
+            ScrollView {
+                VerticalLayout {
+                    spacing: 3px; alignment: start;
+                    for it in wait-items : Rectangle {
+                        border-radius: 6px;
+                        height: inner.preferred-height;
+                        background: it.is-header ? (it.key == "pending_acceptance" ? Theme.header-pending : it.key == "removed" ? Theme.header-removed : Theme.header)
+                                                 : (it.first-time ? Theme.row-first-time : Theme.row);
+                        accessible-role: list-item;
+                        accessible-label: it.is-header ? it.title : it.text;
+                        inner := VerticalLayout {
+                            padding: 8px; spacing: 2px;
+                            if it.is-header : Text { text: it.title; color: Theme.text; font-size: 14px; font-weight: 600; }
+                            if it.is-header && it.helper != "" : Text { text: it.helper; color: Theme.text-dim; font-size: 12px; overflow: elide; }
+                            if !it.is-header : Text { text: it.text; color: #ffffff; font-size: 13px; wrap: word-wrap; }
+                        }
+                    }
+                }
+            }
+        }
+
+        if root.tab == 2 : VerticalLayout {
+            spacing: 10px; alignment: start;
+            PageTitle { text: "STATUS (read-only)"; }
+            Text { text: st-note; color: st-stale ? Theme.warn : Theme.text-dim; font-size: 12px; wrap: word-wrap; }
+            if st-has : HorizontalLayout {
+                spacing: 8px; alignment: start;
+                for c in st-chips : Rectangle {
+                    height: 30px; border-radius: 15px; background: Theme.card; border-width: 1px; border-color: Theme.tone(c.tone);
+                    width: chip-text.preferred-width + 28px;
+                    accessible-role: text; accessible-label: c.text;
+                    chip-text := Text { x: 14px; height: parent.height; vertical-alignment: center; text: c.text; color: Theme.tone(c.tone); font-size: 13px; font-weight: 600; }
+                }
+            }
+            if st-has : Rectangle {
+                border-radius: 8px; background: Theme.card; border-width: 1px; border-color: Theme.card-border;
+                height: status-col.preferred-height;
+                status-col := VerticalLayout {
+                    padding: 10px; spacing: 6px;
+                    HorizontalLayout {
+                        spacing: 8px; alignment: start;
+                        Rectangle { width: 10px; height: 10px; y: 4px; border-radius: 5px; background: st-warn ? Theme.warn : Theme.good; }
+                        Text { text: st-status; color: #ffffff; font-size: 14px; }
+                        Text { text: "• " + st-location; color: Theme.text-dim; font-size: 14px; }
+                    }
+                    Text { text: st-tooltip; color: Theme.text-row; font-size: 12px; wrap: word-wrap; }
+                }
+            }
+            if st-has : Rectangle {
+                height: 46px; border-radius: 8px; background: Theme.card; border-width: 1px; border-color: Theme.card-border;
+                Text { x: 14px; height: parent.height; vertical-alignment: center; text: st-eta; color: #ffffff; font-size: 16px; overflow: elide; width: parent.width - 28px; }
+            }
+            if st-has : Text { text: st-summary != "" ? "Queue summary: " + st-summary : "Queue summary: nobody is queued"; color: Theme.text-row; font-size: 13px; }
+            if st-has : PageTitle { text: st-report; }
+            if st-has : VerticalLayout {
+                spacing: 2px;
+                for c in st-checks : Rectangle {
+                    height: 28px; border-radius: 6px; background: Theme.row;
+                    Text { x: 10px; height: parent.height; vertical-alignment: center; text: (c.ok ? "✓  " : "✗  ") + c.text; color: c.ok ? Theme.good : Theme.warn; font-size: 13px; }
+                }
+            }
+        }
+
+        if root.tab == 3 : VerticalLayout {
+            spacing: 10px;
+            HorizontalLayout {
+                PageTitle { text: rot-title; horizontal-stretch: 1; overflow: elide; }
+                Text { text: rot-count; color: #a78bfa; font-size: 13px; font-weight: 600; }
+            }
+            Text { text: rot-status; color: Theme.text-dim; font-size: 12px; }
+            if rot-now != "" || rot-next != "" : Rectangle {
+                border-radius: 8px; background: Theme.card; border-width: 1px; border-color: Theme.card-border; height: strips.preferred-height;
+                strips := VerticalLayout {
+                    padding: 8px; spacing: 2px;
+                    if rot-now != "" : Text { text: "NOW  " + rot-now; color: #ffffff; font-size: 13px; overflow: elide; }
+                    if rot-next != "" : Text { text: "NEXT  " + rot-next; color: Theme.text-row; font-size: 12px; overflow: elide; }
+                }
+            }
+            ScrollView {
+                VerticalLayout {
+                    spacing: 2px; alignment: start;
+                    for r in rot-rows : Rectangle {
+                        height: 46px; border-radius: 6px; background: Theme.row;
+                        accessible-role: list-item; accessible-label: r.number + ", " + r.singer + ", " + r.combined;
+                        HorizontalLayout {
+                            padding-left: 10px; padding-right: 10px; spacing: 12px;
+                            Text { text: r.number; color: #a78bfa; font-size: 16px; font-weight: 600; width: 26px; vertical-alignment: center; }
+                            VerticalLayout {
+                                alignment: center;
+                                Text { text: r.singer; color: #ffffff; font-size: 14px; font-weight: 600; overflow: elide; }
+                                Text { text: r.combined; color: Theme.text-row; font-size: 12px; overflow: elide; }
+                            }
+                            if r.duet : Text { text: "DUET"; color: Theme.text-dim; font-size: 11px; vertical-alignment: center; }
+                        }
+                    }
+                }
+            }
+        }
+
+        if root.tab == 4 : VerticalLayout {
+            spacing: 10px;
+            PageTitle { text: "SINGER HISTORY (read-only)"; }
+            HorizontalLayout {
+                spacing: 12px;
+                VerticalLayout {
+                    horizontal-stretch: 4; spacing: 6px;
+                    SearchBox { placeholder: "Search singers or songs"; edited(t) => { root.h-search(t); } }
+                    Text { text: h-status; color: Theme.text-dim; font-size: 12px; }
+                    ScrollView {
+                        VerticalLayout {
+                            spacing: 2px; alignment: start;
+                            for s in h-singers : Rectangle {
+                                height: 46px; border-radius: 6px; background: s.selected ? Theme.accent : Theme.row;
+                                accessible-role: list-item; accessible-label: s.title + " " + s.detail;
+                                VerticalLayout {
+                                    padding-left: 10px; padding-right: 10px; alignment: center;
+                                    Text { text: s.title; color: #ffffff; font-size: 14px; font-weight: 600; overflow: elide; }
+                                    Text { text: s.detail; color: Theme.text-row; font-size: 12px; overflow: elide; }
+                                }
+                                TouchArea { enabled: s.selectable; clicked => { root.h-pick(s.key); } }
+                            }
+                        }
+                    }
+                }
+                VerticalLayout {
+                    horizontal-stretch: 3; spacing: 6px;
+                    Text { text: h-name; color: Theme.text; font-size: 15px; font-weight: 600; }
+                    Text { text: h-summary; color: Theme.text-row; font-size: 12px; wrap: word-wrap; }
+                    SearchBox { placeholder: "Search this singer's songs"; edited(t) => { root.h-song-search(t); } }
+                    Text { text: h-meta; color: Theme.text-dim; font-size: 12px; }
+                    ScrollView {
+                        VerticalLayout {
+                            spacing: 2px; alignment: start;
+                            for s in h-songs : Rectangle {
+                                height: sc.preferred-height; border-radius: 6px; background: Theme.row;
+                                accessible-role: list-item; accessible-label: s.title + " " + s.detail;
+                                sc := VerticalLayout {
+                                    padding: 8px;
+                                    Text { text: s.title; color: #ffffff; font-size: 13px; font-weight: 600; }
+                                    if s.detail != "" : Text { text: s.detail; color: Theme.text-row; font-size: 12px; wrap: word-wrap; }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if root.tab == 5 : VerticalLayout {
+            spacing: 10px;
+            PageTitle { text: "SETTINGS (read-only)"; }
+            SearchBox { placeholder: "Search settings by name"; edited(t) => { root.set-search(t); } }
+            Text { text: set-status; color: Theme.text-dim; font-size: 12px; wrap: word-wrap; }
+            ScrollView {
+                VerticalLayout {
+                    spacing: 2px; alignment: start;
+                    for r in set-rows : Rectangle {
+                        height: 32px; border-radius: 6px; background: Theme.row;
+                        accessible-role: list-item; accessible-label: r.key + ": " + r.value;
+                        HorizontalLayout {
+                            padding-left: 10px; padding-right: 10px; spacing: 12px;
+                            Text { text: r.key; color: Theme.text-row; font-size: 13px; width: 300px; vertical-alignment: center; overflow: elide; }
+                            Text { text: r.value; color: r.hidden ? Theme.warn : #ffffff; font-italic: r.hidden; font-size: 13px; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; }
+                        }
+                    }
+                }
+            }
+        }
+
+        if root.tab == 6 : VerticalLayout {
+            spacing: 10px; alignment: start;
+            PageTitle { text: c-enabled ? "CONTROLS" : "CONTROLS (not connected to the app)"; }
+            Text { text: c-status; color: Theme.text-dim; font-size: 12px; wrap: word-wrap; }
+            if !c-logged-in : VerticalLayout {
+                spacing: 8px;
+                Text { text: "CONNECT"; color: Theme.label; font-size: 10px; letter-spacing: 1.2px; }
+                url-box := SearchBox { placeholder: "Server address (https://…)"; text: root.c-url; edited(t) => { root.c-url = t; } }
+                user-box := SearchBox { placeholder: "Venue name"; text: root.c-user; edited(t) => { root.c-user = t; } }
+                pin-box := SearchBox { placeholder: "Host PIN"; password: true; accepted => { root.c-connect(url-box.text, user-box.text, pin-box.text); pin-box.text = ""; } }
+                HorizontalLayout { alignment: start;
+                    Btn { label: "Connect"; tone: Theme.accent; clicked => { root.c-connect(url-box.text, user-box.text, pin-box.text); pin-box.text = ""; } }
+                }
+                if c-login-error != "" : Text { text: c-login-error; color: #ff8a8a; font-size: 13px; wrap: word-wrap; }
+            }
+            if c-logged-in : HorizontalLayout { alignment: start; Btn { label: "Disconnect"; clicked => { root.c-disconnect(); } } }
+            if c-result != "" : Rectangle {
+                height: res.preferred-height + 14px; border-radius: 8px;
+                background: c-result-kind == "ok" ? #12301f : c-result-kind == "warn" ? #33290f : #3a1414;
+                accessible-role: text; accessible-label: c-result;
+                res := Text { x: 7px; y: 7px; width: parent.width - 14px; text: c-result; color: #ffffff; font-size: 13px; wrap: word-wrap; }
+            }
+            Rectangle {
+                border-radius: 10px; background: Theme.card; border-width: 1px; border-color: Theme.card-border; height: now-col.preferred-height;
+                now-col := VerticalLayout {
+                    padding: 10px; spacing: 6px;
+                    Text { text: c-now; color: #ffffff; font-size: 15px; font-weight: 600; overflow: elide; }
+                    Text { text: c-clock; color: Theme.text-dim; font-size: 12px; }
+                    HorizontalLayout {
+                        spacing: 6px; alignment: start;
+                        Btn { label: "Restart"; enabled: c-enabled; clicked => { root.c-send("Restart", "restart"); } }
+                        Btn { label: c-playing ? "Pause" : "Play"; tone: Theme.accent; enabled: c-enabled; clicked => { root.c-send("Play/pause", "play_pause"); } }
+                        Btn { label: "Next"; enabled: c-enabled; clicked => { root.c-send("Next", "skip"); } }
+                        Btn { label: "Stop"; tone: #5a1f2a; enabled: c-enabled; clicked => { root.c-send("Stop", "stop"); } }
+                    }
+                }
+            }
+        }
+
+        if root.tab == 7 : VerticalLayout {
+            spacing: 8px;
+            PageTitle { text: "SONG LIBRARY"; }
+            SearchBox { placeholder: "Search your library (typos are fine)"; edited(t) => { root.lib-search(t); } }
+            singer-box := SearchBox { placeholder: "Add songs for singer (a new name creates a new singer)"; text <=> root.lib-singer; }
+            Text { visible: !c-enabled; text: "To add songs to the rotation, connect on the Controls tab (the app must be online)."; color: Theme.text-dim; font-size: 12px; }
+            if c-result != "" : Text { text: c-result; color: c-result-kind == "ok" ? Theme.good : Theme.warn; font-size: 13px; wrap: word-wrap; }
+            Text { text: lib-status; color: Theme.text-dim; font-size: 12px; }
+            // ListView draws only the visible rows (all rows are the same height): 500 results cost the same as 10
+            ListView {
+                for r in lib-rows : Rectangle {
+                    height: 50px;
+                    accessible-role: list-item; accessible-label: r.left + " " + r.right;
+                    Rectangle {
+                        height: 48px; border-radius: 6px; background: Theme.row;
+                        HorizontalLayout {
+                            padding-left: 10px; padding-right: 10px; spacing: 10px;
+                            VerticalLayout {
+                                alignment: center; horizontal-stretch: 1;
+                                Text { text: r.artist != "" ? r.artist : r.title; color: #ffffff; font-size: 14px; font-weight: 600; overflow: elide; }
+                                Text { text: r.artist != "" ? r.title : ""; color: Theme.text-row; font-size: 12px; overflow: elide; }
+                            }
+                            Text { text: r.right; color: Theme.text-dim; font-size: 12px; vertical-alignment: center; }
+                            Btn { label: "Add"; enabled: c-enabled && lib-singer != ""; y: 8px; height: 32px; clicked => { root.lib-add(r.id, lib-singer); } }
+                        }
+                    }
+                }
+            }
+        }
+
+        if root.tab == 8 : VerticalLayout {
+            spacing: 10px;
+            PageTitle { text: "PRE-SHOW DIAGNOSTICS (read-only: the app's own checks, as of its last snapshot)"; }
+            Text { text: st-note; color: st-stale ? Theme.warn : Theme.text-dim; font-size: 12px; wrap: word-wrap; }
+            if st-has : Text { text: st-report; color: st-all-passed ? Theme.good : Theme.warn; font-size: 18px; font-weight: 600; }
+            ScrollView {
+                VerticalLayout {
+                    spacing: 4px; alignment: start;
+                    for c in st-diag : Rectangle {
+                        height: 44px; border-radius: 6px; background: Theme.row;
+                        accessible-role: list-item; accessible-label: (c.ok ? "PASS  " : "CHECK  ") + c.label + ": " + c.detail;
+                        Rectangle { x: 10px; y: 10px; width: 62px; height: 24px; border-radius: 12px; background: c.ok ? #12301f : #33290f;
+                            Text { text: c.ok ? "PASS" : "CHECK"; color: c.ok ? Theme.good : Theme.warn; font-size: 12px; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; } }
+                        Text { x: 84px; width: 190px; height: parent.height; vertical-alignment: center; text: c.label; color: #ffffff; font-size: 14px; overflow: elide; }
+                        Text { x: 298px; width: parent.width - 308px; height: parent.height; vertical-alignment: center; text: c.detail; color: Theme.text-row; font-size: 13px; overflow: elide; }
+                    }
+                }
+            }
+        }
+
+        if root.tab == 9 : VerticalLayout {
+            spacing: 10px; alignment: start;
+            PageTitle { text: "NOW PLAYING (read-only: the Show tab's hero card, as of the app's last snapshot)"; }
+            Text { text: st-note; color: st-stale ? Theme.warn : Theme.text-dim; font-size: 12px; wrap: word-wrap; }
+            if st-has && !hero-has : Text { text: "The snapshot has no now-playing card yet (the app writes it when the card refreshes)."; color: Theme.text-row; font-size: 13px; wrap: word-wrap; }
+            if hero-has : Rectangle {
+                border-radius: 14px; background: Theme.card; border-width: hero-live ? 2px : 1px; border-color: hero-live ? #7c3aed : Theme.card-border;
+                accessible-role: text; accessible-label: hero-kicker + ": " + hero-singer + ". " + hero-sub + ". " + hero-meta + ". Time left " + hero-left;
+                VerticalLayout {
+                    padding: 20px; spacing: 6px;
+                    HorizontalLayout {
+                        Text { text: hero-kicker; color: #a78bfa; font-size: 12px; font-weight: 600; letter-spacing: 2px; horizontal-stretch: 1; }
+                        if hero-format != "" : Rectangle { height: 22px; width: fmt.preferred-width + 18px; border-radius: 11px; background: Theme.row; border-width: 1px; border-color: Theme.accent;
+                            fmt := Text { text: hero-format; color: Theme.text-row; font-size: 11px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; width: parent.width; } }
+                    }
+                    Text { text: hero-singer; color: #ffffff; font-size: 40px; font-weight: 800; overflow: elide; }
+                    Text { text: hero-sub; color: Theme.text-row; font-size: 18px; wrap: word-wrap; }
+                    if hero-meta != "" : Text { text: hero-meta; color: Theme.text-dim; font-size: 14px; overflow: elide; }
+                    if hero-left != "" : Text { text: hero-left; color: Theme.good; font-size: 28px; font-weight: 600; }
+                }
+            }
+        }
+
+        if root.tab == 10 : VerticalLayout {
+            spacing: 8px;
+            HorizontalLayout { PageTitle { text: "BACKGROUND MUSIC"; horizontal-stretch: 1; } Text { text: mus-count; color: #a78bfa; font-size: 12px; font-weight: 600; } }
+            if !c-enabled && mus-info != "" : Text { text: mus-info; color: Theme.text-dim; font-size: 12px; wrap: word-wrap; }
+            if c-enabled : Rectangle {
+                border-radius: 10px; background: Theme.card; border-width: 1px; border-color: Theme.card-border; height: live-col.preferred-height;
+                live-col := VerticalLayout {
+                    padding: 10px; spacing: 8px;
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Text { text: bg-track != "" ? (bg-playing ? "Playing: " : "Paused: ") + bg-track : "Background music: no playlist"; color: #ffffff; font-size: 14px; font-weight: 600; overflow: elide; horizontal-stretch: 1; vertical-alignment: center; }
+                        Btn { label: "Next"; clicked => { root.c-send("Next track", "bg.next"); } }
+                        Btn { label: bg-playing ? "Pause" : "Play"; tone: Theme.accent; clicked => { root.c-send("Background music", "bg_play_pause"); } }
+                    }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Text { text: "Volume"; color: Theme.text-dim; font-size: 12px; width: 60px; vertical-alignment: center; }
+                        HSlider { value <=> root.bg-volume; horizontal-stretch: 1; released(v) => { root.mus-volume(v); } }
+                        Text { text: round(bg-volume * 100) + "%"; color: Theme.text-row; font-size: 12px; width: 44px; horizontal-alignment: right; vertical-alignment: center; }
+                    }
+                }
+            }
+            SearchBox { placeholder: "Search the playlist"; edited(t) => { root.mus-search(t); } }
+            if mus-status != "" : Text { text: mus-status; color: #f0b44c; font-size: 12px; }
+            Text { text: c-enabled ? "Tracks already played are hidden, as in the app." : "Shows every saved track. Connect on the Controls tab to follow the player: played tracks then hide, as in the app."; color: #7a77a0; font-size: 11px; wrap: word-wrap; }
+            ListView {
+                for r in mus-rows : Rectangle {
+                    height: 36px;
+                    accessible-role: list-item; accessible-label: r.filename;
+                    Rectangle {
+                        height: 34px; border-radius: 6px; background: Theme.row;
+                        HorizontalLayout {
+                            padding-left: 10px; padding-right: 6px;
+                            Text { text: r.filename; color: #ffffff; font-size: 13px; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; }
+                            if c-enabled : Btn { label: "Play"; tone: Theme.accent; y: 4px; height: 26px; clicked => { root.mus-play(r.index, r.filename); } }
+                        }
+                    }
+                }
+            }
+        }
+
+        if root.tab == 11 : VerticalLayout {
+            spacing: 12px;
+            HorizontalLayout { spacing: 10px; alignment: start; PageTitle { text: c-enabled ? "EQUALISERS" : "EQUALISERS (read-only)"; }
+                if !c-enabled : Text { text: "Connect on the Controls tab to change them."; color: #7a77a0; font-size: 12px; vertical-alignment: center; } }
+            if eq-status != "" : Text { text: eq-status; color: #f0b44c; font-size: 12px; wrap: word-wrap; }
+            for card[ci] in [{key: "bgm", title: "Background music"}, {key: "karaoke", title: "Karaoke"}] : Rectangle {
+                border-radius: 10px; background: Theme.card; border-width: 1px; border-color: Theme.card-border; vertical-stretch: 1;
+                property <bool> on: ci == 0 ? eq-bgm-on : eq-kar-on;
+                property <bool> auto: ci == 0 ? eq-bgm-auto : eq-kar-auto;
+                property <bool> flat: ci == 0 ? eq-bgm-flat : eq-kar-flat;
+                property <[EqBand]> bands: ci == 0 ? eq-bgm : eq-kar;
+                VerticalLayout {
+                    padding: 12px; spacing: 6px;
+                    HorizontalLayout {
+                        spacing: 10px;
+                        Text { text: card.title; color: #ffffff; font-size: 14px; font-weight: 600; vertical-alignment: center; }
+                        Text { text: on ? (auto ? "ON (the gains are not flat, so the app turned it on)" : "ON") : (flat ? "OFF (flat)" : "OFF"); color: on ? #7ee787 : Theme.text-dim; font-size: 12px; vertical-alignment: center; }
+                        Rectangle { horizontal-stretch: 1; }
+                        if c-enabled : Btn { label: on ? "Turn off" : "Turn on"; tone: Theme.accent; clicked => { root.eq-toggle(card.key); } }
+                    }
+                    if c-enabled : HorizontalLayout {
+                        spacing: 4px; alignment: start;
+                        Text { text: "Preset"; color: Theme.text-dim; font-size: 12px; vertical-alignment: center; }
+                        for pn[pi] in eq-presets : Btn { label: pn; height: 26px; clicked => { root.eq-preset(card.key, pi); } }
+                    }
+                    HorizontalLayout {
+                        spacing: 4px;
+                        for b[bi] in bands : VerticalLayout {
+                            spacing: 2px; horizontal-stretch: 1;
+                            Text { text: (b.gain > 0 ? "+" : "") + round(b.gain * 10) / 10; color: b.gain == 0 ? #6a678f : #e8e6f5; font-size: 11px; horizontal-alignment: center; }
+                            EqBar { gain: b.gain; active: c-enabled; dim: !on; vertical-stretch: 1;
+                                released(g) => { if (ci == 0) { root.eq-changed-bgm(bi, g); } else { root.eq-changed-kar(bi, g); } } }
+                            Text { text: b.label; color: Theme.text-dim; font-size: 11px; horizontal-alignment: center; }
+                        }
+                    }
+                }
+            }
+        }
+
+        if root.tab == 12 : VerticalLayout {
+            spacing: 10px;
+            PageTitle { text: c-enabled ? "CHAT" : "CHAT (read-only: not connected to the app)"; }
+            Text { text: chat-status; color: Theme.text-dim; font-size: 12px; wrap: word-wrap; }
+            if c-result != "" : Rectangle {
+                height: cres.preferred-height + 14px; border-radius: 6px; background: c-result-kind == "ok" ? #12301f : c-result-kind == "warn" ? #33290f : #3a1414;
+                cres := Text { x: 7px; y: 7px; width: parent.width - 14px; text: c-result; color: #ffffff; font-size: 13px; wrap: word-wrap; }
+            }
+            HorizontalLayout {
+                spacing: 8px; alignment: start;
+                for t[ti] in chat-tabs : Btn { label: t; tone: chat-tab == ti ? Theme.accent : Theme.card; clicked => { root.chat-set-tab(ti); } }
+            }
+            // plain text only (pictures and GIFs are not drawn here: see the design doc)
+            ScrollView {
+                VerticalLayout {
+                    spacing: 3px; alignment: start;
+                    for m in chat-items : Rectangle {
+                        border-radius: 6px; height: mt.preferred-height + 12px + (m.has-picture ? 246px : 0px);
+                        background: m.header ? (m.mine ? #2d2a66 : #1f2540) : (m.mine ? #1b2a45 : Theme.row);
+                        accessible-role: list-item; accessible-label: m.text;
+                        mt := Text { x: 6px; y: 6px; width: parent.width - 12px; text: m.text; color: #ffffff; font-size: 13px; font-weight: m.header ? 600 : 400; wrap: word-wrap; }
+                        if m.has-picture : Image { x: 6px; y: mt.preferred-height + 10px; width: min(240px, parent.width - 12px); height: 234px; source: m.picture; image-fit: contain; horizontal-alignment: left; accessible-role: image; accessible-label: "Picture in the chat"; }
+                        TouchArea { enabled: m.header && m.key != ""; clicked => { root.chat-pick(m.key); } }
+                    }
+                }
+            }
+            Text { text: chat-hint; color: Theme.text-dim; font-size: 12px; wrap: word-wrap; }
+            if chat-tab != 1 : HorizontalLayout {
+                spacing: 8px;
+                say-box := SearchBox { placeholder: c-enabled ? "Type a message…" : "Connect to the app to speak"; horizontal-stretch: 1;
+                    accepted => { if (chat-can-say) { root.chat-say(self.text); } } }
+                Btn { label: chat-sure ? "Sure?" : "Send"; tone: Theme.accent; enabled: chat-can-say && say-box.text != "";
+                    clicked => { root.chat-say(say-box.text); if (!chat-sure && chat-tab != 0) { say-box.text = ""; } } }
+            }
+        }
+    }
+}

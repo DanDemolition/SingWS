@@ -1,0 +1,10 @@
+[package]
+name = "spike-core"
+version = "0.0.0"
+edition = "2024"
+publish = false
+license = "GPL-3.0-only"
+[dependencies]
+singws-uimodel = { path = "../../../crates/singws-uimodel" }
+serde_json = "1"
+rusqlite = { version = "0.37", features = ["bundled"] }

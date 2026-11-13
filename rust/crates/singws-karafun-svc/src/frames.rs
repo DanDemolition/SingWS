@@ -3,7 +3,7 @@
 //! NOT here (needs a real screen or the live app): painting the picture into the audience window, its look, the 30 fps timing on real hardware.
 use serde_json::{json, Value};
 
-pub const FRAME_INTERVAL_MS: i64 = 33;
+pub const FRAME_INTERVAL_MS: i64 = 16;
 pub const SCREENCAST: (i64, i64, i64) = (1920, 1080, 92);
 
 #[derive(Debug, Default, Clone)]

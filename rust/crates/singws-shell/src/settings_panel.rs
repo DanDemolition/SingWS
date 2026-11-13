@@ -23,7 +23,7 @@ use core::pin::Pin;
 use cxx_qt::CxxQtType;
 use cxx_qt_lib::QString;
 use serde_json::{Value, json};
-use singws_uimodel::settings_view;
+use singws_uimodel::panels;
 
 pub struct SettingsPanelRust {
     rows_json: QString,
@@ -39,25 +39,11 @@ impl Default for SettingsPanelRust {
 }
 
 impl qobject::SettingsPanel {
+    /// Rows and wording come from the shared `singws-uimodel::panels::settings_view_data` (secrets are hidden there, by `settings_view`).
     fn refresh(mut self: Pin<&mut Self>, query: &QString) {
-        let path = format!("{}/settings.json", self.rust().dir);
-        let result = std::fs::read_to_string(&path)
-            .map_err(|e| e.to_string())
-            .and_then(|t| serde_json::from_str::<Value>(&t).map_err(|e| e.to_string()))
-            .and_then(|v| settings_view::rows(&v, &query.to_string()));
-        match result {
-            Ok(rows) => {
-                let n = rows.len();
-                let hidden = rows.iter().filter(|r| r.hidden).count();
-                let items: Vec<Value> = rows.iter().map(|r| json!({"key": r.key, "value": r.value, "hidden": r.hidden})).collect();
-                self.as_mut().set_rows_json(QString::from(Value::Array(items).to_string().as_str()));
-                let status = if n == 0 { "No settings match".to_string() } else { format!("{n} setting{}   •   {hidden} hidden (keys, PINs and tokens are never shown)", if n == 1 { "" } else { "s" }) };
-                self.as_mut().set_status(QString::from(status.as_str()));
-            }
-            Err(e) => {
-                self.as_mut().set_rows_json(QString::from("[]"));
-                self.as_mut().set_status(QString::from(format!("Settings unavailable: {e}").as_str()));
-            }
-        }
+        let d = panels::settings_view_data(&self.rust().dir.clone(), &query.to_string());
+        let items: Vec<Value> = d.rows.iter().map(|r| json!({"key": r.key, "value": r.value, "hidden": r.hidden})).collect();
+        self.as_mut().set_rows_json(QString::from(Value::Array(items).to_string().as_str()));
+        self.as_mut().set_status(QString::from(d.status.as_str()));
     }
 }

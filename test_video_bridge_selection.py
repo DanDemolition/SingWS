@@ -53,7 +53,9 @@ class VideoBridgeSelectionTests(unittest.TestCase):
     def test_default_setting_is_rust_and_the_launch_hook_maps_it(self):
         src = (ROOT / "0.2.18.1.py").read_text()
         self.assertRegex(src, r'"video_bridge":\s*"rust"')
-        self.assertIn('os.environ.setdefault("SINGWS_VIDEO_BRIDGE", "objc" if _video_bridge == "objc" else "rust")', src)
+        self.assertIn('os.environ.setdefault("SINGWS_VIDEO_BRIDGE", "rust")', src)
+        self.assertIn("saved video_bridge=objc migrated to rust", src)
+        self.assertRegex(src, r'"video_bridge_fallback":\s*True')
 
     def test_a_failed_rust_renderer_falls_back_to_the_objective_c_bridge_for_that_song(self):
         sys.path.insert(0, str(ROOT))
@@ -92,10 +94,99 @@ class VideoBridgeSelectionTests(unittest.TestCase):
             self.assertFalse(player2.loadSingWSMedia("/x/song.mp4", None, autoplay=False))
         fb2.assert_not_called()
 
-    def test_nothing_asked_means_objective_c(self):
-        r = choose({})
-        self.assertTrue(r.get("kind") == "objc" or "error" in r, r)   # (the Objective-C dylib itself may not load in a bare checkout)
+    def test_nothing_asked_means_rust(self):
+        r = choose({}, "m._rust_bridge_path = lambda: None")   # no Rust library in a bare checkout -> the logged fallback
         self.assertNotEqual(r.get("kind"), "rust")
+        if "error" not in r:
+            self.assertIn("not found", r["note"])   # proves Rust was tried by default
+        r = choose({"SINGWS_VIDEO_BRIDGE": "objc"})
+        self.assertNotEqual(r.get("kind"), "rust")
+
+    def _player(self, m, api):
+        from unittest import mock
+        import threading
+        p = m.MpvPlaybackPlugin.__new__(m.MpvPlaybackPlugin)
+        p._lock = threading.RLock(); p.api = api; p._handle = None
+        p._output_id, p._preview_id = 11, 22
+        p._volume, p._device = 0.5, "auto"
+        p._tempo_percent, p._semitones, p._dsp_chain = 100, 0, ""
+        p._video_offset_ms, p._sidefill = 0, 0
+        p._loaded, p._audio_only, p._error = False, False, ""
+        p.logs = []; p.log = p.logs.append
+        return p
+
+    def test_fallback_use_is_logged_as_error_and_notifies_the_operator(self):
+        sys.path.insert(0, str(ROOT))
+        import mpv_playback_iina as m
+        from unittest import mock
+        seen = []
+        m.set_operator_notifier(seen.append)
+        try:
+            with mock.patch.object(m, "_BridgeApi") as ba:
+                ba.return_value = types.SimpleNamespace(kind="objc", lib=mock.MagicMock(), note="")
+                logs = []
+                m._fallback_to_objc(logs.append)
+            self.assertTrue(any("ERROR" in l and "[VIDEO-BRIDGE]" in l for l in logs), logs)
+            self.assertEqual(len(seen), 1)
+            self.assertIn("fallback", seen[0].lower())
+        finally:
+            m.set_operator_notifier(None)
+            os.environ.pop("SINGWS_VIDEO_BRIDGE", None)
+
+    def test_rust_only_mode_retries_once_then_fails_visibly_without_switching(self):
+        sys.path.insert(0, str(ROOT))
+        import mpv_playback_iina as m
+        from unittest import mock
+        lib = mock.MagicMock(); lib.singws_bridge_create.return_value = 0
+        api = types.SimpleNamespace(kind="rust", lib=lib, note="")
+        p = self._player(m, api)
+        seen = []
+        m.set_operator_notifier(seen.append)
+        try:
+            with mock.patch.dict(os.environ, {"SINGWS_VIDEO_BRIDGE_FALLBACK": "0"}), \
+                    mock.patch.object(m, "_fallback_to_objc") as fb:
+                self.assertFalse(p.loadSingWSMedia("/x/song.mp4", None, autoplay=False))
+            fb.assert_not_called()
+            self.assertEqual(lib.singws_bridge_create.call_count, 2)
+            self.assertIs(p.api, api)
+            self.assertIn("No picture", p._error)
+            self.assertEqual(len(seen), 1)
+            self.assertTrue(any("retrying once" in l for l in p.logs))
+        finally:
+            m.set_operator_notifier(None)
+
+    def test_rust_only_mode_succeeds_when_the_retry_works(self):
+        sys.path.insert(0, str(ROOT))
+        import mpv_playback_iina as m
+        from unittest import mock
+        lib = mock.MagicMock(); lib.singws_bridge_create.side_effect = [0, 777]
+        p = self._player(m, types.SimpleNamespace(kind="rust", lib=lib, note=""))
+        with mock.patch.dict(os.environ, {"SINGWS_VIDEO_BRIDGE_FALLBACK": "0"}):
+            self.assertTrue(p.loadSingWSMedia("/x/song.mp4", None, autoplay=False))
+        self.assertEqual(p._handle, 777)
+
+    def test_bad_libmpv_path_forces_a_real_renderer_failure(self):
+        """The real Rust dylib with a libmpv that does not exist cannot create a core: with the fallback off the load fails visibly."""
+        if not HAVE_RUST:
+            self.skipTest("needs the built Rust video dylib (arm64)")
+        script = textwrap.dedent('''
+            import sys, json
+            sys.path.insert(0, %r)
+            import mpv_playback_iina as m
+            seen = []; m.set_operator_notifier(seen.append)
+            p = m.MpvPlaybackPlugin(log=lambda t: None)
+            ok = p.loadSingWSMedia("/nonexistent/song.mp4", None, autoplay=False)
+            print("RESULT" + json.dumps({"ok": ok, "kind": p.api.kind, "seen": len(seen), "err": p.errorString()}))
+        ''') % str(ROOT)
+        env = {k: v for k, v in os.environ.items() if not k.startswith("SINGWS_VIDEO")}
+        env.update({"SINGWS_VIDEO_BRIDGE": "rust", "SINGWS_VIDEO_LIB": str(RUST), "SINGWS_LIBMPV": "/nonexistent/libmpv.dylib",
+                    "SINGWS_VIDEO_BRIDGE_FALLBACK": "0"})
+        out = subprocess.run([sys.executable, "-I", "-c", script], capture_output=True, text=True, env=env, timeout=60).stdout
+        line = [l for l in out.splitlines() if l.startswith("RESULT")]
+        self.assertTrue(line, out)
+        r = json.loads(line[0][6:])
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["kind"], "rust")
 
     @unittest.skipUnless(HAVE_RUST, "needs the built Rust video dylib and the bundled libmpv (arm64)")
     def test_rust_is_used_when_asked_and_available(self):

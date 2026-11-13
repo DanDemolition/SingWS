@@ -74,6 +74,7 @@ class MpvBackendSelectionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)
             fake._runtime_root = lambda: root
+            fake._rust_bridge_path = lambda: None
             with mock.patch.dict(sys.modules, {"mpv_playback_iina": fake}):
                 with self.assertRaisesRegex(RuntimeError, "native mpv bridge missing"):
                     self.singws.KaraokeApp._load_mpv_playback_backend()

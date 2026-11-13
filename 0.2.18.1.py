@@ -4259,11 +4259,15 @@ DEFAULTS = {
     # app before any release; proven so far only in tools/render_thread_probe.py on Apple Silicon). Set it to false in
     # settings.json to draw on the main thread exactly as before. Read once at launch, before the first song creates the bridge.
     "karaoke_render_thread": True,
+    # Background-video decoder: True = VideoToolbox copy-back hardware decode (less CPU on Apple Silicon; NOT yet seen on the Intel Mac),
+    # False = software decode (the old behaviour). Read at launch; docs/design/metal-video-bridge.md.
+    "bg_video_hwdec": True,
     # Which native video bridge draws the karaoke picture: "rust" (DEFAULT since 2026-10-11, roadmap item 2: pixel-identical to the old one
     # on 22 on-screen images, freeze test passes, rehearsed by the operator on Apple Silicon) or "objc" (the long-standing Objective-C
     # bridge). Any problem loading the Rust one, or creating its renderer for a song, falls back to Objective-C. Read once at launch.
     # NOT yet run on a physical Intel Mac: set "objc" there if it misbehaves.
     "video_bridge": "rust",
+    "video_bridge_fallback": True,   # False = Rust only: a renderer failure retries once, then the song has no picture and says so (never a silent switch)
     "key_engine": "signalsmith",
     # Who plays the KARAOKE sound: "rust" (default: the Rust audio engine plays the sound, with key/tempo by Signalsmith and the exact master
     # chain; mpv keeps the picture and its audio clock) or "mpv" (mpv plays audio and picture, the way back). Read per song; any trouble
@@ -22775,7 +22779,15 @@ class KaraokeApp(QWidget):
         try:
             # Which bridge library mpv_playback_iina loads (first song). Never overrides an explicit env choice.
             _video_bridge = str(self.settings.get("video_bridge", "rust") or "rust").strip().lower()
-            os.environ.setdefault("SINGWS_VIDEO_BRIDGE", "objc" if _video_bridge == "objc" else "rust")
+            if _video_bridge == "objc":
+                # One-way migration: the Objective-C bridge is retired as a choice (it stays only as the logged fallback).
+                self.settings["video_bridge"] = "rust"
+                _diag("[VIDEO-BRIDGE] saved video_bridge=objc migrated to rust")
+            os.environ.setdefault("SINGWS_VIDEO_BRIDGE", "rust")
+            os.environ.setdefault("SINGWS_VIDEO_BRIDGE_FALLBACK",
+                                  "1" if bool(self.settings.get("video_bridge_fallback", True)) else "0")
+            import mpv_playback_iina as _mpv_iina
+            _mpv_iina.set_operator_notifier(lambda text: QTimer.singleShot(0, lambda: self._show_video_bridge_notice(text)))
         except Exception:
             pass
         try:
@@ -22787,6 +22799,11 @@ class KaraokeApp(QWidget):
             pass
         try:
             # The bridge reads this when it creates its renderer (first song). Never overrides an explicit env choice.
+            if self.settings.get("bg_video_hwdec", True) in (True, "videotoolbox-copy"):
+                os.environ["SINGWS_BG_HWDEC"] = "videotoolbox-copy"
+                _diag("[BG-VIDEO] bg_video_hwdec=videotoolbox-copy: the background clip uses hardware decode")
+            else:
+                os.environ.pop("SINGWS_BG_HWDEC", None)
             if bool(self.settings.get("karaoke_render_thread", True)):
                 os.environ.setdefault("SINGWS_RENDER_THREAD", "1")
                 _diag("[RENDER-THREAD] karaoke_render_thread=on: the karaoke picture is drawn on a dedicated render thread")
@@ -27786,7 +27803,7 @@ class KaraokeApp(QWidget):
         """Return the one supported bundled native mpv backend."""
         import mpv_playback_iina
         bridge = mpv_playback_iina._runtime_root() / "libsingws_mpv_bridge.dylib"
-        if not bridge.is_file():
+        if not bridge.is_file() and mpv_playback_iina._rust_bridge_path() is None:
             raise RuntimeError(f"bundled native mpv bridge missing: {bridge}")
         return mpv_playback_iina.MpvPlaybackPlugin, "native"
 
@@ -28213,6 +28230,17 @@ class KaraokeApp(QWidget):
         elif voice is not None:
             _diag("[KARAOKE-RUST] the Rust audio engine plays this song; mpv keeps the picture and its clock")
         return voice
+
+    def _show_video_bridge_notice(self, text: str) -> None:
+        """Non-modal, on the GUI thread: tell the operator about a video engine fallback or failure."""
+        try:
+            box = QMessageBox(QMessageBox.Icon.Warning, "Video engine", text, QMessageBox.StandardButton.Ok, self)
+            box.setWindowModality(Qt.WindowModality.NonModal)
+            box.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+            box.show()
+            self._video_bridge_notice_box = box
+        except Exception as exc:
+            _diag(f"[VIDEO-BRIDGE] could not show the operator notice: {exc}")
 
     @_perf_timed("ui_songstart_transport_setup")
     def _start_mpv_karaoke_transport(
@@ -29539,7 +29567,7 @@ class KaraokeApp(QWidget):
         self.poll_worker.requests_received.connect(self.handle_requests_from_thread)
 
     def start_request_polling(self, *, stop_existing=True):
-        base_url = _network_normalize_base_url(self.settings.get("base_url", "https://beta.wskar.com"))
+        base_url = _network_normalize_base_url(self.settings.get("base_url", "https://wskar.com"))
         tenant   = self.settings.get("user", self.settings.get("tenant", ""))
 
         # Safety: ensure any previous thread is gone
@@ -32836,6 +32864,20 @@ class KaraokeApp(QWidget):
 
         confirm_cb.toggled.connect(on_record_confirm_toggled)
         _layout_card.addWidget(confirm_cb)
+
+        hwdec_cb = QCheckBox("Use hardware decoding for background videos (applies the next time SingWS starts)")
+        hwdec_cb.setChecked(self.settings.get("bg_video_hwdec", True) in (True, "videotoolbox-copy"))
+        hwdec_cb.setToolTip("Lowers CPU use while a background animation plays. Turn it off if background videos stutter or stay black; files the Mac cannot decode in hardware are decoded in software either way.")
+
+        def on_bg_hwdec_toggled(checked: bool):
+            self.settings["bg_video_hwdec"] = bool(checked)
+            try:
+                self.save_settings()
+            except Exception:
+                pass
+
+        hwdec_cb.toggled.connect(on_bg_hwdec_toggled)
+        _layout_card.addWidget(hwdec_cb)
 
         def on_hero_look_changed(*_):
             self.settings["ui_hero_glow"] = str(glow_combo.currentData() or "soft")
@@ -41119,7 +41161,7 @@ class KaraokeApp(QWidget):
             v.addWidget(connection_title)
             row1 = QHBoxLayout()
             row1.addWidget(_form_label("Base URL:"))
-            base_edit = QLineEdit(self.settings.get("base_url", "https://beta.wskar.com"))
+            base_edit = QLineEdit(self.settings.get("base_url", "https://wskar.com"))
             row1.addWidget(base_edit)
             v.addLayout(row1)
     
@@ -41749,7 +41791,7 @@ class KaraokeApp(QWidget):
             def accept():
                 # Save new values
                 _accept_started = time.monotonic()
-                self.settings["base_url"] = _network_normalize_base_url(base_edit.text() or "https://beta.wskar.com")
+                self.settings["base_url"] = _network_normalize_base_url(base_edit.text() or "https://wskar.com")
                 uid = user_edit.text().strip()
                 if uid:
                     self.settings["user"] = uid
@@ -61301,7 +61343,7 @@ class KaraokeApp(QWidget):
         import threading, json as _json
 
         def send():
-            base_url = _network_normalize_base_url(self.settings.get("base_url", "https://beta.wskar.com"))
+            base_url = _network_normalize_base_url(self.settings.get("base_url", "https://wskar.com"))
             tenant   = str(self.settings.get("user", self.settings.get("tenant", ""))).strip()
 
             # Upload via get_requests.php

@@ -1,0 +1,79 @@
+import { Button, CheckBox, TabWidget, ListView, ScrollView, LineEdit } from "std-widgets.slint";
+export struct RowData { status: string, text: string }
+export struct SectionData { title: string, rows: [RowData] }
+export struct SongData { artist: string, title: string, meta: string }
+export struct ChatMsg { who: string, host: bool, body: styled-text, has-image: bool, pic: image }
+export component App inherits Window {
+    title: "SingWS toolkit spike (Slint)";
+    preferred-width: 900px; preferred-height: 600px;
+    background: #14101f;
+    in property <string> ticker-text;
+    in property <[SectionData]> sections;
+    in property <string> waitlist-status;
+    in property <string> hero-kicker; in property <string> hero-singer; in property <string> hero-sub; in property <string> hero-left;
+    in-out property <bool> custom-on: true;
+    in property <int> start-tab: 0;
+    in property <[SongData]> songs;
+    in property <string> lib-status;
+    in property <[ChatMsg]> chat;
+    callback custom-toggled(bool);
+    callback search(string);
+    callback add(int);
+    VerticalLayout {
+        padding: 12px; spacing: 10px;
+        Rectangle {
+            background: #2a1f4d; border-radius: 14px; height: 90px;
+            VerticalLayout { padding: 12px; spacing: 2px;
+                Text { text: hero-kicker; color: #b6ff3b; font-size: 12px; font-weight: 800; }
+                Text { text: hero-singer; color: white; font-size: 26px; font-weight: 800; }
+                HorizontalLayout { Text { text: hero-sub; color: #cfc6ee; font-size: 14px; horizontal-stretch: 1; } Text { text: hero-left; color: #b6ff3b; font-size: 18px; font-weight: 800; } }
+            }
+        }
+        TabWidget { current-index: root.start-tab;
+            Tab { title: "Library";
+                VerticalLayout { padding: 10px; spacing: 6px;
+                    LineEdit { placeholder-text: "Search artist or title (typo-tolerant)"; edited(t) => { root.search(t); } }
+                    Text { text: lib-status; color: #cfc6ee; }
+                    ListView {
+                        for s[i] in songs : Rectangle { background: #231a3d; height: 44px;
+                            HorizontalLayout { padding: 6px; spacing: 10px;
+                                VerticalLayout { horizontal-stretch: 1; Text { text: s.title; color: white; font-size: 14px; overflow: elide; } Text { text: s.artist; color: #cfc6ee; font-size: 11px; overflow: elide; } }
+                                Text { text: s.meta; color: #b6ff3b; font-size: 11px; vertical-alignment: center; }
+                                Button { text: "+"; width: 36px; clicked => { root.add(i); } } } }
+                    }
+                }
+            }
+            Tab { title: "Chat";
+                ListView {
+                    for m in chat : Rectangle { background: m.host ? #3b2a6e : #231a3d; border-radius: 10px;
+                        VerticalLayout { padding: 8px; spacing: 4px;
+                            Text { text: m.who; color: m.host ? #b6ff3b : #cfc6ee; font-size: 11px; font-weight: 800; }
+                            StyledText { text: m.body; }
+                            if m.has-image : Image { source: m.pic; height: 90px; image-fit: contain; horizontal-alignment: left; }
+                        } }
+                }
+            }
+            Tab { title: "Ticker";
+                VerticalLayout { padding: 10px; spacing: 10px;
+                    CheckBox { text: "Show the custom message"; checked <=> root.custom-on; toggled => { root.custom-toggled(self.checked); } }
+                    Rectangle { background: #0b0816; border-radius: 8px; height: 56px; clip: true;
+                        Text { text: ticker-text; color: white; font-size: 22px; x: 10px; vertical-alignment: center; height: parent.height; } }
+                }
+            }
+            Tab { title: "Waitlist";
+                VerticalLayout { spacing: 6px; padding: 10px;
+                    Text { text: waitlist-status; color: #cfc6ee; }
+                    ListView {
+                        for sec in sections : VerticalLayout { spacing: 4px;
+                            Text { text: sec.title; color: #b6ff3b; font-size: 15px; font-weight: 800; }
+                            for r in sec.rows : Rectangle { background: #231a3d; border-radius: 10px; height: 74px;
+                                HorizontalLayout { padding: 8px; spacing: 10px;
+                                    Text { text: r.status; color: #b6ff3b; width: 130px; font-size: 12px; }
+                                    Text { text: r.text; color: white; font-size: 12px; wrap: word-wrap; horizontal-stretch: 1; } } }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

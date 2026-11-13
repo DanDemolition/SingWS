@@ -33,6 +33,33 @@ class MpvVideoHost(QWidget):
         self.setStyleSheet("background: black;")
 
 
+
+class VoiceOnlyClock:
+    """Stands in for the picture plugin when the video engine could not start a song (Rust-only mode, fallback off): the Rust voice is
+    the clock, so the song still sounds, ends and advances the rotation; there is simply no picture."""
+
+    def __init__(self, voice):
+        self.voice = voice
+        self.hold = False
+
+    def errorString(self): return ""
+    def loadSingWSMedia(self, *a, **k): return True
+    def setShadowAudio(self, *a, **k): pass
+    def setVolume(self, *a, **k): pass          # the transport sets the voice's volume itself
+    def setTempoRatio(self, *a, **k): pass      # likewise (key and tempo go to the voice)
+    def setPitchSemitones(self, *a, **k): pass
+    def isSeekHolding(self): return False
+    def visualsReady(self): return True
+    def positionMs(self): return int(self.voice.position_seconds() * 1000.0)
+    def durationMs(self): return int(self.voice.duration_seconds() * 1000.0)
+    def isPlaying(self): return bool(self.voice.is_playing())
+    def atEnd(self): return bool(self.voice.is_finished())
+    def playMedia(self): self.voice.play()
+    def pauseMedia(self): self.voice.pause()
+    def stopMedia(self): self.voice.stop()
+    def seekMedia(self, ms): self.voice.seek_seconds(max(0.0, ms / 1000.0))
+
+
 class MpvKaraokeTransport(QObject):
     """Expose the current transport API while mpv owns audio and video."""
 
@@ -151,6 +178,15 @@ class MpvKaraokeTransport(QObject):
             semitones=int(round(self._pitch_semitones)),
             tempo_percent=int(round(self._tempo_ratio * 100.0)),
         )
+        if not ok and voice_on and getattr(self.plugin, "picture_failed", False):
+            # Rust-only mode and the video engine failed twice (the operator has been told): keep the song, sound only.
+            self._voice_log("[VIDEO-BRIDGE] ERROR no picture for this song; it continues with sound only (Rust voice)")
+            self.plugin = VoiceOnlyClock(self._voice)
+            self._voice.free_run()
+            self._voice.play()
+            self._voice_phase = ""
+            voice_on = False
+            ok = True
         if not ok:
             if voice_on:
                 self._drop_voice("the picture failed to load")

@@ -1,0 +1,4 @@
+{"version":1,"pending_acceptance":null,"show_removed":false,"removed":{},"local_ids":[],"accepted_ids":[],"pending_accepted_ids":[],"first_time_names":["Dee"],
+"waiting":{
+"7":{"request_id":7,"singer":"Dee","artist":"Queen","title":"Radio Ga Ga","brand":"SC","path":"/x/a.zip","duration_secs":245,"requested_at":"2026-10-26T20:05:00","received_at_server":"2026-10-26T20:05:03Z","queue_position":3,"state":"waiting"},
+"8":{"request_id":8,"singer":"Eli","artist":"ABBA","title":"Waterloo","brand":"KV","path":"/x/b.zip","duration_secs":170,"requested_at":"2026-10-26T20:09:00","received_at_server":"2026-10-26T20:09:02Z","queue_position":5,"state":"waiting"}}}
