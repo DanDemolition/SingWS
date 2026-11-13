@@ -28,6 +28,7 @@ MAX_RECOVERIES = 3
 SAT_AT_END_S = 2.5
 END_MARGIN_S = 1.5
 SEEK_END_GUARD_S = 8.0
+KARAFUN_CAPTURE_WIDTH, KARAFUN_CAPTURE_HEIGHT, KARAFUN_CAPTURE_QUALITY = 1280, 720, 85
 FRAME_INTERVAL_MS = 16
 
 
@@ -82,7 +83,7 @@ class KaraFunWebHost:
                 factory = karafun_web.KaraFunWebService
             self.service = factory(self._service_state, on_message=self._on_message, on_frame=self._on_frame, on_log=self._log,
                                    credentials=self._saved_login)
-        if self.service.state in ("idle", "error"):
+        if self.service.state in ("idle", "error", "needs_browser"):
             self.service.start()
 
     def _saved_login(self):
@@ -109,7 +110,40 @@ class KaraFunWebHost:
         self._log(f"state={state} {detail}".rstrip())
         self.app._run_on_ui_thread(lambda: self._state_changed(state, detail))
 
+    _browser_declined = False      # the user said no to downloading Chromium this session: songs fail at once instead of asking again
+    _asking_browser = False
+
+    def _ask_for_browser(self) -> None:
+        """Chromium is not on this Mac: ask once before downloading it (about 150 MB from the Chromium project into ~/SingWS)."""
+        if self._browser_declined:
+            self._fail("KaraFun's player needs Chromium, and the download was declined")
+            return
+        if self._asking_browser or self.service is None:
+            return
+        self._asking_browser = True
+        from PyQt6.QtWidgets import QMessageBox
+        try:
+            answer = QMessageBox.question(
+                self.app, "KaraFun player needs Chromium",
+                "KaraFun songs play in Chromium, a lightweight browser that is not on this Mac yet.\n\n"
+                "Download it now? It is about 150 MB (400 MB on disk) from the Chromium project, saved in your SingWS folder, once.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.Yes)
+        except Exception as error:
+            self._log(f"could not ask about Chromium: {error}")
+            answer = None
+        finally:
+            self._asking_browser = False
+        if answer == QMessageBox.StandardButton.Yes and self.service is not None:
+            self._log("the user agreed to download Chromium")
+            self.service.start(download=True)
+        else:
+            self._browser_declined = True
+            self._fail("KaraFun's player needs Chromium, and the download was declined")
+
     def _state_changed(self, state: str, detail: str) -> None:
+        if state == "needs_browser":
+            self._ask_for_browser()
+            return
         asked = self.asked
         if asked is None:
             return
@@ -475,6 +509,22 @@ class KaraFunWebHost:
             pass
         return 1280, 720
 
+    def _route_sound(self) -> None:
+        """Play the player's sound on the output SingWS itself uses, not whatever macOS made the default: an AirPlay display flips the system default to
+        the TV, and SingWS already resolves its output without following it (a pinned device, else the headphone jack / built-in speakers)."""
+        name = ""
+        try:
+            name = str(self.app._safe_local_audio_output_name() or "")
+        except Exception:
+            settings = getattr(self.app, "settings", {}) or {}
+            if str(settings.get("audio_output_id", "default") or "default") != "default":
+                name = str(settings.get("audio_output_name", "") or "")
+        try:
+            self._log(f"player sound goes to: {name or 'the system default'}")
+            self.service.web.output(name)
+        except Exception:
+            pass
+
     def _start_frames(self) -> None:
         if self.service is None or self.service.web is None:
             return
@@ -484,9 +534,11 @@ class KaraFunWebHost:
             app._set_mpv_hosts_visible(False)   # a retained mpv view can cover Qt's painted audience and preview
         except Exception:
             pass
-        # Always captured at full HD: a smaller window was blown up to the TV and looked pixelated; Qt scales it down where the window is smaller.
+        # Captured at 720p: 1080p at JPEG 92 made the KaraFun picture slow and froze the whole screen at song start/end (2026-11-12 show),
+        # and could slow the Mac for a minute. Qt scales the 720p picture up to the audience window.
         self.service.web.audience(True)
-        self.service.web.start_screencast(1920, 1080, 92)
+        self._route_sound()
+        self.service.web.start_screencast(KARAFUN_CAPTURE_WIDTH, KARAFUN_CAPTURE_HEIGHT, KARAFUN_CAPTURE_QUALITY)
         if self._frame_timer is None:
             self._frame_timer = QTimer(app)
             self._frame_timer.setInterval(FRAME_INTERVAL_MS)

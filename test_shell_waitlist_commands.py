@@ -113,6 +113,8 @@ class AddTests(unittest.TestCase):
         a = h.app
         a._waitlist_add_request = types.MethodType(h.m.KaraokeApp._waitlist_add_request, a)
         a._mark_waiting_for_add_delivered_async = lambda rid, r: h.record("delivered", rid)
+        # The button's off-GUI-thread wrapper; here the worker hop is replaced by a direct call (the real one is covered in AddAsyncTests).
+        a._waitlist_add_request_async = lambda r, rid, done: done(*a._waitlist_add_request(r, rid))
         a.process_external_request = lambda r: (h.record("process_external", r.get("request_id")), self.outcome)[1]
         a._add_waiting_for_add_track = lambda r, track: (h.record("add_track", r.get("request_id"), track.get("title")), self.track_outcome)[1]
         self.outcome, self.track_outcome = True, True
@@ -194,8 +196,42 @@ class AddTests(unittest.TestCase):
         src = Path(__file__).with_name("0.2.18.1.py").read_text(encoding="utf-8")
         i = src.index("    def _add_selected_waiting_for_add(self):")
         body = src[i:i + 900]
-        self.assertIn("self._waitlist_add_request(req, rid)", body)
+        self.assertIn("self._waitlist_add_request_async(req, rid", body)
         self.assertIn("That song could not be added from the local library.", body)
+
+
+class AddAsyncTests(unittest.TestCase):
+    """`_waitlist_add_request_async`: the song/drive lookup runs on a worker thread, never the caller's (GUI) thread; the insert finishes via the UI-thread hop with the prepared payload."""
+
+    def test_prepare_runs_off_thread_and_payload_is_handed_to_the_insert(self):
+        import threading
+        h = harness(waiting={7: req(7)})
+        a = h.app
+        main = threading.current_thread()
+        seen = {}
+        payload = {"_ok": True, "request_id": 7}
+        def prepare(r):
+            seen["prep_thread"] = threading.current_thread()
+            return payload
+        a._prepare_remote_request_add_payload = prepare
+        a._singer_disc_priority_override = lambda singer: []
+        a._run_on_ui_thread = lambda fn: fn()
+        a._waitlist_add_inflight = set()  # the harness is not a fully built Qt object, so getattr-with-default would raise
+        done = threading.Event()
+        def add(r, rid, payload=None):
+            seen["payload"] = payload
+            return True, "added", ""
+        a._waitlist_add_request = add
+        results = []
+        def on_done(*res):
+            results.append(res)
+            done.set()
+        h.m.KaraokeApp._waitlist_add_request_async(a, req(7), 7, on_done)
+        self.assertTrue(done.wait(5))
+        self.assertIsNot(seen["prep_thread"], main)
+        self.assertIs(seen["payload"], payload)
+        self.assertEqual(results, [(True, "added", "")])
+        self.assertNotIn(7, a._waitlist_add_inflight)
 
 
 class SummaryTests(unittest.TestCase):

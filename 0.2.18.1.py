@@ -3951,7 +3951,15 @@ def _install_main_thread_watchdog(owner, threshold_ms: int = 120):
 
         def _stack_capture_enabled() -> bool:
             try:
-                return bool(getattr(owner, "settings", {}).get("stall_stack_capture", False))
+                _st = getattr(owner, "settings", {})
+                if bool(_st.get("stall_stack_capture", False)):
+                    return True
+                # Operator-approved 2026-11-13: James's machine (tenant kwj) captures stall stacks even though it is off elsewhere
+                # (it crashed shows on 2026-08-09 and 2026-10-30). Set stall_stack_capture_tenant_off=true there to opt out.
+                if bool(_st.get("stall_stack_capture_tenant_off", False)):
+                    return False
+                _tenant = str(_st.get("user", _st.get("tenant", "")) or "").strip().lower()
+                return _tenant in {"kwj"}
             except Exception:
                 return False
 
@@ -28043,7 +28051,7 @@ class KaraokeApp(QWidget):
         karafun_enabled = bool(self.settings.get("karafun_provider_enabled", True))
         try:
             import karafun_web
-            karafun_path = karafun_web.downloaded_chrome() if karafun_enabled else None      # the player's own browser (downloaded on first use)
+            karafun_path = karafun_web.find_browser() if karafun_enabled else None      # the Chromium bundled with the app
         except Exception:
             karafun_path = None
         checks.append((
@@ -31505,7 +31513,9 @@ class KaraokeApp(QWidget):
         self._github_update_worker.progress.connect(self._on_update_download_progress)
         self._github_update_worker.downloaded.connect(self._on_update_downloaded)
         self._github_update_worker.failed.connect(self._on_update_failed)
-        self._github_update_worker.start()
+        # The automatic check runs at show start (2026-11-11: a 7.7 s download + SHA-256 beside a loaded Mac). Keep it from competing with
+        # the GUI and audio; a manual "Check now" stays at normal priority so it is not slower for someone waiting on it.
+        self._github_update_worker.start(QThread.Priority.NormalPriority if manual else QThread.Priority.LowestPriority)
 
     def _maybe_auto_check_for_updates(self):
         try:
@@ -34997,7 +35007,7 @@ class KaraokeApp(QWidget):
         settings = state.get("settings") or {}
         try:
             import karafun_web
-            karafun_path = karafun_web.downloaded_chrome() if bool(settings.get("karafun_provider_enabled", True)) else None
+            karafun_path = karafun_web.find_browser() if bool(settings.get("karafun_provider_enabled", True)) else None
         except Exception:
             karafun_path = None
         try:
@@ -36698,14 +36708,50 @@ class KaraokeApp(QWidget):
         rid = self._waiting_for_add_request_id(req)
         if rid <= 0:
             return
-        ok, code, detail = self._waitlist_add_request(req, rid)
-        if not ok:
-            try:
-                QMessageBox.warning(self, "Waiting for Add", detail if code == "add_error" else "That song could not be added from the local library.")
-            except Exception:
-                pass
+        def _done(ok, code, detail):
+            if not ok:
+                try:
+                    QMessageBox.warning(self, "Waiting for Add", detail if code == "add_error" else "That song could not be added from the local library.")
+                except Exception:
+                    pass
 
-    def _waitlist_add_request(self, req: dict, rid: int) -> tuple[bool, str, str]:
+        self._waitlist_add_request_async(req, rid, _done)
+
+    def _waitlist_add_request_async(self, req: dict, rid: int, on_done) -> None:
+        """The Add button's body without freezing the GUI: resolving the song touches the karaoke drive (a sleeping external disk took 5-10 s, 2026-11-11), so that
+        runs on a worker thread and the queue insert finishes on the GUI thread. `on_done(ok, code, detail)` is called on the GUI thread."""
+        if isinstance(req.get("replacement_track"), dict) and req.get("replacement_track"):
+            on_done(*self._waitlist_add_request(req, rid))
+            return
+        inflight = getattr(self, "_waitlist_add_inflight", None)
+        if not isinstance(inflight, set):
+            inflight = set()
+            self._waitlist_add_inflight = inflight
+        if rid in inflight:
+            return
+        inflight.add(rid)
+        snapshot = dict(req or {})
+        try:
+            snapshot["_singer_override"] = self._singer_disc_priority_override(str(snapshot.get("singer", "") or ""))
+        except Exception:
+            snapshot["_singer_override"] = []
+
+        def worker():
+            try:
+                payload = self._prepare_remote_request_add_payload(snapshot)
+            except Exception as e:
+                logging.error(f"Waitlist add worker failed request_id={rid}: {e}")
+                payload = None  # fall back to the synchronous path on the GUI thread
+
+            def finish():
+                inflight.discard(rid)
+                on_done(*self._waitlist_add_request(req, rid, payload=payload))
+
+            self._run_on_ui_thread(finish)
+
+        threading.Thread(target=worker, daemon=True, name=f"waitlist-add-{rid}").start()
+
+    def _waitlist_add_request(self, req: dict, rid: int, *, payload: dict | None = None) -> tuple[bool, str, str]:
         """The body of the Add button (also `waitlist.add`), with no dialog: returns (ok, code, detail). `add_error` carries the message the button shows in its warning."""
         replacement = req.get("replacement_track") if isinstance(req.get("replacement_track"), dict) else None
         if replacement:
@@ -36716,7 +36762,7 @@ class KaraokeApp(QWidget):
                 return False, "add_error", str(e)
         ok = False
         try:
-            ok = bool(self.process_external_request(dict(req)))
+            ok = bool(self.process_external_request(dict(req), payload=payload) if payload is not None else self.process_external_request(dict(req)))
         except Exception as e:
             ok = False
             _diag(f"[WAITING-FOR-ADD] add failed request_id={rid}: {e}")
@@ -61094,7 +61140,8 @@ class KaraokeApp(QWidget):
                 pass
         self._update_deferred_remote_add_status()
 
-    def process_external_request(self, req):
+    def process_external_request(self, req, *, payload=None):
+        """`payload`: an already-prepared add payload (from a worker thread), so the library/drive lookups are not repeated on the GUI thread."""
         import time as time_module
         start = time_module.time()
         _perf_t0 = time.perf_counter()
@@ -61187,7 +61234,8 @@ class KaraokeApp(QWidget):
             self._record_remote_limit_blocked_request(req, limit_message)
             return _finish(False)
 
-        payload = self._prepare_remote_request_add_payload(req)
+        if not isinstance(payload, dict):
+            payload = self._prepare_remote_request_add_payload(req)
         if payload.get("_ok"):
             SingWSLogger.log_external_request(artist, title, singer, key)
             chosen = payload.get("track") or {}

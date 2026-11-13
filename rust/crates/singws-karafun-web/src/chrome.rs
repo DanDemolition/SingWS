@@ -22,10 +22,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// Where Google Chrome is, if it's installed.
+/// Where an installed Chromium is (the app always passes the bundled one with --chrome; this is only for running the helper by hand). Never Google Chrome.
 pub fn find() -> Option<PathBuf> {
-    let app = "Google Chrome.app/Contents/MacOS/Google Chrome";
     let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+    let app = "Chromium.app/Contents/MacOS/Chromium";
     [PathBuf::from("/Applications").join(app), home.join("Applications").join(app)].into_iter().find(|path| path.is_file())
 }
 
@@ -63,6 +63,9 @@ impl Chrome {
         command.args([
             "--headless=new", "--remote-debugging-pipe", "--no-first-run", "--no-default-browser-check",
             "--autoplay-policy=no-user-gesture-required", "--hide-scrollbars", "--window-size=1920,1080",
+            // Lets the page read the real output-device names (to play on the one SingWS is pinned to). Checked: with this flag alone the names are real and no
+            // microphone is opened; adding --use-fake-device-for-media-stream would replace them with "Fake Audio Output" entries.
+            "--use-fake-ui-for-media-stream",
             // Never slowed down, though it has no window anyone sees.
             "--disable-background-timer-throttling", "--disable-renderer-backgrounding", "--disable-backgrounding-occluded-windows",
         ]).arg(format!("--user-data-dir={}", profile.display())).arg("about:blank")

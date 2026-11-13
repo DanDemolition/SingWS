@@ -259,6 +259,41 @@
     post({ type: 'log', message: `seek from ${from}s to ${seconds}s: now at ${p.$state.currentTime}s` });
   };
 
+  // Play the player's sound on the output device SingWS is pinned to (matched by name), not the macOS default (an AirPlay display flips that to the TV).
+  // Covers <audio>/<video> elements and Web Audio contexts, including ones made later. '' = the system default.
+  const sinkContexts = new Set();
+  const NativeAudioContext = window.AudioContext;
+  if (NativeAudioContext && !window.__singwsSinkPatched) {
+    window.__singwsSinkPatched = true;
+    window.AudioContext = new Proxy(NativeAudioContext, { construct(target, args, newTarget) { const ctx = Reflect.construct(target, args, newTarget); sinkContexts.add(ctx); return ctx; } });
+  }
+  let wantedOutput = '';
+  let sinkTimer = null;
+  async function applyOutput() {
+    try {
+      let sinkId = '';
+      if (wantedOutput) {
+        // Device names are readable because the browser is started with --use-fake-ui-for-media-stream (no microphone is opened).
+        // The entries called "default" / "communications" are skipped: they follow the macOS default, which an AirPlay display takes over.
+        const devices = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'audiooutput');
+        const real = devices.filter(d => d.deviceId !== 'default' && d.deviceId !== 'communications' && d.label);
+        const want = wantedOutput.toLowerCase();
+        const match = real.find(d => d.label.toLowerCase() === want) || real.find(d => d.label.toLowerCase().includes(want));
+        if (!match) { post({ type: 'log', message: `audio output "${wantedOutput}" not found among: ${devices.map(d => d.label || '(no label)').join(' | ')}` }); return; }
+        sinkId = match.deviceId;
+      }
+      let applied = 0;
+      for (const el of document.querySelectorAll('audio,video')) { if (el.sinkId !== sinkId && el.setSinkId) { await el.setSinkId(sinkId); applied += 1; } }
+      for (const ctx of sinkContexts) { if (ctx.sinkId !== sinkId && ctx.setSinkId) { await ctx.setSinkId(sinkId); applied += 1; } }
+      if (applied) post({ type: 'log', message: `audio output set to "${wantedOutput || 'system default'}" on ${applied} player(s)` });
+    } catch (error) { post({ type: 'log', message: `audio output change failed: ${error && error.message || error}` }); }
+  }
+  window.singwsOutput = name => {
+    wantedOutput = String(name || '');
+    applyOutput();
+    if (!sinkTimer) sinkTimer = setInterval(applyOutput, 4000);   // new players appear with each song
+  };
+
   // On the audience screen: KaraFun's lyrics picture (a canvas it draws on)
   // fills the window, over the rest of the page.
   // A clear sheet over it all catches the mouse, so nothing of KaraFun's page

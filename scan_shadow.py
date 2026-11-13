@@ -41,6 +41,9 @@ def normalize_engine(value) -> str:
     return text if text in ENGINES else "python"
 
 
+DEFAULT_SHADOW_MAX_TRACKS = 20000
+
+
 def effective_engine(settings) -> str:
     """What the app should do: ``"shadow"`` or ``"python"`` (``"rust"`` is deliberately not reachable)."""
     engine = normalize_engine((settings or {}).get("scan_engine", "python"))
@@ -186,6 +189,17 @@ def start(result: dict, roots, quick_mode, old_tracks, settings_snapshot, log) -
             _warned_rust = True
             log("[SCAN-SHADOW] scan_engine=rust is not wired; the app's own scan is used")
         if effective_engine(settings_snapshot) != "shadow":
+            return None
+        # The comparison deep-copies the whole result and the old track list through JSON and starts a helper that reread the library (one show
+        # saw the app keep +300 MB and a 2 GB helper, with 5 s GUI stalls, from a 133k-track scan on 2026-11-12). That is fine for a small
+        # library and too costly for a real one, so a big library is not compared. 0 disables the limit.
+        try:
+            limit = int((settings_snapshot or {}).get("scan_shadow_max_tracks", DEFAULT_SHADOW_MAX_TRACKS) or 0)
+        except (TypeError, ValueError):
+            limit = DEFAULT_SHADOW_MAX_TRACKS
+        n_tracks = len((result or {}).get("tracks") or [])
+        if limit > 0 and n_tracks > limit:
+            log(f"[SCAN-SHADOW] skipped: {n_tracks:,} tracks is over scan_shadow_max_tracks={limit:,}")
             return None
         # Detach everything the thread reads from what the UI thread is about to mutate.
         snapshot = json.loads(json.dumps(result, default=str))

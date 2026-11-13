@@ -115,7 +115,7 @@ class StatusSnapshot(unittest.TestCase):
         app._mpv_preview_host = object() if f["preview"] else None
         app.video_window = mock.MagicMock(ticker=object() if f["ticker"] else None)
         import karafun_web
-        return [mock.patch.object(karafun_web, "downloaded_chrome", lambda: Path(f["karafun"]) if f["karafun"] else None),
+        return [mock.patch.object(karafun_web, "find_browser", lambda: Path(f["karafun"]) if f["karafun"] else None),
                 mock.patch.object(self.singws, "scan_background_video_folder", lambda folder: list(f["bg"])),
                 mock.patch.object(self.singws.QApplication, "screens", staticmethod(lambda: [object()] * f["screens"])),
                 mock.patch.object(self.singws, "datetime", FixedDT)]

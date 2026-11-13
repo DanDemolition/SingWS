@@ -69,6 +69,8 @@ fn script_for(line: &Value) -> Option<String> {
             let password = line.get("password").filter(|v| v.is_string())?;
             format!("singwsLogin({email}, {password})")
         }
+        // The output device's name as a JSON string, so nothing in it can break out of the call.
+        "output" => format!("singwsOutput({})", line.get("name").filter(|v| v.is_string()).cloned().unwrap_or(json!(""))),
         "audience" => format!("singwsAudience({})", line.get("on").and_then(|v| v.as_bool()).unwrap_or(true)),
         _ => return None,
     })
@@ -79,7 +81,7 @@ fn main() {
         PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join("SingWS").join("Chrome-KaraFun")
     });
     let Some(binary) = arg("--chrome").map(PathBuf::from).or_else(chrome::find) else {
-        say(json!({"type": "helper", "state": "failed", "error": "Google Chrome is not installed"}));
+        say(json!({"type": "helper", "state": "failed", "error": "Chromium is not installed"}));
         std::process::exit(2);
     };
     let _ = std::fs::create_dir_all(&profile);

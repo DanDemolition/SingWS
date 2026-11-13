@@ -50,7 +50,7 @@ def main():
         state["bytes"] += len(b)
 
     k = karafun_web.KaraFunWeb(profile, on_message=on_message, on_frame=on_frame, on_log=lambda s: print("log:", s, flush=True), chrome_path=args.chrome)
-    print("helper:", k.helper_path, "chrome:", args.chrome or karafun_web.find_chrome(), "profile:", profile)
+    print("helper:", k.helper_path, "chrome:", args.chrome or karafun_web.find_browser(), "profile:", profile)
     k.start()
     if args.screencast:
         k.start_screencast(1280, 720)

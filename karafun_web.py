@@ -27,15 +27,6 @@ from typing import Callable, Optional
 _HELPER_NAME = "singws-karafun-web"
 
 
-def find_chrome() -> Optional[Path]:
-    """Where Google Chrome is, if it is installed (system or per-user Applications)."""
-    app = Path("Google Chrome.app/Contents/MacOS/Google Chrome")
-    for base in (Path("/Applications"), Path.home() / "Applications"):
-        if (base / app).is_file():
-            return base / app
-    return None
-
-
 def find_helper() -> Optional[Path]:
     """The helper binary: SINGWS_KARAFUN_WEB, the app bundle's Frameworks, native/singws_karafun_web/<arch>, or a cargo build."""
     import platform
@@ -54,42 +45,52 @@ def find_helper() -> Optional[Path]:
     return None
 
 
-# ---- the browser: installed Chrome if there is one, else Chrome for Testing downloaded once into ~/SingWS
-# Chrome for Testing is published on these hosts only (the index says where each version is).
-_CFT_HOSTS = ("storage.googleapis.com", "edgedl.me.gvt1.com", "dl.google.com")
-_CFT_INDEX = "https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json"
+# ---- the browser: Chromium, downloaded into ~/SingWS only after the user says yes (never Google Chrome, never Chrome for Testing)
+# Chromium builds are published by the Chromium project on this host only.
+_CHROMIUM_HOST = "commondatastorage.googleapis.com"
 
 
-def _platform_key() -> str:
+class BrowserMissing(RuntimeError):
+    """Chromium is not on this Mac yet; the caller asks the user before calling ensure_browser(allow_download=True)."""
+
+
+def _snapshot_base() -> str:
     import platform
-    return "mac-arm64" if platform.machine() in ("arm64", "aarch64") else "mac-x64"
+    bucket = "Mac_Arm" if platform.machine() in ("arm64", "aarch64") else "Mac"
+    return f"https://{_CHROMIUM_HOST}/chromium-browser-snapshots/{bucket}"
 
 
 def browser_root() -> Path:
-    """Where downloaded browsers live (~/SingWS/Chrome-for-Testing, or under SINGWS_HOME)."""
+    """Where the downloaded Chromium lives (~/SingWS/Chromium, or under SINGWS_HOME)."""
     home = os.environ.get("SINGWS_HOME")
-    return (Path(home) if home else Path.home() / "SingWS") / "Chrome-for-Testing"
+    return (Path(home) if home else Path.home() / "SingWS") / "Chromium"
 
 
-def _cft_binary(folder: Path) -> Path:
-    return folder / f"chrome-{_platform_key()}" / "Google Chrome for Testing.app" / "Contents" / "MacOS" / "Google Chrome for Testing"
+def _chromium_binary(folder: Path) -> Path:
+    return folder / "Chromium.app" / "Contents" / "MacOS" / "Chromium"
 
 
-def downloaded_chrome() -> Optional[Path]:
-    """A Chrome for Testing already downloaded (the newest version folder), if any."""
+def find_browser() -> Optional[Path]:
+    """The Chromium already on this Mac: the newest one SingWS downloaded, else an installed /Applications/Chromium.app. None if there is none."""
     root = browser_root()
-    if not root.is_dir():
-        return None
-    for folder in sorted((d for d in root.iterdir() if d.is_dir() and not d.name.startswith(".")), reverse=True):
-        binary = _cft_binary(folder)
-        if binary.is_file() and (folder / ".complete").is_file():
-            return binary
+    if root.is_dir():
+        for folder in sorted((d for d in root.iterdir() if d.is_dir() and not d.name.startswith(".")), reverse=True):
+            binary = _chromium_binary(folder)
+            if binary.is_file() and (folder / ".complete").is_file():
+                return binary
+    app = Path("Chromium.app/Contents/MacOS/Chromium")
+    for base in _installed_bases():
+        if (base / app).is_file():
+            return base / app
     return None
 
 
+def _installed_bases() -> list:
+    return [Path("/Applications"), Path.home() / "Applications"]
+
+
 def _default_open(url: str, timeout: float = 30):
-    """urlopen with the same root certificates the rest of SingWS uses (certifi): a Python without its certificates installed
-    (the python.org one, or a frozen app) cannot verify Google's otherwise."""
+    """urlopen with the same root certificates the rest of SingWS uses (certifi)."""
     import ssl
     import urllib.request
     try:
@@ -100,84 +101,79 @@ def _default_open(url: str, timeout: float = 30):
     return urllib.request.urlopen(url, timeout=timeout, context=context)
 
 
-def ensure_browser(progress: Callable[[int, int], None] = lambda done, total: None, *, urlopen=None, verify: bool = True) -> Path:
-    """The browser KaraFun's player runs in: SingWS's OWN Chrome for Testing in ~/SingWS (downloaded now if it is not there yet: about 200 MB from Google's
-    own site, checked that it runs and is the version asked for, unpacked into a folder of its own). It is never the installed Google Chrome: nothing you do
-    in your everyday Chrome (quitting it, scripting it, updating it, force-quitting it) can reach the player. Offline on the very first start there is
-    nothing to fall back on, and that is reported plainly.
-    `progress(bytes_done, bytes_total)` is called while it downloads. Raises RuntimeError (nothing half-installed is left behind)."""
-    have = downloaded_chrome()
+def ensure_browser(progress: Callable[[int, int], None] = lambda done, total: None, *, urlopen=None, allow_download: bool = False) -> Path:
+    """The browser KaraFun's player runs in. An existing Chromium is used as is. Without one, nothing is downloaded unless `allow_download` (the user said yes):
+    BrowserMissing is raised instead so the caller can ask. `progress(bytes_done, bytes_total)` is called while it downloads.
+    Raises RuntimeError (nothing half-installed is left behind) when the download fails."""
+    have = find_browser()
     if have is not None:
         return have
+    if not allow_download:
+        raise BrowserMissing("KaraFun's player needs Chromium, which is not on this Mac yet")
     try:
-        return _download_browser(progress, urlopen, verify)
+        return _download_browser(progress, urlopen)
     except RuntimeError as error:
-        raise RuntimeError(f"the player's own browser is not on this Mac yet and could not be downloaded (internet needed once): {error}") from error
+        raise RuntimeError(f"Chromium could not be downloaded (internet needed once): {error}") from error
 
 
-def _download_browser(progress, urlopen, verify) -> Path:
+def _download_browser(progress, urlopen) -> Path:
+    import re
     import shutil
     import tempfile
     opener = urlopen or _default_open
+    base = _snapshot_base()
     try:
-        with opener(_CFT_INDEX, timeout=30) as response:
-            index = json.loads(response.read().decode("utf-8"))
-        stable = index["channels"]["Stable"]
-        version = str(stable["version"])
-        url = next(d["url"] for d in stable["downloads"]["chrome"] if d["platform"] == _platform_key())
+        with opener(base + "/LAST_CHANGE", timeout=30) as response:
+            revision = response.read().decode("utf-8").strip()
     except Exception as error:
-        raise RuntimeError(f"could not find a browser to download: {error}") from error
-    from urllib.parse import urlparse
-    host = urlparse(url).hostname or ""
-    if not url.startswith("https://") or host not in _CFT_HOSTS:
-        raise RuntimeError(f"the browser download address is not Google's ({host or url[:40]})")
-    if not re.fullmatch(r"[0-9A-Za-z][0-9A-Za-z._-]*", version) or ".." in version:
-        # The version names a folder under the browser root: anything else (a slash, "..", a leading dot) could leave that folder.
-        raise RuntimeError("the browser version is not a plain name")
+        raise RuntimeError(f"could not find the newest Chromium: {error}") from error
+    if not re.fullmatch(r"[0-9]{1,12}", revision):      # the revision names a folder under the browser root: only digits may
+        raise RuntimeError("the Chromium revision is not a plain number")
+    url = f"{base}/{revision}/chrome-mac.zip"
+    host = url.split("/")[2] if url.startswith("https://") else ""
+    if host != _CHROMIUM_HOST:
+        raise RuntimeError(f"the Chromium download address is not the Chromium project's ({host or url[:40]})")
     root = browser_root()
     root.mkdir(parents=True, exist_ok=True)
     work = Path(tempfile.mkdtemp(prefix=".download-", dir=root))
     try:
-        archive = work / "chrome.zip"
-        total = done = 0
-        with opener(url, timeout=60) as response, open(archive, "wb") as out:
-            total = int(response.headers.get("Content-Length") or 0)
-            while True:
-                chunk = response.read(1 << 20)
-                if not chunk:
-                    break
-                out.write(chunk)
-                done += len(chunk)
-                progress(done, total)
+        archive = work / "chromium.zip"
+        try:
+            with opener(url, timeout=60) as response:
+                total = int(response.headers.get("Content-Length") or 0)
+                done = 0
+                with open(archive, "wb") as out:
+                    while True:
+                        block = response.read(1024 * 1024)
+                        if not block:
+                            break
+                        out.write(block)
+                        done += len(block)
+                        progress(done, total)
+        except Exception as error:
+            raise RuntimeError(f"the download failed: {error}") from error
         if total and done != total:
-            raise RuntimeError(f"the download stopped early ({done} of {total} bytes)")
+            raise RuntimeError(f"the download was cut short ({done} of {total} bytes)")
         unpacked = work / "unpacked"
-        unpacked.mkdir()
-        # ditto keeps the app's links and permissions (Python's zipfile would lose them).
         result = subprocess.run(["/usr/bin/ditto", "-x", "-k", str(archive), str(unpacked)], capture_output=True, text=True, timeout=300)
         if result.returncode != 0:
-            raise RuntimeError("the browser could not be unpacked: " + (result.stderr or "").strip()[:200])
-        archive.unlink()
-        app = unpacked / f"chrome-{_platform_key()}" / "Google Chrome for Testing.app"
-        if not _cft_binary(unpacked).is_file():
-            raise RuntimeError("the downloaded browser has no program in it")
-        if verify:
-            # Chrome for Testing is not signed by Google (only ad-hoc), so the check is: Google's own download host, the size, and
-            # that the program runs and names itself and the version we asked for.
-            try:
-                said = subprocess.run([str(_cft_binary(unpacked)), "--version"], capture_output=True, text=True, timeout=60).stdout
-            except Exception as error:
-                raise RuntimeError(f"the downloaded browser would not run: {error}") from error
-            if "Google Chrome for Testing" not in said or version not in said:
-                raise RuntimeError("the downloaded browser is not the one asked for: " + said.strip()[:120])
-        (unpacked / ".complete").write_text(version)
-        final = root / version
-        if final.is_symlink() or final.is_file():
-            final.unlink()            # a plain file with the version's name would make the rename fail
-        elif final.exists():
-            shutil.rmtree(final, ignore_errors=True)
-        unpacked.rename(final)
-        return _cft_binary(final)
+            raise RuntimeError("Chromium could not be unpacked: " + (result.stderr or "").strip()[:200])
+        found = next(unpacked.rglob("Chromium.app"), None)
+        if found is None or not _chromium_binary(found.parent).is_file():
+            raise RuntimeError("the download has no Chromium in it")
+        try:
+            said = subprocess.run([str(_chromium_binary(found.parent)), "--version"], capture_output=True, text=True, timeout=60).stdout
+        except Exception as error:
+            raise RuntimeError(f"the downloaded Chromium would not run: {error}") from error
+        if "Chromium" not in said:
+            raise RuntimeError("the download is not Chromium: " + said.strip()[:120])
+        final = root / f"r{revision}"
+        if final.exists() or final.is_symlink():
+            shutil.rmtree(final, ignore_errors=True) if final.is_dir() and not final.is_symlink() else final.unlink()
+        final.mkdir()
+        found.rename(final / "Chromium.app")
+        (final / ".complete").write_text(said.strip())
+        return _chromium_binary(final)
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
@@ -293,6 +289,7 @@ class KaraFunWeb:
     def login(self, email: str, password: str) -> None: self.command("login", email=str(email), password=str(password))
     def sign_out(self) -> None: self.command("signout")
     def audience(self, on: bool = True) -> None: self.command("audience", on=bool(on))
+    def output(self, name: str = "") -> None: self.command("output", name=str(name or ""))   # route the player's sound to this output device ('' = system default)
     def reload(self) -> None: self.command("reload")
 
     def start_screencast(self, width: int, height: int, quality: int = 80) -> None:
@@ -310,10 +307,11 @@ SIGN_IN_AFTER_STATUSES = 60      # statuses come twice a second
 class KaraFunWebService:
     """The whole set-up, automatic: nothing to choose or install by hand.
 
-    start() runs on its own thread: it finds Google Chrome or downloads Chrome for Testing into ~/SingWS (a fixed folder, shown as progress),
+    start() runs on its own thread: it finds Chromium, or (when told the user agreed: start(download=True)) downloads it into ~/SingWS with progress,
     starts the helper with a profile folder that keeps the sign-in, and when KaraFun says it is not signed in it opens KaraFun's own sign-in
     ("Add a TV") in the user's browser, once. `on_state(state, detail)` says where it is, for a line of text in the settings:
-      "preparing"  detail "Looking for a browser" / "Downloading the browser (37%)"
+      "preparing"  detail "Looking for a browser" / "Downloading Chromium (37%)"
+      "needs_browser"  Chromium is not on this Mac: ask the user, then start(download=True)
       "starting"   "Starting KaraFun's player"
       "ready"      "Signed in to <plan>"     (the player is up and signed in)
       "sign_in"    "Sign in to KaraFun in your browser, then come back"
@@ -339,6 +337,7 @@ class KaraFunWebService:
         self._signed_out_seen = 0
         self._sign_in_opened = False
         self._ready_told = False
+        self._allow_download = False
 
     def _set(self, state: str, detail: str = "") -> None:
         self.state = state
@@ -347,7 +346,7 @@ class KaraFunWebService:
         except Exception as error:
             self.on_log(f"state callback error: {error!r}")
 
-    def start(self) -> None:
+    def start(self, download: bool = False) -> None:
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
                 return
@@ -356,6 +355,7 @@ class KaraFunWebService:
             self._login_tried = False
             self._reload_after_login = False
             self._ready_told = False
+            self._allow_download = bool(download)
             self._thread = threading.Thread(target=self._run, name="karafun-web-setup", daemon=True)
             self._thread.start()
 
@@ -367,12 +367,16 @@ class KaraFunWebService:
 
     def _progress(self, done: int, total: int) -> None:
         percent = f" ({done * 100 // total}%)" if total else ""
-        self._set("preparing", f"Downloading the browser{percent}")
+        self._set("preparing", f"Downloading Chromium{percent}")
 
     def _run(self) -> None:
         try:
             self._set("preparing", "Looking for a browser")
-            browser = self._find_browser(self._progress)
+            try:
+                browser = self._find_browser(self._progress, allow_download=self._allow_download)
+            except BrowserMissing as missing:
+                self._set("needs_browser", str(missing))
+                return
             self._set("starting", "Starting KaraFun's player")
             web = self._make_web(on_message=self._message, on_frame=self.on_frame, on_log=self.on_log, chrome_path=browser)
             self.web = web

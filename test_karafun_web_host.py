@@ -27,7 +27,9 @@ class FakeService:
         self.web = FakeWeb()
         self.started = 0
         self.stopped = 0
-    def start(self): self.started += 1
+    def start(self, download=False):
+        self.started += 1
+        self.downloads = getattr(self, 'downloads', 0) + (1 if download else 0)
     def stop(self):
         self.state = "idle"; self.stopped += 1
 
@@ -106,6 +108,34 @@ class HostTests(unittest.TestCase):
         self.assertTrue(host.start(entry, 2, 90))
         self.assertIn(("play", (3241559, "NOFX Linoleum", ["NOFX Linoleum", "Linoleum NOFX", "Linoleum", "NOFX"], "NOFX", "Linoleum")), service.web.calls)
         self.assertEqual(app.statuses[0], ("launching", "Starting KaraFun..."))
+
+    def test_the_players_sound_follows_singwss_own_output_not_the_system_default(self):
+        app, entry, service, host = make()
+        app._safe_local_audio_output_name = lambda: "MacBook Pro Speakers"
+        host.service = service
+        host._route_sound()
+        self.assertIn(("output", ("MacBook Pro Speakers",)), service.web.calls)
+
+    def test_a_missing_chromium_asks_first_and_downloads_only_on_yes(self):
+        from PyQt6.QtWidgets import QMessageBox
+        app, entry, service, host = make(state="starting")
+        host.start(entry, 0, 100)
+        with mock.patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes) as ask:
+            host._service_state("needs_browser", "needs Chromium")
+        ask.assert_called_once()
+        self.assertEqual(service.downloads, 1)
+        self.assertFalse(host._browser_declined)
+
+    def test_declining_the_chromium_download_fails_the_song_and_is_not_asked_again(self):
+        from PyQt6.QtWidgets import QMessageBox
+        app, entry, service, host = make(state="starting")
+        host.start(entry, 0, 100)
+        with mock.patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.No) as ask:
+            host._service_state("needs_browser", "needs Chromium")
+            self.assertEqual(getattr(service, "downloads", 0), 0)
+            self.assertTrue(host._browser_declined)
+            host._service_state("needs_browser", "needs Chromium")
+        ask.assert_called_once()
 
     def test_start_while_the_player_is_still_starting_plays_when_it_is_ready(self):
         app, entry, service, host = make(state="starting")

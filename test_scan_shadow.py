@@ -205,5 +205,20 @@ class AppAnnounceHook(unittest.TestCase):
         self.assertIn("{**DEFAULTS,", src[i:i + 700])
 
 
+class BigLibrarySkipTests(unittest.TestCase):
+    """A real-size library is not deep-copied and re-scanned by the shadow (+300 MB kept, a 2 GB helper and GUI stalls on a 133k-track scan)."""
+
+    def test_over_the_limit_is_skipped_and_logged(self):
+        lines = []
+        tracks = [{"path": f"/m/{i}.zip"} for i in range(30)]
+        out = scan_shadow.start(_result(tracks), ["/m"], False, [], {"scan_engine": "shadow", "scan_shadow_max_tracks": 10}, lines.append)
+        self.assertIsNone(out)
+        self.assertTrue(any("skipped" in line and "scan_shadow_max_tracks" in line for line in lines))
+
+    def test_default_limit_leaves_small_libraries_compared(self):
+        self.assertEqual(scan_shadow.DEFAULT_SHADOW_MAX_TRACKS, 20000)
+        self.assertTrue(len(_result([{"path": "/m/a.zip"}]).get("tracks")) <= scan_shadow.DEFAULT_SHADOW_MAX_TRACKS)
+
+
 if __name__ == "__main__":
     unittest.main()

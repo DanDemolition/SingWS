@@ -36,111 +36,88 @@ class Response(io.BytesIO):
     def __exit__(self, *a): self.close()
 
 
-def server(zip_bytes, length=None):
-    index = {"channels": {"Stable": {"version": "999.0.1", "downloads": {"chrome": [
-        {"platform": "mac-arm64", "url": "https://storage.googleapis.com/x/a.zip"}, {"platform": "mac-x64", "url": "https://storage.googleapis.com/x/b.zip"}]}}}}
+def chromium_zip(root, version_text="Chromium 160.0.1.2", with_app=True):
+    src = root / "zipsrc"
+    if with_app:
+        binary = src / "chrome-mac" / "Chromium.app" / "Contents" / "MacOS" / "Chromium"
+        binary.parent.mkdir(parents=True)
+        binary.write_text(f"#!/bin/sh\necho '{version_text}'\n")
+        binary.chmod(0o755)
+    else:
+        (src / "elsewhere").mkdir(parents=True)
+        (src / "elsewhere" / "x").write_text("x")
+    out = root / "fake.zip"
+    subprocess.run(["/usr/bin/ditto", "-c", "-k", "--sequesterRsrc", str(src), str(out)], check=True)
+    return out.read_bytes()
+
+
+def chromium_server(zip_bytes, revision="1744193", length=None):
     def opener(url, timeout=None):
-        return Response(json.dumps(index).encode()) if url.endswith(".json") else Response(zip_bytes, length)
+        return Response(revision.encode()) if url.endswith("LAST_CHANGE") else Response(zip_bytes, length)
     return opener
 
 
 class BrowserTests(unittest.TestCase):
+    """Chromium is downloaded only after the user agreed; Chrome and Chrome for Testing are never used."""
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
-        patcher = mock.patch.dict(os.environ, {"SINGWS_HOME": str(self.root / "home")})
+        patcher = mock.patch.dict(os.environ, {"SINGWS_HOME": str(self.root / "home"), "HOME": str(self.root / "nohome")})
         patcher.start(); self.addCleanup(patcher.stop); self.addCleanup(self.tmp.cleanup)
+        # an installed /Applications/Chromium.app on this Mac must not change the results
+        no_app = mock.patch.object(karafun_web, "_installed_bases", return_value=[])
+        no_app.start(); self.addCleanup(no_app.stop)
 
-    def test_the_dedicated_browser_is_preferred_over_an_installed_chrome(self):
-        data = fake_zip(self.root)
-        with mock.patch.object(karafun_web, "find_chrome", return_value=Path("/x/chrome")):
-            got = karafun_web.ensure_browser(urlopen=server(data), verify=True)
-            self.assertIn("999.0.1", str(got))                     # SingWS's own copy, not the everyday Chrome
-            again = karafun_web.ensure_browser(urlopen=mock.Mock(side_effect=AssertionError("downloaded twice")), verify=True)
-            self.assertEqual(again, got)
+    def test_without_chromium_nothing_downloads_until_the_user_agrees(self):
+        opener = mock.Mock(side_effect=AssertionError("must not download"))
+        with self.assertRaises(karafun_web.BrowserMissing):
+            karafun_web.ensure_browser(urlopen=opener)
 
-    def test_the_installed_chrome_is_never_used_even_when_the_download_fails(self):
-        def offline(url, timeout=None):
-            raise OSError("no internet")
-        with mock.patch.object(karafun_web, "find_chrome", return_value=Path("/x/chrome")) as finder:
-            with self.assertRaises(RuntimeError) as ctx:
-                karafun_web.ensure_browser(urlopen=offline)
-            self.assertIn("internet needed once", str(ctx.exception))
-            finder.assert_not_called()                              # the everyday Chrome is not even looked at
-
-    def test_it_downloads_once_unpacks_checks_and_reuses(self):
-        data = fake_zip(self.root)
+    def test_it_downloads_once_after_consent_checks_it_runs_and_reuses_it(self):
+        data = chromium_zip(self.root)
         seen = []
-        with mock.patch.object(karafun_web, "find_chrome", return_value=None):
-            first = karafun_web.ensure_browser(lambda d, t: seen.append((d, t)), urlopen=server(data), verify=True)
-            self.assertTrue(first.is_file())
-            self.assertIn("999.0.1", str(first))
-            self.assertEqual(seen[-1][0], len(data))
-            # the second time nothing is fetched
-            again = karafun_web.ensure_browser(urlopen=mock.Mock(side_effect=AssertionError("downloaded twice")), verify=True)
-            self.assertEqual(again, first)
+        got = karafun_web.ensure_browser(lambda d, t: seen.append((d, t)), urlopen=chromium_server(data), allow_download=True)
+        self.assertTrue(got.is_file())
+        self.assertEqual(got.parent.parent.parent.parent.name, "r1744193")
+        self.assertEqual(seen[-1][0], len(data))
+        again = karafun_web.ensure_browser(urlopen=mock.Mock(side_effect=AssertionError("downloaded twice")))
+        self.assertEqual(again, got)
         leftovers = [p.name for p in karafun_web.browser_root().iterdir() if p.name.startswith(".download")]
         self.assertEqual(leftovers, [])
 
-    def test_a_version_that_is_not_a_plain_name_installs_nothing_and_stays_inside_the_browser_folder(self):
-        data = fake_zip(self.root)
-        for bad in ("../evil", "1/2", ".hidden", "1..2", ""):
-            def opener(url, timeout=None, bad=bad):
-                index = {"channels": {"Stable": {"version": bad, "downloads": {"chrome": [
-                    {"platform": "mac-arm64", "url": "https://storage.googleapis.com/x/a.zip"}, {"platform": "mac-x64", "url": "https://storage.googleapis.com/x/b.zip"}]}}}}
-                return Response(json.dumps(index).encode()) if url.endswith(".json") else Response(data)
-            with self.assertRaises(RuntimeError, msg=bad):
-                karafun_web.ensure_browser(urlopen=opener, verify=False)
+    def test_a_revision_that_is_not_a_number_installs_nothing(self):
+        with self.assertRaises(RuntimeError):
+            karafun_web.ensure_browser(urlopen=chromium_server(chromium_zip(self.root), revision="../evil"), allow_download=True)
         self.assertFalse((karafun_web.browser_root().parent / "evil").exists())
-        self.assertFalse(karafun_web.browser_root().exists())      # refused before anything was created
-
-    def test_a_plain_file_with_the_versions_name_does_not_stop_the_install(self):
-        data = fake_zip(self.root)
-        root = karafun_web.browser_root()
-        root.mkdir(parents=True)
-        (root / "999.0.1").write_text("in the way")
-        with mock.patch.object(karafun_web, "find_chrome", return_value=None):
-            got = karafun_web.ensure_browser(urlopen=server(data), verify=True)
-        self.assertTrue(got.is_file())
-        self.assertTrue((root / "999.0.1").is_dir())
 
     def test_a_short_download_installs_nothing(self):
-        data = fake_zip(self.root)
-        with mock.patch.object(karafun_web, "find_chrome", return_value=None):
-            with self.assertRaises(RuntimeError):
-                karafun_web.ensure_browser(urlopen=server(data, length=len(data) + 10), verify=False)
-        self.assertIsNone(karafun_web.downloaded_chrome())
-        self.assertEqual([p.name for p in karafun_web.browser_root().iterdir()], [])
+        data = chromium_zip(self.root)
+        with self.assertRaises(RuntimeError):
+            karafun_web.ensure_browser(urlopen=chromium_server(data, length=len(data) + 10), allow_download=True)
+        self.assertIsNone(karafun_web.find_browser())
 
-    def test_a_zip_without_the_program_installs_nothing(self):
-        data = fake_zip(self.root, name_ok=False)
-        with mock.patch.object(karafun_web, "find_chrome", return_value=None):
-            with self.assertRaises(RuntimeError):
-                karafun_web.ensure_browser(urlopen=server(data), verify=False)
-        self.assertIsNone(karafun_web.downloaded_chrome())
+    def test_a_zip_without_chromium_installs_nothing(self):
+        with self.assertRaises(RuntimeError):
+            karafun_web.ensure_browser(urlopen=chromium_server(chromium_zip(self.root, with_app=False)), allow_download=True)
+        self.assertIsNone(karafun_web.find_browser())
 
-    def test_a_program_that_does_not_name_itself_right_installs_nothing(self):
-        data = fake_zip(self.root, name_ok="wrong")
-        with mock.patch.object(karafun_web, "find_chrome", return_value=None):
-            with self.assertRaises(RuntimeError):
-                karafun_web.ensure_browser(urlopen=server(data), verify=True)
-        self.assertIsNone(karafun_web.downloaded_chrome())
+    def test_a_program_that_is_not_chromium_installs_nothing(self):
+        with self.assertRaises(RuntimeError):
+            karafun_web.ensure_browser(urlopen=chromium_server(chromium_zip(self.root, version_text="Google Chrome 1")), allow_download=True)
+        self.assertIsNone(karafun_web.find_browser())
 
-    def test_only_googles_download_host_is_accepted(self):
-        index = {"channels": {"Stable": {"version": "1", "downloads": {"chrome": [
-            {"platform": karafun_web._platform_key(), "url": "https://example.invalid/a.zip"}]}}}}
-        opener = lambda url, timeout=None: Response(json.dumps(index).encode())
-        with mock.patch.object(karafun_web, "find_chrome", return_value=None):
+    def test_only_the_chromium_projects_host_and_https_are_used(self):
+        with mock.patch.object(karafun_web, "_snapshot_base", return_value="https://evil.example.com/x"):
+            with self.assertRaisesRegex(RuntimeError, "not the Chromium project"):
+                karafun_web.ensure_browser(urlopen=chromium_server(b"x"), allow_download=True)
+        with mock.patch.object(karafun_web, "_snapshot_base", return_value="http://commondatastorage.googleapis.com/x"):
             with self.assertRaises(RuntimeError):
-                karafun_web.ensure_browser(urlopen=opener, verify=False)
+                karafun_web.ensure_browser(urlopen=chromium_server(b"x"), allow_download=True)
 
-    def test_only_https_downloads_are_accepted(self):
-        index = {"channels": {"Stable": {"version": "1", "downloads": {"chrome": [
-            {"platform": karafun_web._platform_key(), "url": "http://storage.googleapis.com/a.zip"}]}}}}
-        opener = lambda url, timeout=None: Response(json.dumps(index).encode())
-        with mock.patch.object(karafun_web, "find_chrome", return_value=None):
-            with self.assertRaises(RuntimeError):
-                karafun_web.ensure_browser(urlopen=opener, verify=False)
+    def test_no_chrome_or_chrome_for_testing_code_is_left(self):
+        for gone in ("find_chrome", "downloaded_chrome", "_cft_binary", "bundled_browser"):
+            self.assertFalse(hasattr(karafun_web, gone), gone)
 
 
 class CommandTests(unittest.TestCase):
@@ -178,7 +155,7 @@ class ServiceTests(unittest.TestCase):
             holder["web"] = self.FakeWeb(**kw)
             return holder["web"]
         service = karafun_web.KaraFunWebService(lambda s, d: states.append((s, d)), profile_dir="/tmp/x", make_web=make_web,
-                                                find_browser=find or (lambda progress: Path("/x/chrome")), credentials=credentials)
+                                                find_browser=find or (lambda progress, **kw: Path("/x/chrome")), credentials=credentials)
         return service, states, holder
 
     def go(self, service):
@@ -191,18 +168,24 @@ class ServiceTests(unittest.TestCase):
         self.assertTrue(holder["web"].started)
         self.assertEqual(holder["web"].kw["chrome_path"], Path("/x/chrome"))
 
-    def test_download_progress_is_shown_as_a_percentage(self):
-        def find(progress):
-            progress(50, 200); progress(200, 200)
+    def test_a_missing_chromium_asks_instead_of_downloading(self):
+        def find(progress, allow_download=False, **kw):
+            if not allow_download:
+                raise karafun_web.BrowserMissing("needs Chromium")
+            progress(50, 200)
             return Path("/x/chrome")
-        service, states, _ = self.make(find)
+        service, states, holder = self.make(find)
         self.go(service)
-        self.assertIn(("preparing", "Downloading the browser (25%)"), states)
-        self.assertIn(("preparing", "Downloading the browser (100%)"), states)
+        self.assertEqual(states[-1][0], "needs_browser")
+        self.assertIsNone(holder.get("web"))
+        service.start(download=True)
+        service._thread.join(5)
+        self.assertIn(("preparing", "Downloading Chromium (25%)"), states)
+        self.assertEqual(states[-1][0], "starting")
 
     def test_a_failure_is_an_error_state_with_the_reason_and_can_be_retried(self):
         calls = []
-        def find(progress):
+        def find(progress, **kw):
             calls.append(1)
             if len(calls) == 1:
                 raise RuntimeError("no internet")
@@ -298,6 +281,6 @@ class ServiceTests(unittest.TestCase):
     def test_the_players_messages_still_reach_the_host(self):
         got = []
         service = karafun_web.KaraFunWebService(lambda s, d: None, on_message=got.append, profile_dir="/tmp/x", make_web=lambda **kw: self.FakeWeb(**kw),
-                                                find_browser=lambda p: Path("/x/chrome"))
+                                                find_browser=lambda p, **kw: Path("/x/chrome"))
         service._message({"type": "log", "message": "hello"})
         self.assertEqual(got, [{"type": "log", "message": "hello"}])
