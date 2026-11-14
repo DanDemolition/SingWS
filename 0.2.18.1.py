@@ -3823,6 +3823,53 @@ def _prewarm_read_file(path: str, max_bytes: int = 8 * 1024 * 1024):
         pass
 
 
+def _volume_root(path: str) -> str:
+    """'/Volumes/Transcend' for a path on an external volume, '' for anything else (the internal disk never sleeps like an external one)."""
+    parts = str(path or "").split("/")
+    return "/".join(parts[:3]) if str(path or "").startswith("/Volumes/") and len(parts) > 3 else ""
+
+
+def _drive_keepalive_read(path: str, nbytes: int = 4096) -> float:
+    """One small read of `path` that has to reach the disk (F_NOCACHE: a page-cache hit would not keep an external drive awake), at a random aligned
+    offset so the drive's own cache cannot answer it either. Returns how long it took in ms; raises OSError if the file cannot be read."""
+    import fcntl
+    import random
+    t0 = time.monotonic()
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        try:
+            fcntl.fcntl(fd, 48, 1)          # F_NOCACHE (macOS)
+        except Exception:
+            pass
+        size = os.fstat(fd).st_size
+        offset = random.randrange(0, max(1, size // nbytes)) * nbytes if size > nbytes else 0
+        os.pread(fd, nbytes, offset)
+    finally:
+        os.close(fd)
+    return (time.monotonic() - t0) * 1000.0
+
+
+def _drive_keepalive_loop(stop: "threading.Event", candidates, interval: float, log) -> None:
+    """Every `interval` seconds, one small uncached read on each external library volume, so a USB/Thunderbolt drive never goes to sleep between songs (on
+    2026-11-13 a sleeping drive froze the GUI for 5-7 s at song start). `candidates()` -> {volume root: a track path on it}. A slow read is logged: that is
+    the drive waking up, i.e. the keepalive was too late or had not started. Never raises."""
+    chosen: dict = {}
+    while not stop.wait(interval):
+        try:
+            found = candidates() or {}
+        except Exception:
+            found = {}
+        for volume, path in found.items():
+            chosen.setdefault(volume, path)
+        for volume, path in list(chosen.items()):
+            try:
+                ms = _drive_keepalive_read(path)
+                if ms >= 500:
+                    log(f"[DRIVE-KEEPALIVE] {volume} answered in {ms:.0f} ms (it was asleep)")
+            except OSError:
+                chosen.pop(volume, None)    # moved, unmounted or unplugged: pick another file next time
+
+
 STALL_STACK_FILE_MAX_BYTES = 4 * 1024 * 1024   # singws_stall_stacks.log is restarted at launch once it grows past this
 STALL_STACK_MIN_INTERVAL_S = 5.0               # at most one all-thread stack dump per this many seconds
 STALL_STACK_MAX_DUMPS_PER_SESSION = 150
@@ -4294,6 +4341,9 @@ DEFAULTS = {
     # Read the first MBs of the NEXT singer's song file on a worker thread so a sleeping/slow external drive is awake and
     # cached before play_next_file checks and loads it on the GUI thread.
     "prewarm_next_song_file": True,
+    # A small uncached read on each external library drive every drive_keepalive_seconds, so it never sleeps between songs (it froze the GUI 5-7 s at song start).
+    "keep_library_drives_awake": True,
+    "drive_keepalive_seconds": 25,
     "show_safe_stall_diagnostics_migrated": False,
     "stall_stack_capture_safe_migrated": False,
     "stall_stack_capture_off_migrated": False,
@@ -25130,6 +25180,7 @@ class KaraokeApp(QWidget):
         QTimer.singleShot(6000, self._warm_rotation_view)
 
         QTimer.singleShot(9000, self._maybe_auto_check_for_updates)
+        QTimer.singleShot(12000, self._start_drive_keepalive)
 
         # DIAGNOSTIC: Freeze detector
         if bool(self.settings.get("performance_debug_enabled", False)):
@@ -44418,6 +44469,31 @@ class KaraokeApp(QWidget):
             html += (f' <span style="{name_css} font-style:italic;'
                      f' color:{_v("text_soft")};">{_esc(clause)}</span>')
         return html
+
+    def _drive_keepalive_candidates(self) -> dict:
+        """{external volume root: one track path on it}, from the library; runs on the keepalive thread (reads a snapshot of the track list)."""
+        found: dict = {}
+        for track in list(getattr(self, "tracks", []) or []):
+            path = str(track.get("path") or "") if isinstance(track, dict) else ""
+            volume = _volume_root(path)
+            if volume and volume not in found:
+                found[volume] = path
+        return found
+
+    def _start_drive_keepalive(self):
+        """Start the external-drive keepalive once (setting keep_library_drives_awake, every drive_keepalive_seconds)."""
+        try:
+            if getattr(self, "_drive_keepalive_thread", None) is not None or not bool(self.settings.get("keep_library_drives_awake", True)):
+                return
+            interval = max(5.0, float(self.settings.get("drive_keepalive_seconds", 25) or 25))
+            self._drive_keepalive_stop = threading.Event()
+            self._drive_keepalive_thread = threading.Thread(
+                target=_drive_keepalive_loop, args=(self._drive_keepalive_stop, self._drive_keepalive_candidates, interval, _diag),
+                name="drive-keepalive", daemon=True)
+            self._drive_keepalive_thread.start()
+            _diag(f"[DRIVE-KEEPALIVE] started: a small read on each external library drive every {interval:.0f} s")
+        except Exception as error:
+            _diag(f"[DRIVE-KEEPALIVE] not started: {error!r}")
 
     def _prewarm_next_song(self, singer):
         """Start a background read of the next singer's first song file (setting prewarm_next_song_file). Once per path."""
