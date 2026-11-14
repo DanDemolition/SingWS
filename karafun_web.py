@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -124,7 +125,20 @@ class KaraFunWeb:
         args = [str(self.helper_path)]
         if self.profile_dir is not None:
             args += ["--profile", str(self.profile_dir)]
-        self._proc = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        # The display program's own log (Chromium's warnings and errors) goes to a file, so a player that stalls can be diagnosed; a file named
+        # ~/SingWS/karafun_trace turns on Chromium's full logging (one start's worth: the file is rewritten each start).
+        env, errlog = dict(os.environ), subprocess.DEVNULL
+        try:
+            home = Path.home() / "SingWS"
+            if (home / "karafun_trace").exists():
+                env["SINGWS_CEF_TRACE"] = "1"
+            (home / "logs").mkdir(parents=True, exist_ok=True)
+            errlog = open(home / "logs" / "karafun_display_stderr.log", "wb")
+        except Exception:
+            pass
+        self._proc = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=errlog, env=env)
+        if errlog is not subprocess.DEVNULL:
+            errlog.close()
         self.running = True
         self._reader = threading.Thread(target=self._read, name="karafun-web-reader", daemon=True)
         self._reader.start()
@@ -268,6 +282,7 @@ class KaraFunWebService:
         self._sign_in_opened = False
         self._ready_told = False
         self._allow_download = False
+        self._profile_reset_done = False
 
     def _set(self, state: str, detail: str = "") -> None:
         self.state = state
@@ -321,8 +336,33 @@ class KaraFunWebService:
         self._set("sign_in", "Sign in to KaraFun in your browser, then come back")
         self.web.sign_in()
 
+    def _reset_profile_after_engine_crash(self) -> None:
+        """KaraFun's playback engine (a WebAssembly worker) crashes with "memory access out of bounds" while it restores the session saved in the profile
+        folder, and then the player never starts a song (black screen; the Intel show Mac, 2026-11-14: the same Chromium played with an empty profile). The
+        saved profile is moved aside, once, and the player starts again from an empty one: the saved login signs it in again by itself."""
+        if self._profile_reset_done:
+            return
+        self._profile_reset_done = True
+
+        def work():
+            try:
+                self.on_log("KaraFun's engine crashed on the saved profile; starting again from an empty one (the old one is kept beside it)")
+                self.stop()
+                if self.profile_dir.exists():
+                    stamp = time.strftime("%Y%m%d-%H%M%S")
+                    for old in self.profile_dir.parent.glob(self.profile_dir.name + ".engine-crash-*"):
+                        shutil.rmtree(old, ignore_errors=True)       # only ever one of these kept (this feature's own copies)
+                    os.rename(self.profile_dir, self.profile_dir.with_name(f"{self.profile_dir.name}.engine-crash-{stamp}"))
+                self.start()
+            except Exception as error:
+                self.on_log(f"could not reset the KaraFun profile: {error!r}")
+                self._set("error", "KaraFun's player could not be reset")
+        threading.Thread(target=work, name="karafun-profile-reset", daemon=True).start()
+
     def _message(self, message: dict) -> None:
         kind = message.get("type")
+        if kind == "log" and "RuntimeError: memory access out of bounds" in str(message.get("message", "")):
+            self._reset_profile_after_engine_crash()
         if kind == "status":
             if message.get("signedIn") and self._login_tried and not self._reload_after_login and self.web is not None:
                 # Signed in by the saved login: the page's search does not work until it has been loaded once more (found by testing), so reload it

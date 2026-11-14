@@ -172,6 +172,30 @@ class HostTests(unittest.TestCase):
             self.assertEqual(len([c for c in service.web.calls if c[0] == "window"]), before + 1)
         host._picture_timer.stop()
 
+    def test_the_picture_is_switched_on_when_play_is_sent_not_after_the_song_has_started(self):
+        """The player runs on the page's animation frames: waiting for "started" before drawing at full speed meant it never started (Intel Mac, 2026-11-14)."""
+        app, entry, service, host = make(state="ready")
+        order = []
+        host._start_frames = lambda show=True: order.append("frames")
+        service.web.play = lambda *a, **k: order.append("play")
+        host.start(entry, 0, 100)
+        self.assertEqual(order[:2], ["frames", "play"])
+        host._handle(status())                       # the song is heard to start: nothing starts the frames a second time
+        self.assertEqual(order.count("frames"), 2)   # frames flow at play, the picture is placed again at started
+
+    def test_no_frames_from_the_graphics_chip_is_logged_and_shown_to_the_operator_but_never_switches_to_software(self):
+        app, service, host = self._picture_host()
+        notes = []
+        app._show_processing_notification = lambda text, level="info": notes.append((level, text))
+        logs = []
+        host._log = logs.append
+        host._handle({"type": "helper", "state": "no_frames", "software": False})
+        self.assertTrue(any("NO PICTURE FRAMES" in line for line in logs))
+        self.assertEqual(len(notes), 1)
+        self.assertEqual(notes[0][0], "warning")
+        self.assertNotIn("karafun_gpu_mode", app.settings)          # the picture is drawn by the graphics chip: no CPU fallback is ever chosen for the operator
+        self.assertEqual(getattr(service, "started", 0), 0)         # and nothing restarts the player
+
     def test_a_hidden_audience_window_is_never_opened_by_a_karafun_song(self):
         """The operator's audience window lives on the second screen: the song must not open it (it once did, over the main window)."""
         app, service, host = self._picture_host()
@@ -324,7 +348,8 @@ class HostTests(unittest.TestCase):
         self.assertIn(("set_key", (2,)), service.web.calls)
         self.assertIn(("set_tempo", (90,)), service.web.calls)
         self.assertEqual(app.shown_kt[-1], (2, 90))
-        host._start_frames.assert_called_once()
+        host._start_frames.assert_called_with()   # the picture goes over the windows only now, once the song started
+        self.assertEqual(host._start_frames.call_args_list[0], mock.call(show=False))
 
     def test_other_songs_playing_do_not_count_as_started(self):
         app, entry, service, host = make()
@@ -467,7 +492,8 @@ class HostTests(unittest.TestCase):
                       "song": {"id": 3241559, "title": "Linoleum", "artist": "NOFX"}})
         self.assertEqual(app.statuses[-1], ("playing", "Playing in KaraFun"))
         self.assertEqual(app.faded, [1])
-        host._start_frames.assert_called_once()
+        host._start_frames.assert_called_with()   # the picture goes over the windows only now, once the song started
+        self.assertEqual(host._start_frames.call_args_list[0], mock.call(show=False))
 
     def test_the_last_chance_check_never_fails_a_song_that_is_sounding(self):
         app, entry, service, host = make()

@@ -7,6 +7,8 @@
 //!   window {id, on, x, y, w, h, level, above}   show/place/hide the picture window (id "audience" (default) or "preview": the same picture in both; x, y from
 //!                                    the top left of the main screen, as Qt gives them; above = window number to sit directly over)
 //!   order {id, above}                put that picture window directly over the window numbered `above` again (no other change)
+//!   ({"type":"helper","state":"no_frames"} says no frame came within 8 s of the window being shown. `--gpu software` draws on the CPU: a diagnostic only.
+//!    SINGWS_KARAFUN_GPU=high forces the AMD chip on a two-chip Intel Mac: off by default.)
 //!   refresh {rate}                   the audience screen's refresh rate (the page draws at it while the picture is on)
 //! stdout (JSON lines): the page's messages ({"type": ...}) and {"type":"helper","state":"started"|"needs_browser"|...}. Logs go to stderr.
 //! `singws-karafun-display installed` exits 0 if Chromium's framework is here, 3 if not.
@@ -69,6 +71,8 @@ fn script_for(line: &Value) -> Option<String> {
         _ => return None,
     })
 }
+
+static WATCHDOG_ARMED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 thread_local! {
     static CHROME: RefCell<Option<cef_host::Chrome>> = const { RefCell::new(None) };
@@ -134,18 +138,56 @@ fn order_command(line: &Value) {
 }
 
 /// A frame from Chromium: its IOSurface becomes the layer's contents (no copy), cropped to the part that is the page.
+/// A software frame (BGRA bytes) as a CGImage the layer can show.
+fn image_from_pixels(bytes: &[u8], width: i32, height: i32) -> *mut AnyObject {
+    use std::ffi::c_void;
+    #[link(name = "CoreGraphics", kind = "framework")]
+    unsafe extern "C" {
+        fn CGColorSpaceCreateDeviceRGB() -> *mut c_void;
+        fn CGColorSpaceRelease(space: *mut c_void);
+        fn CGDataProviderCreateWithData(info: *mut c_void, data: *const c_void, size: usize, release: Option<extern "C" fn(*mut c_void, *const c_void, usize)>) -> *mut c_void;
+        fn CGDataProviderRelease(provider: *mut c_void);
+        fn CGImageCreate(width: usize, height: usize, bits_per_component: usize, bits_per_pixel: usize, bytes_per_row: usize, space: *mut c_void,
+            bitmap_info: u32, provider: *mut c_void, decode: *const f64, interpolate: bool, intent: i32) -> *mut c_void;
+    }
+    extern "C" fn release(info: *mut c_void, _data: *const c_void, _size: usize) {
+        // SAFETY: `info` is the box made below, released once when CoreGraphics is done with the bytes.
+        drop(unsafe { Box::from_raw(info.cast::<Vec<u8>>()) });
+    }
+    let owned = Box::new(bytes.to_vec());
+    let (ptr, len) = (owned.as_ptr(), owned.len());
+    let info = Box::into_raw(owned).cast::<c_void>();
+    // SAFETY: plain CoreGraphics calls; the image keeps the provider, the provider keeps the bytes until `release`. 8194 = little-endian 32-bit, premultiplied alpha first (BGRA).
+    unsafe {
+        let space = CGColorSpaceCreateDeviceRGB();
+        let provider = CGDataProviderCreateWithData(info, ptr.cast(), len, Some(release));
+        let image = CGImageCreate(width as usize, height as usize, 8, 32, width as usize * 4, space, 8194, provider, std::ptr::null(), false, 0);
+        CGDataProviderRelease(provider);
+        CGColorSpaceRelease(space);
+        image.cast()
+    }
+}
+
 fn show_frame(picture: &Picture) {
     let views: Vec<Retained<NSView>> = WINDOWS.with(|w| w.borrow().values().map(|(_, view)| view.clone()).collect());
     let (x, y, width, height) = picture.visible;
     let crop = NSRect::new(NSPoint::new(x, 1.0 - y - height), NSSize::new(width, height));
+    let software = picture.pixels.as_ref().map(|(bytes, w, h)| image_from_pixels(bytes, *w, *h));
     for view in views {
-        // SAFETY: the view's own layer, on the main thread; the layer retains the surface it is given (the same one for every window: no copy).
+        // SAFETY: the view's own layer, on the main thread; the layer retains the surface/image it is given (the same one for every window: no copy).
         unsafe {
             let layer: *mut AnyObject = msg_send![&*view, layer];
             if layer.is_null() { continue; }
-            let _: () = msg_send![layer, setContents: picture.surface as *mut AnyObject];
+            let contents = software.unwrap_or(picture.surface as *mut AnyObject);
+            let _: () = msg_send![layer, setContents: contents];
             let _: () = msg_send![layer, setContentsRect: crop];
         }
+    }
+    if let Some(image) = software {
+        #[link(name = "CoreGraphics", kind = "framework")]
+        unsafe extern "C" { fn CGImageRelease(image: *mut std::ffi::c_void); }
+        // SAFETY: the one reference made by `image_from_pixels`; the layers retained theirs.
+        unsafe { CGImageRelease(image.cast()) };
     }
 }
 
@@ -159,7 +201,22 @@ fn handle(line: Value) {
     match line.get("cmd").and_then(|c| c.as_str()) {
         Some("quit") => finish(),
         Some("reload") => cef_host::send("Page.reload", json!({})),
-        Some("window") => { cef_host::watch(true); window_command(&line) }
+        Some("window") => {
+            cef_host::watch(true);
+            window_command(&line);
+            // The picture was asked for: if no frame at all comes within 8 s the graphics chip is not delivering (black picture, and KaraFun's player never
+            // starts without frames): say so once, so the app can tell the operator and write it in the log.
+            if line.get("on").and_then(|v| v.as_bool()).unwrap_or(true) && !WATCHDOG_ARMED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                std::thread::spawn(|| {
+                    std::thread::sleep(std::time::Duration::from_secs(8));
+                    cef_host::on_main(|| {
+                        if cef_host::frames_total() == 0 {
+                            say(json!({"type": "helper", "state": "no_frames", "software": cef_host::software()}));
+                        }
+                    });
+                });
+            }
+        }
         Some("order") => order_command(&line),
         Some("stats") => say(json!({"type": "helper", "frames": cef_host::pacing()})),
         Some("refresh") => cef_host::set_refresh(line.get("rate").and_then(|v| v.as_i64()).unwrap_or(60) as i32),
@@ -194,6 +251,8 @@ fn main() {
         }
         return;
     }
+    // `--gpu software`: Chromium draws the page on the CPU (the fallback for a Mac whose graphics chip gives no frames).
+    cef_host::set_software(arg("--gpu").as_deref() == Some("software"));
     // Before any other thread exists (Chromium's memory manager goes in with its framework).
     cef_host::preload();
     let Some(mtm) = MainThreadMarker::new() else { std::process::exit(1) };

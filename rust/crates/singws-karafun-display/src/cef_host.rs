@@ -32,6 +32,10 @@ use std::{
 /// `screen_info`), so a Retina screen does not double it.
 pub const MAX_PAGE: (i32, i32) = (1280, 720);
 
+/// The page's frame rate while no picture is wanted. NOT 1: KaraFun's player and its sign-in run on the page's animation frames, and at 1 a second they crawl
+/// (the player never started on an Intel Mac); 10 is cheap and keeps them moving. A picture window being shown raises it to the screen's rate (`frame_rate`).
+pub const IDLE_FPS: i32 = 10;
+
 /// The most frames a second Chromium is asked to draw: 60, even on a 120 Hz screen, so older Macs keep up.
 pub const MAX_FPS: i32 = 60;
 
@@ -228,6 +232,7 @@ struct Pacing {
 static PACING: std::sync::Mutex<Pacing> = std::sync::Mutex::new(Pacing { last: None, gaps: Vec::new(), watching: false, away: 0.0, turn: 0.0, turn_ended: None });
 
 fn frame_came() {
+    FRAMES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let now = Instant::now();
     let mut pacing = PACING.lock().unwrap();
     if let Some(last) = pacing.last {
@@ -276,7 +281,22 @@ pub fn pacing() -> String {
 /// A frame from Chromium: its picture on the graphics chip (an IOSurface,
 /// good only while being handed on), and the part of it that's the page
 /// (x, y, width, height, as fractions of the whole).
-pub struct Picture { pub surface: *mut c_void, pub visible: (f64, f64, f64, f64) }
+pub struct Picture {
+    pub surface: *mut c_void,
+    pub visible: (f64, f64, f64, f64),
+    /// Software drawing (no usable graphics chip): the page as BGRA bytes and its size, copied (Chromium owns the buffer only during the call).
+    pub pixels: Option<(Vec<u8>, i32, i32)>,
+}
+
+/// Whether Chromium draws the page itself on the CPU (set before it starts). A DIAGNOSTIC for a person at the Mac (`--gpu software`); the app never uses it:
+/// the picture is meant to be drawn by the graphics chip.
+static SOFTWARE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub fn set_software(on: bool) { SOFTWARE.store(on, std::sync::atomic::Ordering::Relaxed); }
+pub fn software() -> bool { SOFTWARE.load(std::sync::atomic::Ordering::Relaxed) }
+
+/// Frames received so far (either way of drawing): zero a few seconds after the picture was asked for means the graphics chip is not delivering.
+static FRAMES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub fn frames_total() -> u64 { FRAMES.load(std::sync::atomic::Ordering::Relaxed) }
 
 pub struct Chrome;
 
@@ -404,7 +424,7 @@ pub fn send(method: &str, params: Value) {
         Then::Resize(browser) => if let Some(host) = browser.host() { host.was_resized(); },
         Then::Frames(browser, on) => if let Some(host) = browser.host() {
             // Drawn at the TV's pace while it's seen; hardly at all otherwise.
-            host.set_windowless_frame_rate(if on { frame_rate() } else { 1 });
+            host.set_windowless_frame_rate(if on { frame_rate() } else { IDLE_FPS });
             if on { host.invalidate(cef::sys::cef_paint_element_type_t::PET_VIEW.into()); }
         },
         Then::Send(browser, id) => {
@@ -426,7 +446,7 @@ fn page_made(browser: &Browser) {
         state._observer = registration;
         state.streaming
     }).unwrap_or(false);
-    host.set_windowless_frame_rate(if streaming { frame_rate() } else { 1 });
+    host.set_windowless_frame_rate(if streaming { frame_rate() } else { IDLE_FPS });
     host.was_resized();
     let setup = with_state(|state| {
         let mut setup = vec![
@@ -543,8 +563,15 @@ wrap_app! {
             // Intel Macs with two graphics chips (Intel and AMD): drawn on the
             // AMD one, which runs the external ports (the TV). On the Intel
             // chip, each frame had to be copied across to the TV's chip.
+            // Forcing the AMD chip is OFF by default (SINGWS_KARAFUN_GPU=high turns it on): on 2026-11-13 an Intel MacBook Pro (Intel UHD + Radeon 560X) showed a
+            // black picture and KaraFun's player never started (no frames), with this forced. Without it Chromium takes the Mac's default chip.
             #[cfg(target_arch = "x86_64")]
-            command_line.append_switch(Some(&"force_high_performance_gpu".into()));
+            if !software() && std::env::var("SINGWS_KARAFUN_GPU").is_ok_and(|v| v == "high") { command_line.append_switch(Some(&"force_high_performance_gpu".into())); }
+            // Software drawing: the fallback for a Mac whose graphics chip gives no frames (the picture was black and KaraFun's player never started).
+            if software() {
+                command_line.append_switch(Some(&"disable-gpu".into()));
+                command_line.append_switch(Some(&"disable-gpu-compositing".into()));
+            }
         }
         fn browser_process_handler(&self) -> Option<BrowserProcessHandler> { Some(KaraFunProcess::new()) }
     }
@@ -556,7 +583,7 @@ wrap_browser_process_handler! {
         fn on_context_initialized(&self) {
             // Chromium times the page's frames itself (at `windowless_frame_rate`):
             // timed by SingWS instead, KaraFun's player never started.
-            let window = WindowInfo { windowless_rendering_enabled: 1, shared_texture_enabled: 1, ..Default::default() };
+            let window = WindowInfo { windowless_rendering_enabled: 1, shared_texture_enabled: if software() { 0 } else { 1 }, ..Default::default() };
             let settings = BrowserSettings { windowless_frame_rate: 60, background_color: 0xff00_0000, ..Default::default() };
             if cef::browser_host_create_browser(Some(&window), Some(&mut KaraFunClient::new()), Some(&"about:blank".into()), Some(&settings), None, None) != 1 {
                 eprintln!("KaraFun: Chromium couldn't make the page");
@@ -602,6 +629,17 @@ wrap_render_handler! {
         fn on_paint(&self, _browser: Option<&mut Browser>, _type_: PaintElementType, _dirty_rects: Option<&[cef::Rect]>,
             _buffer: *const u8, width: ::std::os::raw::c_int, height: ::std::os::raw::c_int) {
             if trace() { eprintln!("processor paint {width}x{height}"); }
+            if !matches!(_type_.as_ref(), cef::sys::cef_paint_element_type_t::PET_VIEW) || _buffer.is_null() || width <= 0 || height <= 0 { return; }
+            if !with_state(|state| state.streaming).unwrap_or(false) { return; }
+            frame_came();
+            // SAFETY: Chromium hands over `width * height * 4` bytes of BGRA that are valid for this call only: copied.
+            let bytes = unsafe { std::slice::from_raw_parts(_buffer, width as usize * height as usize * 4) }.to_vec();
+            let picture = Picture { surface: std::ptr::null_mut(), visible: (0.0, 0.0, 1.0, 1.0), pixels: Some((bytes, width, height)) };
+            let on_frame = STATE.with(|state| state.borrow_mut().as_mut().filter(|s| s.streaming)
+                .map(|s| std::mem::replace(&mut s.on_frame, Box::new(|_| {}))));
+            let Some(on_frame) = on_frame else { return };
+            on_frame(&picture);
+            with_state(|state| state.on_frame = on_frame);
         }
         fn on_accelerated_paint(&self, _browser: Option<&mut Browser>, type_: PaintElementType, _dirty_rects: Option<&[cef::Rect]>, info: Option<&AcceleratedPaintInfo>) {
             if trace() { eprintln!("accelerated paint"); }
@@ -614,7 +652,7 @@ wrap_render_handler! {
             let visible = if visible.width > 0 && visible.height > 0 {
                 (f64::from(visible.x) / w, f64::from(visible.y) / h, f64::from(visible.width) / w, f64::from(visible.height) / h)
             } else { (0.0, 0.0, 1.0, 1.0) };
-            let picture = Picture { surface: info.shared_texture_io_surface, visible };
+            let picture = Picture { surface: info.shared_texture_io_surface, visible, pixels: None };
             if with_state(|state| state.streaming).unwrap_or(false) { frame_came(); }
             // Taken out while it's called (it may ask for more).
             let on_frame = STATE.with(|state| state.borrow_mut().as_mut().filter(|s| s.streaming)

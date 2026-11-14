@@ -243,6 +243,9 @@ class KaraFunWebHost:
             return
         asked["sent"] = True
         asked["sent_at"] = time.monotonic()
+        # The page must draw at full speed BEFORE the song starts, not after: KaraFun's player runs on the page's animation frames, which are throttled to a few per
+        # second while no picture is wanted, so a player that waited for "started" before getting frames never started (black screen on the Intel Mac, 2026-11-14).
+        self._start_frames(show=False)      # frames flow, but the picture stays off the windows until the song really starts (the singer transition must stay visible)
         self.service.web.play(asked["id"], asked["query"], asked.get("queries"), asked.get("artist", ""), asked.get("title", ""))
 
     def _arm_watchdog(self) -> None:
@@ -337,6 +340,14 @@ class KaraFunWebHost:
                 self._fail(text)
         elif kind in ("log", "ready"):
             self._log(f"page: {message.get('message') or kind}")
+        elif kind == "helper" and message.get("state") == "no_frames":
+            # The picture window was shown but the graphics chip delivered no frame in 8 s: the picture is black and KaraFun's player does not start without
+            # frames. Say so (log + notification); the fix is not a CPU fallback but finding why this Mac's chip gives none (tools/karafun_gpu_test.sh).
+            self._log("NO PICTURE FRAMES from the graphics chip 8 s after the picture was shown")
+            try:
+                self.app._show_processing_notification("KaraFun: the graphics chip is giving no picture. Send the log (see the KaraFun GPU test).", level="warning")
+            except Exception:
+                pass
 
     def _follow(self) -> None:
         asked = self.asked
@@ -389,6 +400,7 @@ class KaraFunWebHost:
     def _started(self, entry: dict, asked: dict, position: float, duration: float) -> None:
         app = self.app
         asked["heard"] = True
+        self._start_frames()                    # the song is really playing: now the picture goes over the windows
         now = time.monotonic()
         entry["karafun_playback_clock_started_at"] = now - position
         entry["karafun_display_started_at"] = now - position
@@ -421,7 +433,6 @@ class KaraFunWebHost:
             target = max(0.0, min(resume, (duration - SEEK_END_GUARD_S) if duration > 0 else resume))
             web.seek(target)
             self._log(f"resumed the song at {target:.0f}s after restarting the player")
-        self._start_frames()
         app._show_processing_notification(f"KaraFun queued and started: {asked['title']}", level="success")
 
     def _complete(self, entry: dict, asked: dict, why: str) -> None:
@@ -588,24 +599,32 @@ class KaraFunWebHost:
         except Exception as error:
             self._log(f"could not place the picture: {error!r}")
 
-    def _start_frames(self) -> None:
+    def _start_frames(self, show: bool = True) -> None:
         if self.service is None or self.service.web is None:
             return
         from PyQt6.QtCore import QTimer
         app = self.app
+        web = self.service.web
+        if not getattr(self, "_frames_flowing", False):
+            self._frames_flowing = True
+            web.audience(True)
+            self._route_sound()
+            web.start_screencast(KARAFUN_PAGE_WIDTH, KARAFUN_PAGE_HEIGHT)
+            try:
+                vw = getattr(app, "video_window", None)
+                rate = int(round(float(vw.screen().refreshRate()))) if vw is not None and vw.screen() is not None else 0
+                if rate > 0:
+                    web.refresh(rate)           # the page is drawn at the audience screen's own pace
+            except Exception:
+                pass
+        if not show:
+            return
         try:
             app._set_mpv_hosts_visible(False)   # a retained mpv view can cover the picture
         except Exception:
             pass
-        web = self.service.web
-        web.audience(True)
-        self._route_sound()
-        web.start_screencast(KARAFUN_PAGE_WIDTH, KARAFUN_PAGE_HEIGHT)
         try:
             vw = getattr(app, "video_window", None)
-            rate = int(round(float(vw.screen().refreshRate()))) if vw is not None and vw.screen() is not None else 0
-            if rate > 0:
-                web.refresh(rate)               # the page is drawn at the audience screen's own pace
             if vw is not None:
                 vw.idle = False                 # the picture window covers it: no slideshow drawing underneath
         except Exception:
@@ -628,6 +647,7 @@ class KaraFunWebHost:
         self._picture_timer.start()
 
     def _stop_frames(self) -> None:
+        self._frames_flowing = False
         timer = self._picture_timer
         if timer is not None:
             timer.stop()

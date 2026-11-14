@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -278,6 +279,32 @@ class ServiceTests(unittest.TestCase):
         n = len(states2)
         service2._message({"type": "error", "message": "Chrome stopped"})
         self.assertEqual(len(states2), n)                            # the helper's goodbye after OUR stop is not an error
+
+    def test_an_engine_crash_on_the_saved_profile_moves_it_aside_once_and_starts_again_from_an_empty_one(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            profile = Path(tmp) / "KaraFun-Display"
+            profile.mkdir()
+            (profile / "session").write_text("saved")
+            holders = []
+            def make_web(**kw):
+                holders.append(self.FakeWeb(**kw)); return holders[-1]
+            service = karafun_web.KaraFunWebService(lambda s, d: None, profile_dir=profile, make_web=make_web, find_browser=lambda p, **kw: Path("/x/display"))
+            service.start(); service._thread.join(5)
+            crash = {"type": "log", "message": 'diag 3s after ready: {"errors":["error: Uncaught RuntimeError: memory access out of bounds"]}'}
+            service._message(crash)
+            for _ in range(100):
+                if len(holders) == 2 and service._thread is not None and not service._thread.is_alive():
+                    break
+                time.sleep(0.05)
+            self.assertEqual(len(holders), 2)                                   # started again
+            moved = list(Path(tmp).glob("KaraFun-Display.engine-crash-*"))
+            self.assertEqual(len(moved), 1)
+            self.assertEqual((moved[0] / "session").read_text(), "saved")       # the old profile is kept, not deleted
+            self.assertFalse((profile / "session").exists())                     # the player starts from an empty one
+            service._message(crash)                                              # a second crash on the empty profile: no loop
+            time.sleep(0.3)
+            self.assertEqual(len(holders), 2)
 
     def test_the_players_messages_still_reach_the_host(self):
         got = []

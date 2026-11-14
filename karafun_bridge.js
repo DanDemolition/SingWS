@@ -22,6 +22,7 @@
     pinia = found;
     store('mediaSession').$onAction(({ name, args }) => { if (name === 'setPlaybackState') playbackState = args[0]; });
     post({ type: 'ready' });
+    setTimeout(() => runDiag('3s after ready'), 3000);
     // KaraFun keeps its own queue between sessions and may start it by itself as the page loads (audio with no picture and no host): until SingWS has
     // asked for a song, empty that queue and pause, a few times as the queue finishes loading.
     for (const delay of [1500, 4000, 9000]) setTimeout(() => { if (!singwsControlled) { try { store('player').pause(); clearQueue(); } catch (error) {} } }, delay);
@@ -97,7 +98,46 @@
       || list.find(r => q.includes(words(r.content.artist.name).replace(/\s+/g, '')) && q.includes(titleKey(r.content.title)));
   };
   const askedId = web => (alias && alias.web === web ? alias.asked : web);
+  // What this Mac's browser can do, written to the log once per page load and again 12 s after a play: animation frames per second (0 = no frames reach the
+  // page, so KaraFun's player stalls), the graphics renderer WebGL uses, whether sound can start, whether the page is isolated and visible.
+  let diagDone = {};
+  // Page errors (diagnostic): the last few, reported with each diag line so a player that never starts says why.
+  const pageErrors = [];
+  const noteError = text => { pageErrors.push(String(text).slice(0, 200)); if (pageErrors.length > 8) pageErrors.shift(); };
+  try {
+    addEventListener('error', e => noteError('error: ' + (e.message || (e.target && e.target.src) || '?')), true);
+    addEventListener('unhandledrejection', e => noteError('rejection: ' + describe(e.reason)));
+    const wrapped = console.error;
+    console.error = function () { try { noteError('console: ' + [...arguments].map(describe).join(' ')); } catch (e) {} return wrapped.apply(this, arguments); };
+  } catch (e) {}
+  function runDiag(tag) {
+    try {
+      let ticks = 0;
+      const started = performance.now();
+      const tick = () => { ticks += 1; if (performance.now() - started < 1000) requestAnimationFrame(tick); else finish(); };
+      const finish = () => {
+        const info = { raf_per_s: ticks, visible: document.visibilityState, isolated: !!self.crossOriginIsolated, size: [innerWidth, innerHeight], dpr: devicePixelRatio };
+        try {
+          const canvas = document.createElement('canvas');
+          const gl = canvas.getContext('webgl2') || canvas.getContext('webgl');
+          info.webgl = gl ? ((ext) => (ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : 'no debug info'))(gl.getExtension('WEBGL_debug_renderer_info')) : 'NONE';
+        } catch (error) { info.webgl = 'error: ' + error.message; }
+        try { const ctx = new AudioContext(); info.audio = ctx.state; info.sinkId = ctx.sinkId; ctx.close(); } catch (error) { info.audio = 'error: ' + error.message; }
+        info.codecs = ['audio/mp4; codecs="mp4a.40.2"', 'audio/mpeg', 'video/mp4; codecs="avc1.42E01E"'].map(t => { try { return document.createElement('video').canPlayType(t) || 'no'; } catch (e) { return 'err'; } }).join('/');
+        try {
+          const ps = pinia && pinia._s.get('player') && pinia._s.get('player').$state;
+          if (ps) info.player = JSON.stringify(Object.fromEntries(Object.entries(ps).filter(([, v]) => v === null || ['string', 'number', 'boolean'].includes(typeof v)))).slice(0, 600);
+          const ms = pinia && pinia._s.get('mediaSession') && pinia._s.get('mediaSession').$state;
+          if (ms) info.media = JSON.stringify(Object.fromEntries(Object.entries(ms).filter(([, v]) => v === null || ['string', 'number', 'boolean'].includes(typeof v)))).slice(0, 400);
+        } catch (e) { info.player = 'error: ' + e.message; }
+        info.errors = pageErrors.slice();
+        post({ type: 'log', message: `diag ${tag}: ${JSON.stringify(info)}` });
+      };
+      requestAnimationFrame(tick);
+    } catch (error) { post({ type: 'log', message: `diag ${tag} failed: ${error.message}` }); }
+  }
   window.singwsPlay = async (id, query, extra) => {
+    setTimeout(() => runDiag('12s after play'), 12000);
     // Black until this song plays: KaraFun's canvas still shows the last
     // song's lyrics while the new one is found and loaded.
     singwsControlled = true;
