@@ -121,7 +121,12 @@ class HostTests(unittest.TestCase):
             def mapToGlobal(self, point): return type("P", (), {"x": lambda s: 1440, "y": lambda s: 0})()
         class Screen:
             def refreshRate(self): return 120.0
-        app.video_window = type("VW", (), {"video_area": Area(), "idle": True, "screen": lambda s: Screen(), "winId": lambda s: 0})()
+        state = {"visible": True, "minimized": False, "shown": 0}
+        def toggle(): state["visible"] = True; state["shown"] += 1
+        app.toggle_karaoke_window = toggle
+        app.video_window = type("VW", (), {"video_area": Area(), "idle": True, "screen": lambda s: Screen(), "winId": lambda s: 0,
+                                           "isVisible": lambda s: state["visible"], "isMinimized": lambda s: state["minimized"]})()
+        app._vw_state = state
         app._set_mpv_hosts_visible = lambda on: None
         class FakeTimer:
             def __init__(self, parent=None):
@@ -154,6 +159,30 @@ class HostTests(unittest.TestCase):
             host._picture_placed = None
             host._place_picture()
             self.assertEqual(len([c for c in service.web.calls if c[0] == "window"]), before + 1)
+        host._picture_timer.stop()
+
+    def test_a_hidden_audience_window_is_shown_first_so_the_picture_has_a_home(self):
+        app, service, host = self._picture_host()
+        app._vw_state["visible"] = False
+        with mock.patch.object(host_module, "_ns_window_number", return_value=77):
+            host._start_frames()
+        self.assertEqual(app._vw_state["shown"], 1)
+        self.assertEqual([a for n, a in service.web.calls if n == "window"][-1][0], True)
+        host._picture_timer.stop()
+
+    def test_the_picture_window_is_hidden_while_the_audience_window_is_hidden_or_minimised_and_returns_with_it(self):
+        app, service, host = self._picture_host()
+        with mock.patch.object(host_module, "_ns_window_number", return_value=77):
+            host._start_frames()
+            app._vw_state["minimized"] = True
+            host._place_picture()
+            self.assertEqual([a for n, a in service.web.calls if n == "window"][-1], (False,))
+            count = len([c for c in service.web.calls if c[0] == "window"])
+            host._place_picture()                       # still hidden: nothing more is sent
+            self.assertEqual(len([c for c in service.web.calls if c[0] == "window"]), count)
+            app._vw_state["minimized"] = False
+            host._place_picture()
+            self.assertEqual([a for n, a in service.web.calls if n == "window"][-1][0], True)
         host._picture_timer.stop()
 
     def test_stopping_hides_the_picture_window_and_restores_the_slideshow(self):

@@ -521,14 +521,24 @@ class KaraFunWebHost:
         area = getattr(vw, "video_area", None) if vw is not None else None
         if area is None:
             return None
+        try:
+            if not vw.isVisible() or vw.isMinimized():
+                return None                 # a hidden audience window keeps its old place: the picture must not be drawn there
+        except Exception:
+            pass
         from PyQt6.QtCore import QPoint
         top_left = area.mapToGlobal(QPoint(0, 0))
         return (top_left.x(), top_left.y(), area.width(), area.height()), _ns_window_number(vw)
 
     def _place_picture(self, force: bool = False) -> None:
         try:
+            if self.service is None or self.service.web is None:
+                return
             placed = self._audience_rect()
-            if placed is None or self.service is None or self.service.web is None:
+            if placed is None:
+                if self._picture_placed is not None or force:
+                    self._picture_placed = None
+                    self.service.web.window(False)      # the audience window is hidden or minimised: no loose picture over other windows
                 return
             if not force and placed == self._picture_placed:
                 return
@@ -547,6 +557,12 @@ class KaraFunWebHost:
             app._set_mpv_hosts_visible(False)   # a retained mpv view can cover the picture
         except Exception:
             pass
+        try:
+            vw = getattr(app, "video_window", None)
+            if vw is not None and not vw.isVisible():
+                app.toggle_karaoke_window()     # the picture needs the audience window to sit over: show it, as "Show Karaoke" does
+        except Exception as error:
+            self._log(f"could not show the audience window: {error!r}")
         web = self.service.web
         web.audience(True)
         self._route_sound()
