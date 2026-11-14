@@ -15,10 +15,11 @@ SOURCE = (Path(__file__).parent / "0.2.18.1.py").read_text(encoding="utf-8")
 class FakeWeb:
     def __init__(self):
         self.calls = []
+        self.kwcalls = []
     def __getattr__(self, name):
         if name.startswith("_"):
             raise AttributeError(name)
-        return lambda *a, **k: self.calls.append((name, a))
+        return lambda *a, **k: (self.calls.append((name, a)), self.kwcalls.append(k))
 
 
 class FakeService:
@@ -127,6 +128,16 @@ class HostTests(unittest.TestCase):
         app.video_window = type("VW", (), {"video_area": Area(), "idle": True, "screen": lambda s: Screen(), "winId": lambda s: 0,
                                            "isVisible": lambda s: state["visible"], "isMinimized": lambda s: state["minimized"]})()
         app._vw_state = state
+        pstate = {"visible": True}
+        class PArea:
+            def isVisible(self): return pstate["visible"]
+            def width(self): return 528
+            def height(self): return 298
+            def mapToGlobal(self, point): return type("P", (), {"x": lambda s: 1410, "y": lambda s: 160})()
+        app.preview_window = type("PW", (), {"video_area": PArea()})()
+        app.isVisible = lambda: True
+        app.isMinimized = lambda: False
+        app._preview_state = pstate
         app._set_mpv_hosts_visible = lambda on: None
         class FakeTimer:
             def __init__(self, parent=None):
@@ -183,6 +194,32 @@ class HostTests(unittest.TestCase):
             app._vw_state["minimized"] = False
             host._place_picture()
             self.assertEqual([a for n, a in service.web.calls if n == "window"][-1][0], True)
+        host._picture_timer.stop()
+
+    def test_the_host_preview_pane_gets_the_same_picture_in_its_own_window_over_the_main_window(self):
+        app, service, host = self._picture_host()
+        numbers = {id(app): 11, id(app.video_window): 77}
+        with mock.patch.object(host_module, "_ns_window_number", side_effect=lambda w: numbers[id(w)]):
+            host._start_frames()
+            windows = [(a, k) for (n, a), k in zip(service.web.calls, service.web.kwcalls) if n == "window"]
+        previews = [a for a, k in windows if k.get("id") == "preview"]
+        self.assertEqual(previews[-1], (True, 1410, 160, 528, 298, 0, 11))      # over the main window (number 11), over the pane
+        audience = [a for a, k in windows if k.get("id") is None]
+        self.assertEqual(audience[-1][-1], 77)                                  # the audience picture still sits over the audience window
+        host._picture_timer.stop()
+
+    def test_the_preview_picture_hides_when_the_pane_is_not_on_screen_and_returns(self):
+        app, service, host = self._picture_host()
+        with mock.patch.object(host_module, "_ns_window_number", return_value=5):
+            host._start_frames()
+            app._preview_state["visible"] = False                               # another tab
+            host._place_picture()
+            last = [(a, k) for (n, a), k in zip(service.web.calls, service.web.kwcalls) if n == "window" and k.get("id") == "preview"][-1]
+            self.assertEqual(last[0], (False,))
+            app._preview_state["visible"] = True
+            host._place_picture()
+            last = [(a, k) for (n, a), k in zip(service.web.calls, service.web.kwcalls) if n == "window" and k.get("id") == "preview"][-1]
+            self.assertEqual(last[0][0], True)
         host._picture_timer.stop()
 
     def test_stopping_hides_the_picture_window_and_restores_the_slideshow(self):

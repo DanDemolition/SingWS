@@ -216,9 +216,10 @@ class KaraFunWeb:
         """Size the page (the program keeps it at or under 720p) and start drawing it in its picture window. `quality` is unused: there is no JPEG."""
         self.command("screencast", on=True, width=int(width), height=int(height))
 
-    def window(self, on: bool = True, x: float = 0, y: float = 0, w: float = 1280, h: float = 720, level: int = 0, above: int = 0) -> None:
-        """Show / place / hide the picture window (x, y from the top left of the main screen; `above` = window number to sit directly over)."""
-        self.command("window", on=bool(on), x=float(x), y=float(y), w=float(w), h=float(h), level=int(level), above=int(above))
+    def window(self, on: bool = True, x: float = 0, y: float = 0, w: float = 1280, h: float = 720, level: int = 0, above: int = 0, id: str = "audience") -> None:
+        """Show / place / hide a picture window: id "audience" (over SingWS's audience window) or "preview" (over the host preview pane), both showing the same
+        picture (x, y from the top left of the main screen; `above` = window number to sit directly over)."""
+        self.command("window", id=str(id), on=bool(on), x=float(x), y=float(y), w=float(w), h=float(h), level=int(level), above=int(above))
 
     def refresh(self, rate: int) -> None: self.command("refresh", rate=int(rate))
 

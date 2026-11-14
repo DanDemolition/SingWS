@@ -4,8 +4,8 @@
 //!
 //! stdin (JSON lines): the commands of singws-karafun-web (play, pause, resume, stop, seek, key, tempo, volume, signin, signout, top, login, audience,
 //! output, reload, screencast, quit) plus
-//!   window {on, x, y, w, h, level, above}   show/place/hide the picture window (x, y from the top left of the main screen, as Qt gives them;
-//!                                    above = window number to sit directly over)
+//!   window {id, on, x, y, w, h, level, above}   show/place/hide the picture window (id "audience" (default) or "preview": the same picture in both; x, y from
+//!                                    the top left of the main screen, as Qt gives them; above = window number to sit directly over)
 //!   refresh {rate}                   the audience screen's refresh rate (the page draws at it while the picture is on)
 //! stdout (JSON lines): the page's messages ({"type": ...}) and {"type":"helper","state":"started"|"needs_browser"|...}. Logs go to stderr.
 //! `singws-karafun-display installed` exits 0 if Chromium's framework is here, 3 if not.
@@ -18,7 +18,7 @@ use objc2::{msg_send, rc::Retained, runtime::AnyObject, MainThreadMarker, MainTh
 use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSColor, NSScreen, NSView, NSWindow, NSWindowOrderingMode, NSWindowStyleMask};
 use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
 use serde_json::{json, Value};
-use std::{cell::RefCell, io::{BufRead, Write}, path::PathBuf};
+use std::{cell::RefCell, collections::HashMap, io::{BufRead, Write}, path::PathBuf};
 
 const URL: &str = "https://www.karafun.com/web/";
 const BRIDGE: &str = include_str!("../../../../karafun_bridge.js");
@@ -71,7 +71,8 @@ fn script_for(line: &Value) -> Option<String> {
 
 thread_local! {
     static CHROME: RefCell<Option<cef_host::Chrome>> = const { RefCell::new(None) };
-    static WINDOW: RefCell<Option<(Retained<NSWindow>, Retained<NSView>)>> = const { RefCell::new(None) };
+    /// The picture windows by name: "audience" (over SingWS's audience window) and "preview" (over the host preview pane); every frame goes to all of them.
+    static WINDOWS: RefCell<HashMap<String, (Retained<NSWindow>, Retained<NSView>)>> = RefCell::new(HashMap::new());
 }
 
 /// A borderless black window whose layer shows the page's frames.
@@ -103,15 +104,16 @@ fn cocoa_rect(mtm: MainThreadMarker, x: f64, y: f64, w: f64, h: f64) -> NSRect {
 
 fn window_command(line: &Value) {
     let Some(mtm) = MainThreadMarker::new() else { return };
+    let id = line.get("id").and_then(|v| v.as_str()).unwrap_or("audience").to_owned();
     if !line.get("on").and_then(|v| v.as_bool()).unwrap_or(true) {
-        WINDOW.with(|w| if let Some((window, _)) = w.borrow().as_ref() { window.orderOut(None); });
+        WINDOWS.with(|w| if let Some((window, _)) = w.borrow().get(&id) { window.orderOut(None); });
         return;
     }
     let get = |k: &str, d: f64| line.get(k).and_then(|v| v.as_f64()).unwrap_or(d);
     let rect = cocoa_rect(mtm, get("x", 0.0), get("y", 0.0), get("w", 1280.0).max(1.0), get("h", 720.0).max(1.0));
-    WINDOW.with(|w| {
+    WINDOWS.with(|w| {
         let mut slot = w.borrow_mut();
-        let (window, _) = slot.get_or_insert_with(|| make_window(mtm, rect));
+        let (window, _) = slot.entry(id).or_insert_with(|| make_window(mtm, rect));
         window.setFrame_display(rect, true);
         window.setLevel(get("level", 0.0) as isize);
         // `above`: the number of a window to sit directly over (SingWS's audience window), so the ticker and QR windows that are higher stay over the picture.
@@ -122,18 +124,18 @@ fn window_command(line: &Value) {
 
 /// A frame from Chromium: its IOSurface becomes the layer's contents (no copy), cropped to the part that is the page.
 fn show_frame(picture: &Picture) {
-    WINDOW.with(|w| {
-        let Some((_, view)) = w.borrow().as_ref().map(|(window, view)| (window.clone(), view.clone())) else { return };
-        let (x, y, width, height) = picture.visible;
-        let crop = NSRect::new(NSPoint::new(x, 1.0 - y - height), NSSize::new(width, height));
-        // SAFETY: the view's own layer, on the main thread; the layer retains the surface it is given.
+    let views: Vec<Retained<NSView>> = WINDOWS.with(|w| w.borrow().values().map(|(_, view)| view.clone()).collect());
+    let (x, y, width, height) = picture.visible;
+    let crop = NSRect::new(NSPoint::new(x, 1.0 - y - height), NSSize::new(width, height));
+    for view in views {
+        // SAFETY: the view's own layer, on the main thread; the layer retains the surface it is given (the same one for every window: no copy).
         unsafe {
             let layer: *mut AnyObject = msg_send![&*view, layer];
-            if layer.is_null() { return; }
+            if layer.is_null() { continue; }
             let _: () = msg_send![layer, setContents: picture.surface as *mut AnyObject];
             let _: () = msg_send![layer, setContentsRect: crop];
         }
-    });
+    }
 }
 
 fn finish() -> ! {

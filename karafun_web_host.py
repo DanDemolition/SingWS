@@ -56,6 +56,7 @@ class KaraFunWebHost:
         self.status: dict = {}
         self._picture_timer = None
         self._picture_placed = None
+        self._preview_placed = None
         self._frames_shown = False
         self._sat_at_end_since: Optional[float] = None
         self._song_open = False          # a song was handed to the web player and has not been finished by the app yet
@@ -530,7 +531,44 @@ class KaraFunWebHost:
         top_left = area.mapToGlobal(QPoint(0, 0))
         return (top_left.x(), top_left.y(), area.width(), area.height()), _ns_window_number(vw)
 
+    def _preview_rect(self):
+        """The host preview pane's place in global points (same frame of reference as the audience's) and the main window's number, so a second picture window
+        can sit directly over the main window, over that pane. None while the pane is not on screen (another tab, minimised, hidden)."""
+        preview = getattr(self.app, "preview_window", None)
+        area = getattr(preview, "video_area", None) if preview is not None else None
+        if area is None:
+            return None
+        try:
+            if not area.isVisible() or not self.app.isVisible() or self.app.isMinimized():
+                return None
+            if area.width() < 20 or area.height() < 20:
+                return None
+        except Exception:
+            return None
+        from PyQt6.QtCore import QPoint
+        top_left = area.mapToGlobal(QPoint(0, 0))
+        return (top_left.x(), top_left.y(), area.width(), area.height()), _ns_window_number(self.app)
+
+    def _place_preview(self, force: bool = False) -> None:
+        try:
+            if self.service is None or self.service.web is None:
+                return
+            placed = self._preview_rect()
+            if placed is None:
+                if self._preview_placed is not None or force:
+                    self._preview_placed = None
+                    self.service.web.window(False, id="preview")
+                return
+            if not force and placed == self._preview_placed:
+                return
+            (x, y, w, h), above = placed
+            self._preview_placed = placed
+            self.service.web.window(True, x, y, w, h, 0, above, id="preview")
+        except Exception as error:
+            self._log(f"could not place the preview picture: {error!r}")
+
     def _place_picture(self, force: bool = False) -> None:
+        self._place_preview(force)
         try:
             if self.service is None or self.service.web is None:
                 return
@@ -589,10 +627,12 @@ class KaraFunWebHost:
         if timer is not None:
             timer.stop()
         self._picture_placed = None
+        self._preview_placed = None
         try:
             if self.service is not None and self.service.web is not None:
                 self.service.web.stop_screencast()
                 self.service.web.window(False)
+                self.service.web.window(False, id="preview")
         except Exception:
             pass
         if self._frames_shown:
