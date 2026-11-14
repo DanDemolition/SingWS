@@ -221,6 +221,7 @@ class KaraFunWeb:
         picture (x, y from the top left of the main screen; `above` = window number to sit directly over)."""
         self.command("window", id=str(id), on=bool(on), x=float(x), y=float(y), w=float(w), h=float(h), level=int(level), above=int(above))
 
+    def order(self, id: str, above: int) -> None: self.command("order", id=str(id), above=int(above))   # re-stack a picture window directly over `above`
     def refresh(self, rate: int) -> None: self.command("refresh", rate=int(rate))
 
     def stats(self) -> None: self.command("stats")

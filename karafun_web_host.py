@@ -29,7 +29,7 @@ SAT_AT_END_S = 2.5
 END_MARGIN_S = 1.5
 SEEK_END_GUARD_S = 8.0
 KARAFUN_PAGE_WIDTH, KARAFUN_PAGE_HEIGHT = 1280, 720   # the page is drawn at 720p (the display program never goes above it); the window scales it up to the TV
-PICTURE_REPLACE_MS = 500    # how often the picture window is put back over the audience window if that moved or was resized
+PICTURE_REPLACE_MS = 200    # how often the picture windows are put back over their windows (moved, resized, or the window was clicked to the front)
 
 
 def song_id_from_entry(entry, song_path: str = "") -> Optional[int]:
@@ -560,6 +560,7 @@ class KaraFunWebHost:
                     self.service.web.window(False, id="preview")
                 return
             if not force and placed == self._preview_placed:
+                self.service.web.order("preview", placed[1])      # the main window comes to the front when clicked: put the picture over it again
                 return
             (x, y, w, h), above = placed
             self._preview_placed = placed
@@ -579,6 +580,7 @@ class KaraFunWebHost:
                     self.service.web.window(False)      # the audience window is hidden or minimised: no loose picture over other windows
                 return
             if not force and placed == self._picture_placed:
+                self.service.web.order("audience", placed[1])
                 return
             (x, y, w, h), above = placed
             self._picture_placed = placed
@@ -595,12 +597,6 @@ class KaraFunWebHost:
             app._set_mpv_hosts_visible(False)   # a retained mpv view can cover the picture
         except Exception:
             pass
-        try:
-            vw = getattr(app, "video_window", None)
-            if vw is not None and not vw.isVisible():
-                app.toggle_karaoke_window()     # the picture needs the audience window to sit over: show it, as "Show Karaoke" does
-        except Exception as error:
-            self._log(f"could not show the audience window: {error!r}")
         web = self.service.web
         web.audience(True)
         self._route_sound()
@@ -620,6 +616,15 @@ class KaraFunWebHost:
             self._picture_timer = QTimer(app)
             self._picture_timer.setInterval(PICTURE_REPLACE_MS)
             self._picture_timer.timeout.connect(self._place_picture)
+            try:
+                # A click on SingWS's main or audience window brings it in front of the picture: put the picture back at once, not at the next tick.
+                from PyQt6.QtGui import QGuiApplication
+                gui = QGuiApplication.instance()
+                if gui is not None:
+                    gui.focusWindowChanged.connect(lambda _window: self._place_picture() if self._frames_shown else None)
+                    gui.applicationStateChanged.connect(lambda _state: self._place_picture() if self._frames_shown else None)
+            except Exception:
+                pass
         self._picture_timer.start()
 
     def _stop_frames(self) -> None:

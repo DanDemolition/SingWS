@@ -172,13 +172,27 @@ class HostTests(unittest.TestCase):
             self.assertEqual(len([c for c in service.web.calls if c[0] == "window"]), before + 1)
         host._picture_timer.stop()
 
-    def test_a_hidden_audience_window_is_shown_first_so_the_picture_has_a_home(self):
+    def test_a_hidden_audience_window_is_never_opened_by_a_karafun_song(self):
+        """The operator's audience window lives on the second screen: the song must not open it (it once did, over the main window)."""
         app, service, host = self._picture_host()
         app._vw_state["visible"] = False
         with mock.patch.object(host_module, "_ns_window_number", return_value=77):
             host._start_frames()
-        self.assertEqual(app._vw_state["shown"], 1)
-        self.assertEqual([a for n, a in service.web.calls if n == "window"][-1][0], True)
+        self.assertEqual(app._vw_state["shown"], 0)
+        windows = [(a, k) for (n, a), k in zip(service.web.calls, service.web.kwcalls) if n == "window" and k.get("id") is None]
+        self.assertTrue(all(a[0] is False for a, k in windows), "no audience picture while the audience window is hidden")
+        host._picture_timer.stop()
+
+    def test_the_pictures_are_stacked_over_their_windows_again_every_tick(self):
+        app, service, host = self._picture_host()
+        with mock.patch.object(host_module, "_ns_window_number", side_effect=lambda w: 11 if w is app else 77):
+            host._start_frames()
+            before = [c for c in service.web.calls if c[0] == "order"]
+            host._place_picture()
+            orders = [(a, k) for (n, a), k in zip(service.web.calls, service.web.kwcalls) if n == "order"]
+        self.assertGreater(len([c for c in service.web.calls if c[0] == "order"]), len(before))
+        self.assertIn(("preview", 11), [a for a, k in orders])
+        self.assertIn(("audience", 77), [a for a, k in orders])
         host._picture_timer.stop()
 
     def test_the_picture_window_is_hidden_while_the_audience_window_is_hidden_or_minimised_and_returns_with_it(self):

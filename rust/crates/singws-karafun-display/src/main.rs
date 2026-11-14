@@ -6,6 +6,7 @@
 //! output, reload, screencast, quit) plus
 //!   window {id, on, x, y, w, h, level, above}   show/place/hide the picture window (id "audience" (default) or "preview": the same picture in both; x, y from
 //!                                    the top left of the main screen, as Qt gives them; above = window number to sit directly over)
+//!   order {id, above}                put that picture window directly over the window numbered `above` again (no other change)
 //!   refresh {rate}                   the audience screen's refresh rate (the page draws at it while the picture is on)
 //! stdout (JSON lines): the page's messages ({"type": ...}) and {"type":"helper","state":"started"|"needs_browser"|...}. Logs go to stderr.
 //! `singws-karafun-display installed` exits 0 if Chromium's framework is here, 3 if not.
@@ -122,6 +123,16 @@ fn window_command(line: &Value) {
     });
 }
 
+/// Put a picture window directly over `above` again (SingWS's main or audience window comes to the front when clicked and would cover it).
+fn order_command(line: &Value) {
+    let id = line.get("id").and_then(|v| v.as_str()).unwrap_or("audience").to_owned();
+    let above = line.get("above").and_then(|v| v.as_f64()).unwrap_or(0.0) as isize;
+    if above <= 0 { return; }
+    WINDOWS.with(|w| if let Some((window, _)) = w.borrow().get(&id) {
+        if window.isVisible() { window.orderWindow_relativeTo(NSWindowOrderingMode::Above, above); }
+    });
+}
+
 /// A frame from Chromium: its IOSurface becomes the layer's contents (no copy), cropped to the part that is the page.
 fn show_frame(picture: &Picture) {
     let views: Vec<Retained<NSView>> = WINDOWS.with(|w| w.borrow().values().map(|(_, view)| view.clone()).collect());
@@ -149,6 +160,7 @@ fn handle(line: Value) {
         Some("quit") => finish(),
         Some("reload") => cef_host::send("Page.reload", json!({})),
         Some("window") => { cef_host::watch(true); window_command(&line) }
+        Some("order") => order_command(&line),
         Some("stats") => say(json!({"type": "helper", "frames": cef_host::pacing()})),
         Some("refresh") => cef_host::set_refresh(line.get("rate").and_then(|v| v.as_i64()).unwrap_or(60) as i32),
         Some("screencast") => {
