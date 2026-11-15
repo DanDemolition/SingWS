@@ -690,7 +690,7 @@ mod status_json_tests {
         assert_eq!(v["location"], "Joe's");
         assert_eq!(v["checks"].as_array().unwrap().len(), 7);
         assert_eq!(v["reportTitle"], "6 of 7 checks passed");
-        assert_eq!(v["checks"][2]["detail"], "Application not found");
+        assert_eq!(v["checks"][2]["detail"], "Player browser not downloaded yet (needs internet once)");
         assert_eq!(v["summary"], "1 singer \u{b7} 3 min");
     }
 

@@ -11,6 +11,7 @@ TARGET = Path(os.environ.get("CARGO_TARGET_DIR") or Path.home() / ".cache/singws
 
 
 @unittest.skipUnless((TARGET / "release/singws-discbrand").is_file(), "needs the built singws-discbrand")
+@unittest.skipUnless(sys.version_info >= (3, 14), "the Rust path stem follows Python 3.14's pathlib (the version SingWS ships); 3.13 keeps a trailing dot")
 class Twin(unittest.TestCase):
     def test_a_run_is_identical_on_both_sides(self):
         out = subprocess.run([sys.executable, str(ROOT / "tools/discbrand_parity.py"), "--seeds", "2500"], capture_output=True, text=True, timeout=300, env=dict(os.environ, CARGO_TARGET_DIR=str(TARGET)))

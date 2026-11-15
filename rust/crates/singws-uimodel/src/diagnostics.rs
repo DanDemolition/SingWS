@@ -1,6 +1,6 @@
 //! The pre-show diagnostics report as a toolkit-free view model. Equal to the rules of `KaraokeApp._collect_pre_show_diagnostics` (seven read-only checks) and the
 //! report text of `run_pre_show_diagnostics` (the "N of M checks passed" title, the PASS / CHECK lines, the log line and which icon the box gets).
-//! The probes themselves (the audio output name, the display count, KaraFun's install path, whether the native surfaces and the ticker exist, the signup URL, the
+//! The probes themselves (the audio output name, the display count, KaraFun's player browser path (`karafun_web.find_browser()`, passed as `karafun_path`), whether the native surfaces and the ticker exist, the signup URL, the
 //! background-video folder scan) touch the machine and stay in the app: they arrive as `Facts`.
 
 use serde_json::Value;
@@ -54,7 +54,7 @@ pub fn report(facts: &Value) -> R<Report> {
         detail: match &path {
             Some(p) => p.clone(),
             None if !karafun_enabled => "Disabled in settings".into(),
-            None => "Application not found".into(),
+            None => "Player browser not downloaded yet (needs internet once)".into(),
         },
     });
     let surfaces = truthy(get(facts, "output_host")) && truthy(get(facts, "preview_host"));
@@ -129,7 +129,7 @@ mod tests {
         f["screen_count"] = json!(1);
         assert!(!report(&f).unwrap().checks[1].ok);
         f["karafun_path"] = Value::Null;
-        assert_eq!(report(&f).unwrap().checks[2].detail, "Application not found");
+        assert_eq!(report(&f).unwrap().checks[2].detail, "Player browser not downloaded yet (needs internet once)");
         f["settings"]["bg_video_enabled"] = json!(false);
         f["bg_files"] = json!([]);
         let r = report(&f).unwrap();

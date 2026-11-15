@@ -44,11 +44,12 @@ fn path_name(raw: &str) -> String {
     raw.split('/').filter(|p| !p.is_empty() && *p != ".").last().unwrap_or("").to_string()
 }
 
-/// `Path(raw).stem`
+/// `Path(raw).stem` as Python 3.14 (the version SingWS ships) computes it: cut at the LAST dot, unless what is left before it is only dots
+/// (so "a." gives "a", "a.b." gives "a.b", "..." and ".a" stay whole). Python 3.13 kept a trailing dot ("a." stayed "a.").
 fn path_stem(raw: &str) -> String {
     let name = path_name(raw);
     match name.rfind('.') {
-        Some(i) if i > 0 && i < name.len() - 1 => name[..i].to_string(),
+        Some(i) if !name[..i].trim_start_matches('.').is_empty() => name[..i].to_string(),
         _ => name,
     }
 }
@@ -425,4 +426,17 @@ pub fn scan_report(tracks: &[Value], max_unknowns: usize) -> R<Value> {
         cc.insert(k, json!(n));
     }
     Ok(json!({"track_count": track_count, "raw_values": raw_rows, "canonical_counts": Value::Object(cc), "unknown_prefixes": unk.into_iter().map(|u| json!({"prefix": u.0, "count": u.1, "examples": u.2})).collect::<Vec<_>>()}))
+}
+
+#[cfg(test)]
+mod stem_tests {
+    use super::*;
+
+    /// `Path(x).stem` of Python 3.14 (what SingWS ships), checked against the real interpreter by tools/discbrand_parity.py (segments).
+    #[test]
+    fn path_stem_follows_python_3_14() {
+        for (raw, want) in [("p/a.", "a"), ("p/a..", "a."), ("p/...", "..."), ("p/.a", ".a"), ("p/.a.", ".a"), ("p/a.b.", "a.b"), ("p/a.b", "a"), ("p/a", "a"), ("p/   SC12345.", "   SC12345")] {
+            assert_eq!(path_stem(raw), want, "{raw}");
+        }
+    }
 }

@@ -78,13 +78,15 @@ def python_report(facts):
     ka = a.KaraokeApp
     f = types.SimpleNamespace(settings=facts["settings"])
     f._safe_local_audio_output_name = lambda: facts["local_name"]
-    f._karafun_application_path = lambda: facts["karafun_path"]
     f._header_qr_url = lambda: facts["qr_url"]
     f._mpv_output_host = object() if facts["output_host"] else None
     f._mpv_preview_host = object() if facts["preview_host"] else None
     f.video_window = types.SimpleNamespace(ticker=object() if facts["show_ticker"] else None)
     f._collect_pre_show_diagnostics = types.MethodType(ka._collect_pre_show_diagnostics, f)
     saved = (a.QApplication, a.scan_background_video_folder, a.QMessageBox, a._diag)
+    import karafun_web
+    saved_find = karafun_web.find_browser
+    karafun_web.find_browser = lambda *x, **k: facts["karafun_path"]       # the app asks the bundled Chromium finder, not the KaraFun Mac app
     logs = []
     a.QApplication = types.SimpleNamespace(screens=lambda: [object()] * facts["screen_count"])
     a.scan_background_video_folder = lambda folder: list(facts["bg_files"])
@@ -95,6 +97,7 @@ def python_report(facts):
         ka.run_pre_show_diagnostics(f)
     finally:
         a.QApplication, a.scan_background_video_folder, a.QMessageBox, a._diag = saved
+        karafun_web.find_browser = saved_find
     box = Box.last
     return {"checks": [list(c) for c in checks], "title": box["text"], "lines": box["detail"].split("\n"), "log_line": [m for m in logs if m.startswith("[PRE-SHOW]")][0],
             "all_passed": box["icon"] == "info"}

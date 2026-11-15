@@ -112,7 +112,7 @@ mod tests {
         assert!(v.eta.html.contains("START</span> <span style=\"color:#FFF0A6; font-weight:850;\">Bo<"));
         assert_eq!(v.summary, "2 singers \u{b7} 10 min \u{b7} LOCKED");
         assert_eq!((v.report.passed, v.report.checks.len()), (6, 7));
-        assert_eq!(v.report.checks[2].detail, "Application not found");
+        assert_eq!(v.report.checks[2].detail, "Player browser not downloaded yet (needs internet once)");
     }
 
     #[test]

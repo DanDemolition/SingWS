@@ -7,6 +7,7 @@ import random
 import stat
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -27,6 +28,14 @@ def load_main_module():
     return module
 
 
+def drain_shadow_threads():
+    """The app code the real-block tests run starts the shadow on a daemon thread (`settings_migrate_shadow.start`); wait for it, or it can set the module's
+    `_clean_noted` / `_seen` state in the middle of a later test (a race that showed up once the helper binary was installed next to the module)."""
+    for thread in threading.enumerate():
+        if thread.name == "settings-migrate-shadow" and thread is not threading.current_thread():
+            thread.join(30)
+
+
 def fake_helper(tmp, body):
     path = Path(tmp) / "fake-settingsmig"
     path.write_text("#!/bin/sh\ncat >/dev/null\n" + body + "\n")
@@ -36,6 +45,7 @@ def fake_helper(tmp, body):
 
 class Basics(unittest.TestCase):
     def setUp(self):
+        drain_shadow_threads()
         sm._seen.clear()
         sm._clean_noted = False
 
@@ -80,6 +90,7 @@ class Basics(unittest.TestCase):
 
 class WithFakeHelper(unittest.TestCase):
     def setUp(self):
+        drain_shadow_threads()
         sm._seen.clear()
         sm._clean_noted = False
         self.tmp = tempfile.TemporaryDirectory()
@@ -145,6 +156,7 @@ class RealBlockAgainstRealHelper(unittest.TestCase):
         cls.oracle = staticmethod(par.real_migration(load_main_module()))
 
     def setUp(self):
+        drain_shadow_threads()
         sm._seen.clear()
         sm._clean_noted = False
 
