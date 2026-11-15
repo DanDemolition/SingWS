@@ -108,7 +108,7 @@ def python_trace(sc: dict) -> dict:
     host = karafun_web_host.KaraFunWebHost(app, diag=diag)
     service = Service()
     host.ensure_service = lambda: log.append(["ensure_service"])
-    host._start_frames = lambda: log.append(["start_frames"])
+    host._start_frames = lambda show=True: log.append(["start_frames"] if show else ["start_frames_hidden"])
     host._stop_frames = lambda: log.append(["stop_frames"])
     pending: list = []
     clock = [0.0]
@@ -207,6 +207,30 @@ def world(rng, state="ready", **over):
         w["active_same"] = False
     w.update(over)
     return w
+
+
+def hold_story(rng: random.Random) -> dict:
+    """A song asked for while the player starts / signs in is HELD (up to 240 s from the request), then play is sent when the player is ready and the song has 60 s from that
+    moment (`sent_at`): the watchdog is checked at the boundaries of both windows, the song starts (or not) and may be failed."""
+    ev = []
+    t0 = rng.choice([0.0, 100.0])
+    state = rng.choice(["starting", "sign_in", "preparing"])
+    ev.append({"ev": "start", "t": t0, "song_id": rng.choice([3250037, 58970]), "enabled": True, "key": None, "tempo": 100, "title": TITLES[0], "world": world(rng, state, service_present=True)})
+    t = t0
+    for dt in sorted(rng.sample([1.0, 30.0, 59.9, 60.0, 60.1, 100.0, 150.0, 200.0, 239.9, 240.0, 240.1, 300.0], rng.choice([1, 2, 3]))):
+        ev.append({"ev": "watchdog", "t": t0 + dt, "world": world(rng, rng.choice(["starting", "sign_in", "preparing"]))})
+        t = t0 + dt
+    if rng.random() < 0.8:                     # the player becomes ready: play is sent now
+        t += rng.choice([0.5, 5.0])
+        ev.append({"ev": "service", "t": t, "state": "ready", "detail": "Signed in", "world": world(rng, "ready")})
+        sent = t
+        for dt in sorted(rng.sample([1.0, 30.0, 59.9, 60.0, 60.1, 100.0, 239.9, 240.0], rng.choice([1, 2, 3]))):
+            ev.append({"ev": "watchdog", "t": sent + dt, "world": world(rng, rng.choice(["ready", "sign_in"]))})
+            t = sent + dt
+        if rng.random() < 0.5:
+            t += 1.0
+            ev.append({"ev": "status", "t": t, "message": {"playing": True, "position": 3.0, "duration": 200.0, "song": {"id": ev[0]["song_id"]}}, "world": world(rng, "ready")})
+    return {"events": ev}
 
 
 def gen(rng: random.Random) -> dict:
@@ -340,7 +364,7 @@ def main() -> int:
     py_errors: dict = {}
     first = []
     for i in range(a.cases):
-        sc = storm(rng) if i % 4 == 0 else (zero_clock(rng) if i % 7 == 1 else gen(rng))
+        sc = storm(rng) if i % 4 == 0 else (zero_clock(rng) if i % 7 == 1 else (hold_story(rng) if i % 5 == 2 else gen(rng)))
         try:
             py = python_trace(sc)
         except Exception as error:   # a case the real code itself cannot run (e.g. a list where a number is expected): not comparable

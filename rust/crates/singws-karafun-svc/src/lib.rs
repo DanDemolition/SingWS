@@ -13,8 +13,16 @@ pub mod host;
 
 /// Seconds after the post-login reload during which the old page's statuses are ignored (`RELOAD_SETTLE_S`).
 pub const RELOAD_SETTLE_S: f64 = 8.0;
-/// Statuses (twice a second) before the saved login / browser sign-in is acted on (`SIGN_IN_AFTER_STATUSES`).
+/// Statuses (twice a second) before KaraFun's own sign-in page opens when there is NO saved login (`SIGN_IN_AFTER_STATUSES`).
 pub const SIGN_IN_AFTER_STATUSES: u64 = 60;
+/// Statuses before the saved login is used (`LOGIN_AFTER_STATUSES`, 8 s; it was 30 s until 1.0.3.8).
+pub const LOGIN_AFTER_STATUSES: u64 = 16;
+/// Statuses after the post-login reload before the saved login is used once more (`RELOGIN_AFTER_STATUSES`).
+pub const RELOGIN_AFTER_STATUSES: u64 = 40;
+/// Statuses of a saved login that did not work before the browser sign-in page opens (`BROWSER_FALLBACK_STATUSES`, 4 minutes).
+pub const BROWSER_FALLBACK_STATUSES: u64 = 480;
+/// A page log line carrying this text means KaraFun's engine crashed on the saved profile (`_reset_profile_after_engine_crash`).
+pub const ENGINE_CRASH_TEXT: &str = "RuntimeError: memory access out of bounds";
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
@@ -31,6 +39,9 @@ pub enum Action {
     WebClose,
     /// the caller must read the saved login and answer with `Event::SavedLogin`
     ReadSavedLogin,
+    /// after KaraFun's engine crashed on the saved profile: the caller moves the profile folder aside and starts the set-up again (this machine has already done `stop()` and the
+    /// reset of `start()`)
+    Restart,
     /// `on_message(message)`: pass the page's message on
     Forward,
 }
@@ -69,7 +80,16 @@ pub struct Machine {
     signed_out_seen: u64,
     sign_in_opened: bool,
     ready_told: bool,
-    awaiting_login: bool,
+    relogin_tried: bool,
+    profile_reset_done: bool,
+    /// a saved-login read was asked for and not answered yet
+    pending_read: Option<Read>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Read {
+    Login,
+    Relogin,
 }
 
 /// Python truthiness of a JSON value.
@@ -110,7 +130,9 @@ impl Machine {
             signed_out_seen: 0,
             sign_in_opened: false,
             ready_told: false,
-            awaiting_login: false,
+            relogin_tried: false,
+            profile_reset_done: false,
+            pending_read: None,
         }
     }
 
@@ -123,6 +145,7 @@ impl Machine {
                     self.signed_out_seen = 0;
                     self.sign_in_opened = false;
                     self.login_tried = false;
+                    self.relogin_tried = false;
                     self.reload_after_login = false;
                     self.ready_told = false;
                 }
@@ -150,18 +173,21 @@ impl Machine {
             }
             Event::Message(m) => self.message(m, now, &mut out)?,
             Event::SavedLogin(r) => {
-                if self.awaiting_login {
-                    self.awaiting_login = false;
+                if let Some(which) = self.pending_read.take() {
                     match r {
-                        SavedLogin::Error(name) => {
-                            out.push(Action::Log(format!("saved login unreadable: {name}")));
-                            self.open_sign_in_page(&mut out);
-                        }
-                        SavedLogin::None => self.open_sign_in_page(&mut out),
-                        SavedLogin::Found => {
-                            out.push(Action::Log("signing in with the saved KaraFun login".into()));
-                            out.push(Action::WebLogin);
-                        }
+                        SavedLogin::Error(name) => out.push(Action::Log(format!("saved login unreadable: {name}"))),
+                        SavedLogin::None => {}
+                        SavedLogin::Found => match which {
+                            Read::Login => {
+                                self.login_tried = true;
+                                out.push(Action::Log("signing in with the saved KaraFun login".into()));
+                                out.push(Action::WebLogin);
+                            }
+                            Read::Relogin => {
+                                out.push(Action::Log("signed out again after the reload; signing in with the saved login once more".into()));
+                                out.push(Action::WebLogin);
+                            }
+                        },
                     }
                     self.finish_signed_out(&mut out);
                 }
@@ -189,9 +215,34 @@ impl Machine {
         out.push(Action::Forward);
     }
 
+    /// `_reset_profile_after_engine_crash`: once per run, log it, `stop()`, move the profile aside (the caller does that), `start()` again.
+    fn engine_crash(&mut self, out: &mut Vec<Action>) {
+        if self.profile_reset_done {
+            return;
+        }
+        self.profile_reset_done = true;
+        out.push(Action::Log("KaraFun's engine crashed on the saved profile; starting again from an empty one (the old one is kept beside it)".into()));
+        if self.has_web {
+            out.push(Action::WebClose);
+        }
+        self.has_web = false;
+        self.state = "idle".into();
+        // `start()` with the set-up thread finished: the counters are reset (the profile-reset flag is NOT)
+        self.signed_out_seen = 0;
+        self.sign_in_opened = false;
+        self.login_tried = false;
+        self.relogin_tried = false;
+        self.reload_after_login = false;
+        self.ready_told = false;
+        out.push(Action::Restart);
+    }
+
     fn message(&mut self, m: &Value, now: f64, out: &mut Vec<Action>) -> Result<(), String> {
         let kind = m.get("type");
         let is = |v: Option<&Value>, s: &str| v.and_then(|x| x.as_str()) == Some(s);
+        if is(kind, "log") && m.get("message").and_then(|x| x.as_str()).is_some_and(|t| t.contains(ENGINE_CRASH_TEXT)) {
+            self.engine_crash(out);
+        }
         if is(kind, "status") {
             let signed_in = m.get("signedIn").map(truthy).unwrap_or(false);
             if signed_in && self.login_tried && !self.reload_after_login && self.has_web {
@@ -220,16 +271,23 @@ impl Machine {
                     self.ready_told = false;
                     self.put(out, "sign_in", "Signing in to KaraFun");
                 }
-                if self.signed_out_seen == SIGN_IN_AFTER_STATUSES && self.has_web && !self.login_tried {
-                    self.login_tried = true;
+                if self.signed_out_seen == LOGIN_AFTER_STATUSES && self.has_web && !self.login_tried {
                     if self.has_credentials {
-                        self.awaiting_login = true;
+                        self.pending_read = Some(Read::Login);
                         out.push(Action::ReadSavedLogin);
                         return Ok(()); // the Forward follows the answer
                     }
-                    self.open_sign_in_page(out);
-                } else if self.signed_out_seen == SIGN_IN_AFTER_STATUSES + 60 && self.has_web {
-                    self.open_sign_in_page(out);
+                } else if self.signed_out_seen == SIGN_IN_AFTER_STATUSES && self.has_web && !self.login_tried {
+                    self.open_sign_in_page(out); // no saved login (or it could not be read): KaraFun's own sign-in, once
+                } else if self.signed_out_seen == RELOGIN_AFTER_STATUSES && self.has_web && self.login_tried && self.reload_after_login && !self.relogin_tried {
+                    self.relogin_tried = true;
+                    if self.has_credentials {
+                        self.pending_read = Some(Read::Relogin);
+                        out.push(Action::ReadSavedLogin);
+                        return Ok(());
+                    }
+                } else if self.signed_out_seen == BROWSER_FALLBACK_STATUSES && self.has_web && self.login_tried {
+                    self.open_sign_in_page(out); // the saved login did not work: the browser way, once
                 }
             }
         } else if is(kind, "error") && is(m.get("message"), "KaraFun's web player stopped") {
@@ -251,6 +309,7 @@ fn action_json(a: &Action) -> Value {
         Action::WebSignIn => json!(["sign_in"]),
         Action::WebClose => json!(["close"]),
         Action::ReadSavedLogin => json!(["read_saved_login"]),
+        Action::Restart => json!(["restart"]),
         Action::Forward => json!(["forward"]),
     }
 }

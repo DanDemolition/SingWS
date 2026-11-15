@@ -17,3 +17,4 @@ singws-plan = { path = "../singws-plan" }
 singws-start = { path = "../singws-start" }
 singws-store = { path = "../singws-store" }
 singws-wire = { path = "../singws-wire" }
+singws-phrase = { path = "../singws-phrase" }

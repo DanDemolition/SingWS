@@ -4234,6 +4234,9 @@ DEFAULTS = {
     # with the Rust queue rules and LOG disagreements only; the app's own answer is always used. Default off until its
     # two-architecture package gate passes. Read lazily; safe to flip in Settings JSON.
     "queue_shadow": True,
+    # Waveform-editor shadow (2026-11-15): the Rust analysis (singws-phrase) runs on the same samples as phrase_detect.py and the answers are compared and LOGGED
+    # ([PHRASE-SHADOW]); the editor always uses Python's. Default on (log only), read once at launch. NOT in _RUST_EVIDENCE_FLAGS (the Rust settings migration mirrors that list).
+    "phrase_shadow": True,
     # Stage C shadow: compare the background-music window / crossfade-length decisions (transition_analysis) with the Rust
     # singws-plan rules and LOG disagreements only; the app's own answer is always used. Default off until its two-architecture
     # package gate passes. The karaoke effective-end rule runs only in the offline analysis worker and is covered by
@@ -15099,7 +15102,13 @@ class _BpmDetectWorker(QObject):
         bpm = 0.0
         try:
             pcm = phrase_detect.decode_pcm_mono(self.audio_path, sr=16000)
+            _t0 = time.monotonic()
             res = phrase_detect.estimate_tempo_and_beat(pcm, 16000)
+            try:
+                import phrase_shadow
+                phrase_shadow.compare_tempo(pcm, 16000, res, (time.monotonic() - _t0) * 1000.0)
+            except Exception:
+                pass
             if res and res.get("bpm"):
                 bpm = float(res["bpm"])
                 if self.cache_path:
@@ -15597,6 +15606,7 @@ class WaveformDecodeWorker(QObject):
             import phrase_detect
             sr = 16000  # enough spectral resolution for chroma/timbre/tempo
             pcm = phrase_detect.decode_pcm_mono(self.audio_path, sr=sr)
+            _t0 = time.monotonic()
             peaks = phrase_detect.peaks(pcm, self.n_cols)
             bpm = self.bpm
             if not bpm or float(bpm) <= 0:
@@ -15615,6 +15625,11 @@ class WaveformDecodeWorker(QObject):
             except Exception as e:
                 _diag(f"[PHRASE-WAVEFORM] section detection failed: {e}")
                 sections = []
+            try:
+                import phrase_shadow
+                phrase_shadow.compare_waveform(pcm, sr, self.n_cols, self.bpm, peaks, bpm_out, suggested, sections, (time.monotonic() - _t0) * 1000.0)
+            except Exception:
+                pass
         except Exception as e:
             try:
                 _diag(f"[PHRASE-WAVEFORM] decode failed: {e}")
@@ -23073,6 +23088,11 @@ class KaraokeApp(QWidget):
             self.settings["transport_shadow_default_on_migrated"] = True
             changed = True
             _diag("[TRANSPORT-SHADOW] migrated saved profile to log-only observation")
+        try:
+            import phrase_shadow
+            phrase_shadow.configure(bool(self.settings.get("phrase_shadow", True)), _diag)
+        except Exception:
+            pass
         if _migrate_rust_evidence_defaults(self.settings) or getattr(self, "_rust_defaults_just_migrated", False):
             changed = True
             _diag("[RUST-DEFAULTS] migrated saved profile: shadows, live state, shell dry-run and A2 drives on")

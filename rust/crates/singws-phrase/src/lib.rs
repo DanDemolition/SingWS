@@ -283,3 +283,31 @@ pub fn beat_aligned_loop(start_hint: f64, bpm: f64, first_beat: Option<f64>, bar
     }
     Some((round_to(loop_start, 4), round_to(loop_start + bars as f64 * bar, 4)))
 }
+
+/// One analysis op over mono f32 samples (the request is the same JSON the batch tool and the app's shadow send). Used by `src/main.rs` and by `singws_phrase_json` in
+/// singws-dsp-ffi, so the tool that proves the port and the app's shadow run exactly the same code.
+pub fn answer(r: &serde_json::Value, pcm: &[f32]) -> serde_json::Value {
+    use serde_json::json;
+    let sr = r["sr"].as_u64().unwrap_or(8000) as usize;
+    match r["op"].as_str().unwrap_or("") {
+        "peaks" => json!({"v": crate::peaks(pcm, r["n_cols"].as_u64().unwrap_or(100) as usize).iter().map(|x| json!([x.0, x.1])).collect::<Vec<_>>()}),
+        "suggest_start" => json!({"v": crate::suggest_start(pcm, sr, r["bpm"].as_f64(), r["fraction"].as_f64().unwrap_or(0.35))}),
+        "tempo" => match crate::estimate_tempo_and_beat(pcm, sr, r["min"].as_f64().unwrap_or(70.0), r["max"].as_f64().unwrap_or(180.0)) {
+            Some(t) => json!({"v": {"bpm": t.bpm, "first_beat": t.first_beat, "confidence": t.confidence}}),
+            None => json!({"v": null}),
+        },
+        "loop" => json!({"v": crate::beat_aligned_loop(r["start"].as_f64().unwrap_or(0.0), r["bpm"].as_f64().unwrap_or(0.0), r["first_beat"].as_f64(), r["bars"].as_i64().unwrap_or(0)).map(|x| json!([x.0, x.1]))}),
+        "smooth" => {
+            let x: Vec<f64> = pcm.iter().map(|&v| v as f64).collect();
+            json!({"v": crate::smooth(&x, r["w"].as_u64().unwrap_or(2) as usize)})
+        }
+        "sections" => json!({"v": crate::sections::detect_sections(pcm, sr, r["bpm"].as_f64()).iter().map(|s| json!({"seconds": s.seconds, "label": s.label, "from_type": s.from_type, "to_type": s.to_type, "confidence": s.confidence})).collect::<Vec<_>>()}),
+        other => json!({"err": format!("unknown op {other}")}),
+    }
+}
+
+/// JSON in, JSON out (never panics on a bad request: the answer is `{"err": ...}`).
+pub fn answer_json(request: &str, pcm: &[f32]) -> Result<String, String> {
+    let r: serde_json::Value = serde_json::from_str(request).map_err(|e| format!("bad request: {e}"))?;
+    Ok(answer(&r, pcm).to_string())
+}

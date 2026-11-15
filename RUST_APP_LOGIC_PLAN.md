@@ -1,6 +1,6 @@
 # Moving the app's logic to Rust, gradually
 
-Status: ACTIVE (2026-10-23). Stage A0 is implemented, tested, and deployed on Apple Silicon. Signed arm64 and x86_64
+Status: ACTIVE (2026-10-23; KaraFun parts re-based 2026-11-15, see "Update 2026-11-15" below). Stage A0 is implemented, tested, and deployed on Apple Silicon. Signed arm64 and x86_64
 installers are built and package-launched. The operator accepted the documented local CDG/MP4/KaraFun rehearsal in place
 of three physical-Intel shows; it reported zero disagreements and complete coverage. A2 is complete, and A3 enables the
 proven KaraFun-end decision by default with automatic Python fallback. Both signed package rehearsals passed.
@@ -15,11 +15,37 @@ One Python file (`0.2.18.1.py`, ~61,000 lines) mixes four things:
    Rust-owned Qt Quick/QML shell so the packaged application no longer embeds Python.
 2. **Decision logic** with no UI in it: when a song has really ended, when to advance the rotation, how requests move
    between states, when the next background track starts fading. These are the rules the live-show bugs came from.
-3. **I/O glue**: server sync (HTTP/websocket), KaraFun control (AppleScript/Accessibility, macOS only), files, settings.
+3. **I/O glue**: server sync (HTTP/websocket), KaraFun playback (the web player: Chromium inside the Rust `singws-karafun-display` program, driven by Python host code; the old Mac-app AppleScript/Accessibility control was removed in 1.0.3.4), files, settings.
 4. **Stores**: queue, history, stats, settings JSON/SQLite.
 
 Only (2) is worth moving first: it is pure, testable, shared by any future Windows port, and is where regressions hurt.
 (3) and (4) follow only if there is a reason (a Windows port). (1) stays.
+
+## Update 2026-11-15: what changed in KaraFun since the stages below were written (read this before the stage notes)
+
+**Removed** (git history keeps all of it):
+* The KaraFun **Mac-app path** (AppleScript/Accessibility control, the Show Karaoke capture), in 1.0.3.4 (2026-11-10): crate `singws-karafun`, `rust/build_karafun.sh`, the live runner, `native/karafun_capture`, the parity/mutation tools built for them, and the shadows `karafun_script_shadow`, `karafun_monitor_shadow`, `karafun_flow_shadow`, `karafun_builder_shadow`. `docs/design/stage-e-karafun-rust-plan.md` is OBSOLETE.
+* **Headless Chrome / Chrome for Testing**, the JPEG screencast and the `singws-karafun-web` crate (1.0.3.6, 2026-11-13). Nothing downloads Chrome any more; `~/SingWS/Chrome-*` are deleted.
+
+**Added**
+* `rust/crates/singws-karafun-display` (1.0.3.6): the KaraFun web player runs in Chromium (CEF 150) INSIDE this Rust program, windowless; each frame is an IOSurface set as the contents of borderless native windows (audience window and host preview pane), page capped at 720p and 60 fps. JSON-line protocol on stdin/stdout (`play pause seek key tempo volume signin login top audience output reload screencast window order refresh stats quit`; `window` also reports the window's number back). Needs five helper bundles per app and its own Chromium framework download (asked first). Sound goes to SingWS's AirPlay-safe output through the page script. `karafun_bridge.js` stays JavaScript.
+* Python glue that changed through 1.0.3.8: `karafun_web.py` (service: saved login 8 s after the page starts, one re-login after the post-login reload, browser sign-in page only with no saved login or after 4 minutes; **profile reset** when KaraFun's engine crashes with `memory access out of bounds` on the saved profile, found on the Intel show Mac 2026-11-14) and `karafun_web_host.py` (frames flow when play is sent but the picture goes over the windows only when the song starts; a song asked for during sign-in is held up to 240 s; the ticker and bars stack over the picture window).
+* Unrelated to KaraFun, same period: waitlist add on a worker thread, library-scan shadow skipped over 20,000 tracks, the external-drive keepalive (`keep_library_drives_awake`).
+
+**What this does to the plan**
+1. **Transport shadow was no longer fed by KaraFun (FIXED 2026-11-15).** The old Mac-app monitor fed the machine; the web host only called `shadow.app_auto_complete`, so every web KaraFun song logged `[TRANSPORT-SHADOW] MISMATCH app auto-completed session N; machine had not completed it` (5 of 6 songs in the 2026-11-14 log). Now `karafun_web_host._follow` tells the machine what the player shows BEFORE the app decides (`playing` while it plays, throttled to every 2 s; `end_clock` when the position reaches the end; `idle` when nothing plays; `note_seek` on a seek), through `_shadow_observe`. Tests: `TransportFeedTests` in `test_karafun_web_host.py`, including a whole fake web song against the REAL Rust machine with no MISMATCH. NOT yet seen in a real show: the next show should log no `MISMATCH app auto-completed` for KaraFun songs; a mismatch on the app's "at the end" rule (the page keeps reporting "playing" at the very end, the app completes after 2.5 s, the machine has no idle) would be a genuine difference to look at, not a feed bug. `TRANSPORT-DRIVE:karafun_end` lines are still not written (the old monitor wrote them).
+2. **The gate ledger** was updated 2026-11-15 with the 2026-11-14 Intel show on 1.0.3.7 (`show 2026-11-14 intel 1.0.3.7 (21:31 launch to 01:32; ...)`); it is now 54 of 55 READY with `TRANSPORT-SHADOW:session` REGRESSED (that show logged the KaraFun mismatches the feed fix removes; the earlier Intel shows of 2026-11-10 to 2026-11-13 are not in it because their logs were not kept). **The `TRANSPORT-DRIVE:watchdog` gate was RETIRED on 2026-11-15 (operator):** its only caller was the removed Mac-app monitor, so no show could ever clear it; `tools/gate_ledger.py` no longer lists it (status is now 55 of 55). The decision stays in the Rust machine; stalled web-player songs are handled by the host's own rules (60 s from play sent, 240 s hold while signing in, restart if the player dies mid-song).
+3. **`singws-karafun-svc` (the offline Rust port of the web service and host) was RE-SYNCED 2026-11-15** with today's Python: `lib.rs` (service: saved login after 16 statuses, one re-login after the reload, browser page only with no saved login or after 480 statuses, the once-per-run profile reset on KaraFun's engine crash) and `host.rs` (a song is held up to 240 s while the player signs in, its 60 s start limit counts from when play was sent, frames flow at play but the picture goes over the windows only when the song starts, the "Waiting for KaraFun to sign in..." status). Parity against the REAL Python classes: `tools/karafun_service_parity.py` IDENTICAL (seeds 1 to 3: 1461 + 2925 + 2917 identical, 0 different, the rest declined as before), `tools/karafun_host_parity.py` IDENTICAL (seeds 1 to 3 of 2500 plus a 1500 run: 1449 + 2447 + 2443 + 2440 identical, 0 different; a new `hold_story` scenario covers the 60 s / 240 s boundaries), matching and Top 100 parity IDENTICAL. NOT re-run: the mutation tool (`tools/mutate_karafun_svc.py`) and the Keychain parity. The port still has no runtime (nothing calls it) and no shadow: that is the next step, behind `karafun_web_engine`.
+4. **Intel null bridge: CAUSE FOUND, fixed, not yet confirmed on the Intel Mac (2026-11-15).** `singws_bridge_create returned null` with nothing logged = `mpv_create` returned NULL, and libmpv does that whenever the process's LC_NUMERIC is not "C" (`client.h` says so). Reproduced here by calling `mpv_create` after `setlocale(LC_ALL, "")` with `LANG=en_US.UTF-8` (what Qt does at start-up in the Rust shell, and what a Terminal on the Intel Mac provides): NULL; with the default C locale: ok. The Python app always reset it (`mpv_playback_iina.py`), the Rust bridge never did. `singws-video` `core.rs::init_core` now sets LC_NUMERIC to "C" before `mpv_create`; test `core::locale_tests` fails without that line and passes with it. To confirm: a new `SingWS Shell.zip` on the Intel Mac and `bash check_python_free.sh <song.zip>` (the earlier Intel runs never reached the bridge again: the 2026-11-14 readiness folder fails at "song steps" for lack of a song zip). The queue-state driver in `dry_run` has still compared nothing in real shows.
+5. **Added 2026-11-15, default-on log-only shadows:** `phrase_shadow.py` (setting `phrase_shadow`, default True, `[PHRASE-SHADOW]`): the waveform editor's two analysis workers also run the Rust `singws-phrase` port (through `singws_phrase_json` in `libsingws_dsp_ffi`) on the same samples and log agree / MISMATCH per decision (tempo, peaks, suggest, sections) with the tolerances of `tools/phrase_parity.py`; the editor still uses Python's answers. And the transport machine now hears the web player's stall (`watchdog`) as well as playing / end clock / idle (operator: Rust is to own stall detection too: see memory `rust-owns-everything`).
+
+**Order of remaining work (proposed)**
+1. Finish and release 1.0.3.8 (held song, sign-in timings, ticker over the picture; Intel test build `local-installs/intel-1.0.3.8`).
+2. Read the next show: no `MISMATCH app auto-completed` for KaraFun songs (`TRANSPORT-SHADOW:session` is REGRESSED in the ledger until a clean show), and `[PHRASE-SHADOW]` lines from the first editor use (add them to the ledger once the editor has been used on real songs).
+3. Confirm the null-bridge fix on the Intel Mac (new Shell zip, `check_python_free.sh`), then the Python-free readiness run.
+4. Give the web player port its runtime and shadow it (`karafun_web_engine = python | shadow | rust`), then let Rust own stall detection (the machine already hears `watchdog`): needs its own ledger decision.
+5. Delete leftovers of the Mac-app path that nothing uses.
+6. The UI migration (Rust-owned Qt Quick/QML shell) stays last.
 
 ## Stage A: song lifecycle machine (already built, in shadow)
 
@@ -136,7 +162,7 @@ Not done (needs real show evidence first): turning `plan_shadow` on by default, 
 
 History/stats/settings persistence and the HTTP/websocket client (`reqwest`/`tokio`). This becomes necessary for the
 no-Python package, but remains behind the existing storage/network adapters until replay and compatibility tests pass.
-KaraFun control stays macOS-native (AppleScript/Accessibility) whatever the language; Windows would need a different mechanism.
+KaraFun plays in its web player (Chromium/CEF inside `singws-karafun-display`, which is already Rust and macOS-only for now: IOSurface frames in native windows); the old Mac-app AppleScript/Accessibility control no longer exists. A Windows port would need its own window/frame hand-off for that program.
 
 **D0 store-format compatibility (2026-10-23, DONE; proof only, the app does not use it):** `rust/crates/singws-store` writes JSON
 byte-identically to Python's `json.dumps` (key order and unknown fields preserved, `ensure_ascii` escaping incl. surrogate pairs and DEL,

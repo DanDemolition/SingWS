@@ -1,6 +1,7 @@
 """karafun_web_host.py: the show side of the KaraFun web player, against a fake app and a fake player service (no Qt, no network)."""
 import _test_profile  # noqa: F401  (isolate SINGWS_HOME)
 import re
+import os
 import sys
 import unittest
 from pathlib import Path
@@ -76,6 +77,119 @@ def make(state="ready"):
 def status(playing=True, song=3241559, position=0.0, duration=130.0):
     return {"type": "status", "playing": playing, "position": position, "duration": duration, "signedIn": True,
             "song": ({"id": song, "title": "Linoleum", "artist": "NOFX"} if song else None)}
+
+
+class TransportFeedTests(unittest.TestCase):
+    """The Rust transport machine (log-only shadow) is told what the player shows, so it reaches its own answer about the end of a web KaraFun song.
+    Before 2026-11-15 the host only said "the app completed it", so every web song logged `MISMATCH app auto-completed ...` (5 of 6 songs on 2026-11-14)."""
+
+    def _host_with(self, shadow):
+        app, entry, service, host = make()
+        app._transport_shadow = lambda: shadow
+        app._active_external_karafun = {"entry": entry, "_shadow_id": 7}
+        host.start(entry, 0, 100)
+        host.asked["active"] = app._active_external_karafun
+        host.status = {}
+        return app, entry, host
+
+    def _feed(self, host, **kw):
+        host.status = status(**kw)
+        host._follow()
+
+    def test_the_machine_hears_playing_then_the_end_clock_then_idle_before_the_app_completes_the_song(self):
+        calls = []
+
+        class Recorder:
+            def observe(self, sid, kind, **kw): calls.append(("observe", sid, kind))
+            def app_auto_complete(self, sid): calls.append(("app_auto_complete", sid))
+            def note_seek(self, *a): calls.append(("note_seek",) + a)
+        app, entry, host = self._host_with(Recorder())
+        clock = [1000.0]
+        with mock.patch.object(host_module.time, "monotonic", side_effect=lambda: clock[0]):
+            self._feed(host, position=5.0)                       # started
+            clock[0] += 3
+            self._feed(host, position=8.0)                       # still playing, 3 s later
+            clock[0] += 100
+            self._feed(host, position=129.0)                     # at the end (130 s song, 1.5 s margin)
+            clock[0] += 1
+            self._feed(host, playing=False, song=None)           # gone from the player
+        kinds = [c[2] for c in calls if c[0] == "observe"]
+        self.assertEqual(kinds[0], "playing")
+        self.assertIn("end_clock", kinds)
+        self.assertLess(kinds.index("end_clock"), len(kinds) - 1)
+        self.assertEqual(kinds[-1], "idle")                      # idle comes last, then the app's own completion
+        self.assertEqual(calls[-1], ("app_auto_complete", 7))
+        self.assertEqual({c[1] for c in calls if c[0] == "observe"}, {7})
+
+    def test_a_song_that_never_starts_tells_the_machine_before_the_app_gives_up(self):
+        calls = []
+
+        class Recorder:
+            def observe(self, sid, kind, **kw): calls.append(kind)
+        app, entry, host = self._host_with(Recorder())
+        host._arm_watchdog = KaraFunWebHost._arm_watchdog.__get__(host)
+        host.asked["heard"] = False
+        host.asked["at"] = 0.0
+        host.asked["sent"] = True
+        host.asked["sent_at"] = 0.0
+        from PyQt6.QtCore import QTimer
+        with mock.patch.object(QTimer, "singleShot", side_effect=lambda ms, fn: fn()):
+            host._arm_watchdog()
+        self.assertIn("watchdog", calls)
+        self.assertEqual(app.statuses[-1][0], "failed")
+
+    def test_playing_evidence_is_not_sent_twice_a_second(self):
+        calls = []
+
+        class Recorder:
+            def observe(self, sid, kind, **kw): calls.append(kind)
+            def app_auto_complete(self, sid): pass
+        app, entry, host = self._host_with(Recorder())
+        clock = [1000.0]
+        with mock.patch.object(host_module.time, "monotonic", side_effect=lambda: clock[0]):
+            for i in range(10):
+                self._feed(host, position=5.0 + i * 0.5)
+                clock[0] += 0.5
+        self.assertLessEqual(calls.count("playing"), 4)           # one at the start, then at most one every 2 s
+
+    def test_a_seek_is_noted_for_the_machine(self):
+        calls = []
+
+        class Recorder:
+            def observe(self, *a, **k): pass
+            def note_seek(self, *a): calls.append(a)
+        app, entry, host = self._host_with(Recorder())
+        host.status = status(position=20.0, duration=130.0)
+        host.asked["heard"] = True
+        host.asked["last_position"] = 20.0
+        host.seek_to(100.0)
+        self.assertEqual(calls, [(7, 20.0, 100.0, 130.0)])
+
+    @unittest.skipUnless(os.path.exists(os.path.expanduser("~/.cache/singws-rust-target/release/libsingws_dsp_ffi.dylib")), "needs the built Rust library")
+    def test_a_whole_web_song_against_the_real_machine_logs_no_mismatch(self):
+        import ctypes, transport_shadow
+        lib = ctypes.CDLL(os.path.expanduser("~/.cache/singws-rust-target/release/libsingws_dsp_ffi.dylib"))
+        fn = lib.singws_transport_step_json
+        fn.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int32, ctypes.c_char_p, ctypes.c_size_t]
+        fn.restype = ctypes.c_int64
+        lines = []
+        shadow = transport_shadow.TransportShadow(lines.append, lib=lib)
+        sid = shadow.start(True, 240.0, source="karafun")
+        app, entry, host = self._host_with(shadow)
+        app._active_external_karafun["_shadow_id"] = sid
+        clock = [1000.0]
+        with mock.patch.object(host_module.time, "monotonic", side_effect=lambda: clock[0]), \
+             mock.patch.object(transport_shadow.time, "monotonic", side_effect=lambda: clock[0]):
+            self._feed(host, position=5.0)
+            for _ in range(5):
+                clock[0] += 3
+                self._feed(host, position=8.0)
+            clock[0] += 100
+            self._feed(host, position=129.0)
+            clock[0] += 1
+            self._feed(host, playing=False, song=None)
+        self.assertEqual([l for l in lines if "MISMATCH" in l], [], lines)
+        self.assertTrue(any("CompleteSong" in l for l in lines), lines)
 
 
 class IdTests(unittest.TestCase):

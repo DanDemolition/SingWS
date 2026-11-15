@@ -79,7 +79,7 @@ never port it: it is MIT-licensed C++ header code with years of tuning, and a po
 
 ### 2.4 Non-goals
 
-Rewriting PyQt6 UI; replacing the PHP server or SQLite; changing database schemas; replacing libmpv, libavcodec or the CDG decoder; re-implementing KaraFun automation; changing the request lifecycle.
+Rewriting PyQt6 UI; replacing the PHP server or SQLite; changing database schemas; replacing libmpv, libavcodec or the CDG decoder; re-implementing KaraFun automation (the Mac-app automation is gone; KaraFun now plays in the Rust `singws-karafun-display` program); changing the request lifecycle.
 
 ---
 
@@ -130,7 +130,7 @@ Every stage: Python app stays usable; old path remains; rollback = flip the flag
 * **Gate:** proceed only if Stage 0 shows the callbacks are in use or measurably cause underruns/GIL waits.
 
 ### Stage 3 - `singws-transport` pure state machine
-* **Python modules:** the end-of-song, completion-monitor, BGM scheduling and fade-decision code in `0.2.18.1.py` (`_handle_media_end_safe`, KaraFun monitor, `[END-AUDIO]`, `karaoke_trim_verified_tail`) behind the existing signals.
+* **Python modules:** the end-of-song, completion-monitor, BGM scheduling and fade-decision code in `0.2.18.1.py` (`_handle_media_end_safe`, the KaraFun end decision (the Mac-app monitor was removed in 1.0.3.4; KaraFun songs now end through `karafun_web_host.py`), `[END-AUDIO]`, `karaoke_trim_verified_tail`) behind the existing signals.
 * **Rust:** `singws-transport`: `State`, `Event`, `Command`, `step(state, event, now) -> (state, [commands])`, no I/O, no clocks (time passed in). PyO3 binding.
 * **Benefit:** testability (replay real show logs as event sequences), one owner for playback state, removes ordering bugs between the engines and timers. Not a speed gain.
 * **Risks:** highest behavioural risk of any stage: this logic encodes years of show-found fixes (false completions, skip-ahead, session identity guards). **Do this last among low-risk stages, shadow-mode first** (run the machine alongside the Python code and log disagreements; do not act on it).

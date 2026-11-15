@@ -37,7 +37,9 @@ KNOWN = (
     + [f"STORE-SHADOW:{k}" for k in ("queue.json",)]
     + [f"WIRE-SHADOW:{k}" for k in ("get", "form")]
     + ["TRANSPORT-SHADOW:session"]
-    + [f"TRANSPORT-DRIVE:{k}" for k in ("karafun_end", "media_end", "watchdog")]
+    # "watchdog" was RETIRED 2026-11-15 (operator): its only caller was the removed KaraFun Mac-app monitor, so no show can ever exercise it; stalled web-player songs are
+    # handled by karafun_web_host's own never-started / recovery rules. The decision itself stays in the Rust machine.
+    + [f"TRANSPORT-DRIVE:{k}" for k in ("karafun_end", "media_end")]
     + [f"START-SHADOW:{k}" for k in ("route:mp4", "route:mp3", "route:cdg_mp3_dual", "route:mp3g_zip", "route:external_karafun", "engine", "pick", "display", "plan", "rotation",
                                                  "transport_args", "zip_args", "confirmed", "performance:confirmed", "performance:media_end", "performance:stop")]
     + [f"START-DRIVE:{k}" for k in ("route", "engine", "pick", "display", "plan", "rotation", "transport_args", "zip_args", "confirmed", "performance:confirmed",

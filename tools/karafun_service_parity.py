@@ -48,6 +48,20 @@ class FakeThread:
         return self.alive
 
 
+class InlineWorkThread:
+    """Runs the profile-reset worker (`work`) at once, as if its thread had finished; any other thread (the set-up) does nothing here, as in `FakeThread`."""
+
+    def __init__(self, target=None, name=None, daemon=None, **kw):
+        self.target = target
+
+    def start(self):
+        if getattr(self.target, "__name__", "") == "work":
+            self.target()
+
+    def is_alive(self):
+        return False
+
+
 class Err(Exception):
     pass
 
@@ -106,7 +120,7 @@ def python_trace(sc: dict) -> dict:
         return FakeWeb(**kw)
 
     service = karafun_web.KaraFunWebService(lambda s, d: log.append(["set", s, d]), on_message=lambda m: log.append(["forward"]), on_log=lambda t: log.append(["log", t]),
-                                            profile_dir="/tmp/x", make_web=make_web, find_browser=find, credentials=credentials if sc["has_credentials"] else None)
+                                            profile_dir="/nonexistent-singws-parity/KaraFun-Display", make_web=make_web, find_browser=find, credentials=credentials if sc["has_credentials"] else None)
     traces = []
     with mock.patch.object(karafun_web.time, "monotonic", lambda: clock[0]):
         for e in sc["events"]:
@@ -123,7 +137,18 @@ def python_trace(sc: dict) -> dict:
                 service.stop()
             elif kind == "message":
                 cur["saved"] = e.get("saved")
-                service._message(e["message"])
+                service._thread = FakeThread(alive=False)          # the set-up thread has finished (so the reset's `start()` runs)
+                real_start = type(service).start
+
+                def logged_start(download=False, _real=real_start):
+                    log.append(["restart"])
+                    _real(service, download)
+                service.start = logged_start
+                try:
+                    with mock.patch.object(karafun_web.threading, "Thread", InlineWorkThread):
+                        service._message(e["message"])
+                finally:
+                    del service.start
             traces.append([list(x) for x in log[mark:]])
     return {"trace": traces, "state": service.state}
 
@@ -167,6 +192,9 @@ def rust_trace(sc: dict, cli: str) -> dict:
     return {"trace": merged, "state": r["state"]}
 
 
+CRASH_TEXT = "RuntimeError: memory access out of bounds"
+CRASH_MESSAGES = [{"type": "log", "message": f'diag 3s after ready: {{"errors":["error: Uncaught {CRASH_TEXT}"]}}'}, {"type": "log", "message": CRASH_TEXT},
+                  {"type": "log", "message": "diag 12s after play: no errors"}, {"type": "log", "message": 5}, {"type": "log"}, {"type": "ready", "message": CRASH_TEXT}]
 STATUS_VARIANTS = [True, False, True, False, 1, 0, None, "yes", "", "0", [], [1], {}, {"a": 1}]
 PLANS = [None, "Pro", "", "Premium Plus", "Plan é", 3, 0, True, False, "x" * 40, -3]
 ERRORS = ["KaraFun's web player stopped", "Chrome stopped", "Chrome stopped", "other", "", None, 5]
@@ -197,7 +225,7 @@ def gen(rng: random.Random) -> dict:
         if rng.random() < 0.15:
             sc["events"].append({"ev": "start", "alive": rng.random() < 0.3, "t": tick()})
         sc["events"].append({"ev": "setup", "t": tick()})
-    streak_choices = [1, 3, 4, 5, 20, 59, 60, 61, 100, 119, 120, 121, 130]
+    streak_choices = [1, 3, 4, 5, 15, 16, 17, 20, 39, 40, 41, 59, 60, 61, 100, 119, 120, 121, 130, 479, 480, 481]
     for _ in range(rng.randint(1, 9)):
         r = rng.random()
         if r < 0.45:
@@ -213,7 +241,7 @@ def gen(rng: random.Random) -> dict:
         elif r < 0.85:
             sc["events"].append({"ev": "message", "t": tick(), "message": {"type": "error", "message": rng.choice(ERRORS)}})
         elif r < 0.9:
-            sc["events"].append({"ev": "message", "t": tick(), "message": rng.choice([{"type": "ready"}, {"type": "log", "text": "x"}, {}, {"type": 5}])})
+            sc["events"].append({"ev": "message", "t": tick(), "message": rng.choice([{"type": "ready"}, {"type": "log", "text": "x"}, {}, {"type": 5}] + CRASH_MESSAGES)})
         elif r < 0.95:
             sc["events"].append({"ev": "stop", "t": tick()})
         else:
@@ -233,7 +261,7 @@ def story(rng: random.Random) -> dict:
     """Set-up, a long signed-out stretch (60 statuses = the saved-login rule), then the signed-in / reload / settle sequence."""
     sc = {"has_credentials": rng.random() < 0.7, "events": [{"ev": "setup", "t": 0.0}], "progress": [], "error": "x"}
     t = 0.0
-    for _ in range(rng.choice([3, 4, 59, 60, 61, 70, 119, 120, 121])):
+    for _ in range(rng.choice([3, 4, 15, 16, 17, 59, 60, 61, 70, 119, 120, 121])):
         t += 0.5
         sc["events"].append(msg(rng, t, False, pure=True))
     for e in sc["events"]:
@@ -242,10 +270,16 @@ def story(rng: random.Random) -> dict:
     for dt in rng.choice([[0.5, 7.5, 0.5], [0.5, 7.999, 0.001, 0.5], [0.5, 8.0, 0.5, 0.5], [0.5, 4.0, 4.0, 4.0], [30.0, 0.5]]):
         t += dt
         sc["events"].append(msg(rng, t, rng.random() < 0.75))
-    for _ in range(rng.choice([0, 3, 70])):
+    for _ in range(rng.choice([0, 3, 39, 40, 41, 70, 479, 480, 481])):
         t += 0.5
-        sc["events"].append(msg(rng, t, rng.random() < 0.5))
+        sc["events"].append(msg(rng, t, rng.random() < 0.2))
         sc["events"][-1]["saved"] = {"result": rng.choice(["found", "none"])}
+    if rng.random() < 0.3:
+        sc["events"].append({"ev": "message", "t": t + 0.5, "message": rng.choice(CRASH_MESSAGES), "saved": {"result": "found"}})
+        for _ in range(rng.choice([0, 20, 60])):
+            t += 0.5
+            sc["events"].append(msg(rng, t, False, pure=True))
+            sc["events"][-1]["saved"] = {"result": "found"}
     return sc
 
 

@@ -218,11 +218,15 @@ impl Inner {
     }
 
     fn init_core(self: &Arc<Self>, events: &mut Vec<JoinHandle<()>>) -> Option<Handle> {
+        extern "C" {
+            fn setlocale(category: i32, locale: *const std::ffi::c_char) -> *const std::ffi::c_char;
+        }
+        // libmpv's contract (client.h, "general remarks"): LC_NUMERIC must be "C", or `mpv_create` returns NULL. Qt calls `setlocale(LC_ALL, "")` at start-up, so a shell launched
+        // with LANG=en_US.UTF-8 (a Terminal on the Intel Mac) hit exactly that: `singws_bridge_create returned null` with nothing in the log (found 2026-11-15 by running
+        // `mpv_create` under each locale). The Python app has always reset it (`mpv_playback_iina.py`: `locale.setlocale(locale.LC_NUMERIC, "C")`); the bridge now does the same, here, before the call.
+        unsafe { setlocale(4 /* LC_NUMERIC on macOS */, b"C\0".as_ptr().cast()) };
         let Some(h) = self.api.create() else {
             // Silent before 2026-11-07: on the Intel Mac every Python-free readiness run ended here with nothing in the log.
-            extern "C" {
-                fn setlocale(category: i32, locale: *const std::ffi::c_char) -> *const std::ffi::c_char;
-            }
             let numeric = unsafe {
                 let p = setlocale(4 /* LC_NUMERIC on macOS */, std::ptr::null());
                 if p.is_null() { String::from("?") } else { std::ffi::CStr::from_ptr(p).to_string_lossy().into_owned() }
@@ -815,4 +819,29 @@ impl Drop for Player {
 #[allow(dead_code)]
 pub fn settle() {
     std::thread::sleep(Duration::from_millis(1));
+}
+
+#[cfg(test)]
+mod locale_tests {
+    use super::*;
+
+    /// `mpv_create` returns NULL unless LC_NUMERIC is "C" (libmpv client.h). With the library at SINGWS_LIBMPV (or the installed app's), a process whose numeric locale was
+    /// set from the environment (what Qt does) must still get a player. Skipped when no libmpv is installed.
+    #[test]
+    fn a_non_c_numeric_locale_does_not_stop_the_player_being_created() {
+        let candidates = [std::env::var("SINGWS_LIBMPV").unwrap_or_default(), "/Applications/SingWS.app/Contents/Frameworks/singws_libmpv.2.dylib".to_string()];
+        let Some(lib) = candidates.iter().find(|p| !p.is_empty() && std::path::Path::new(p).exists()) else { return };
+        std::env::set_var("SINGWS_LIBMPV", lib);
+        extern "C" {
+            fn setlocale(category: i32, locale: *const std::ffi::c_char) -> *const std::ffi::c_char;
+        }
+        let set = unsafe { setlocale(0 /* LC_ALL on macOS */, b"en_US.UTF-8\0".as_ptr().cast()) };
+        if set.is_null() {
+            return; // this Mac has no en_US.UTF-8 locale: nothing to prove
+        }
+        let numeric = unsafe { std::ffi::CStr::from_ptr(setlocale(4, std::ptr::null())).to_string_lossy().into_owned() };
+        assert_ne!(numeric, "C", "the test needs a non-C numeric locale to mean anything");
+        let player = Player::create("/nonexistent/song.mp4", None, None);
+        assert!(player.is_some(), "mpv_create must not fail because LC_NUMERIC was set from the environment");
+    }
 }

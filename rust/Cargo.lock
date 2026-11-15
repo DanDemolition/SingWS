@@ -2498,6 +2498,7 @@ name = "singws-dsp-ffi"
 version = "0.1.0"
 dependencies = [
  "singws-dsp",
+ "singws-phrase",
  "singws-plan",
  "singws-queue",
  "singws-start",

@@ -1,5 +1,13 @@
 # KaraFun web player: moving its Python into Rust (plan, 2026-11-10)
 
+> **UPDATE 2026-11-15: the tables below describe the web player as it was on 2026-11-12 (Chrome for Testing + DevTools helper). Read this first.**
+> * **Gone:** the `singws-karafun-web` crate, Chrome for Testing, the JPEG screencast and `ensure_browser`'s Chrome download (W3 as written is obsolete: provisioning is now "download Chromium's framework once, after asking", done by the display program's `get` subcommand). `ensure_browser` in Python now does only that; check what is left of the W3 parity tool before relying on it.
+> * **New:** `rust/crates/singws-karafun-display` (Chromium/CEF inside a Rust program, GPU frames into native windows). That is the Rust side of the picture today; the old W6 "frames to the audience window" is largely satisfied by it (the Python host still places and stacks its windows).
+> * **RE-SYNCED 2026-11-15:** the Python behaviour added since 2026-11-12 is now modelled and proven IDENTICAL against the real classes: W1 service (saved login after 8 s, one re-login 20 s after the reload, browser sign-in page only with no saved login (30 s) or after 4 minutes, profile reset once per run on `RuntimeError: memory access out of bounds`) and W2 host (a song asked for during sign-in is held up to 240 s, its 60 s limit counted from when play was sent, frames flow at play but the picture goes over the windows only when the song starts, the "Waiting for KaraFun to sign in..." status). Parity tools: `tools/karafun_service_parity.py`, `tools/karafun_host_parity.py` (new `hold_story`). Not modelled and not in the crate: the ticker/bars `stack_base` (window stacking belongs to the window owner), the transport-shadow feed (`_shadow_observe`, a log-only call). Mutation tool not re-run.
+> * **Shadow gap found 2026-11-14, fixed 2026-11-15:** the host now feeds the Rust transport machine (playing / end clock / idle / watchdog / seek), see `RUST_APP_LOGIC_PLAN.md`, "Update 2026-11-15".
+> * Intel now runs the web player on real hardware (shows 2026-11-13/14); the only failure found was KaraFun's engine on a saved profile (fixed by the reset).
+
+
 Goal: the web player (`karafun_web_player`, shipped OFF by default in 1.0.3.3) runs with no Python, like the rest of the Rust migration. Same method as every other
 port (see `stage-e-karafun-rust-plan.md`): Python is the oracle; the Rust twin is proven OFFLINE first; then it runs as a log-only shadow in real shows; then it drives
 behind a flag after one clean show per decision (project gate policy). Nothing here changes how the Python player works today. The plan below is now largely BUILT OFFLINE: see "Final status of the port" at the end.

@@ -515,3 +515,34 @@ pub unsafe extern "C" fn singws_transport_step_json(
         }
     }
 }
+
+
+/// Phrase / waveform-editor analysis for the app's log-only shadow (`phrase_shadow.py`): `request` is the JSON of one op (`peaks`, `suggest_start`, `tempo`, `loop`, `sections`,
+/// `smooth`; see `singws_phrase::answer`), `pcm` the mono f32 samples. The answer JSON goes to `out`; returns its length, -1 for a bad request, -2 when `cap` is too small,
+/// -3 for a panic. Same code as the `singws-phrase` tool that tools/phrase_parity.py checks against numpy/scipy.
+///
+/// # Safety
+/// `request` must be a NUL-terminated string, `pcm` readable for `pcm_len` f32 values (may be null when `pcm_len` is 0), `out` writable for `cap` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn singws_phrase_json(request: *const std::os::raw::c_char, pcm: *const f32, pcm_len: usize, out: *mut u8, cap: usize) -> i64 {
+    if request.is_null() || out.is_null() || (pcm.is_null() && pcm_len != 0) {
+        return -1;
+    }
+    let r = catch_unwind(AssertUnwindSafe(|| {
+        let req = unsafe { std::ffi::CStr::from_ptr(request) }.to_str().map_err(|_| ())?;
+        let samples: &[f32] = if pcm_len == 0 { &[] } else { unsafe { std::slice::from_raw_parts(pcm, pcm_len) } };
+        singws_phrase::answer_json(req, samples).map_err(|_| ())
+    }));
+    match r {
+        Err(_) => -3,
+        Ok(Err(())) => -1,
+        Ok(Ok(json)) => {
+            let b = json.as_bytes();
+            if b.len() > cap {
+                return -2;
+            }
+            unsafe { std::ptr::copy_nonoverlapping(b.as_ptr(), out, b.len()) };
+            b.len() as i64
+        }
+    }
+}

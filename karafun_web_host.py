@@ -275,6 +275,7 @@ class KaraFunWebHost:
                             self._log("the song was playing but its start was not noticed; treating it as started")
                             self._started(entry, asked, float(s.get("position") or 0.0), float(s.get("duration") or 0.0))
                             return
+                    self._shadow_observe("watchdog")        # the Rust machine hears the stall too (Warn the operator): the first step to Rust owning stall detection
                     if self.service is not None and self.service.state == "sign_in":
                         self._fail("KaraFun's web player is not signed in: sign in to KaraFun in your browser (Settings > KaraFun)")
                     else:
@@ -366,6 +367,27 @@ class KaraFunWebHost:
             except Exception:
                 pass
 
+    def _shadow_observe(self, kind: str, throttle_s: float = 0.0) -> None:
+        """Tell the Rust transport machine (log-only shadow) what the player shows, BEFORE the app decides: 'playing' while it plays, 'end_clock' when the position reaches
+        the end, 'idle' when nothing is playing. The machine then reaches its own answer about the song's end, which is compared with the app's (`app_auto_complete`).
+        Before 2026-11-15 only the app's answer was sent, so every web song logged a MISMATCH."""
+        asked = self.asked
+        if asked is None:
+            return
+        try:
+            if throttle_s:
+                fed = asked.setdefault("_shadow_fed", {})
+                now = time.monotonic()
+                if now - fed.get(kind, -1e9) < throttle_s:
+                    return
+                fed[kind] = now
+            shadow = self.app._transport_shadow()
+            sid = (asked.get("active") or {}).get("_shadow_id")
+            if shadow is not None and sid:
+                shadow.observe(sid, kind)
+        except Exception:
+            pass
+
     def _follow(self) -> None:
         asked = self.asked
         if asked is None:
@@ -402,6 +424,11 @@ class KaraFunWebHost:
             self._sat_at_end_since = None
         elif self._sat_at_end_since is None:
             self._sat_at_end_since = now
+            self._shadow_observe("end_clock")            # the end of the song has been reached
+        if playing:
+            self._shadow_observe("playing", 2.0)
+        else:
+            self._shadow_observe("idle", 2.0)            # nothing playing: the machine decides whether that is the end (corroborated) or a pause
         if current is None:
             why = "gone from the player"
         elif current != asked["id"]:
@@ -433,6 +460,7 @@ class KaraFunWebHost:
         entry.pop("karafun_pending_at", None)
         app._set_karafun_entry_status(entry, "playing", message="Playing in KaraFun")
         self._log(f"started after {now - asked['at']:.1f}s title={asked['title']!r} duration={duration:.0f}s")
+        self._shadow_observe("playing")
         try:
             app._fade_bg_for_external_karafun()
         except Exception:
@@ -495,6 +523,13 @@ class KaraFunWebHost:
         now = time.monotonic()
         entry["karafun_display_started_at"] = (entry.get("karafun_paused_at") or now) - target
         self._log(f"seek to {target:.0f}s")
+        try:
+            shadow = self.app._transport_shadow()
+            sid = (self.asked.get("active") or {}).get("_shadow_id")
+            if shadow is not None and sid:
+                shadow.note_seek(sid, float(self.asked.get("last_position") or 0.0), target, duration)
+        except Exception:
+            pass
         return True
 
     def apply_key_tempo(self, entry: dict, target_key: int, target_tempo: int):

@@ -5,6 +5,8 @@
 use serde_json::{json, Value};
 
 pub const NEVER_STARTED_AFTER_S: f64 = 60.0;
+/// A song asked for while the player is still starting / signing in is held this long before it is failed (`SIGN_IN_HOLD_S`, 1.0.3.8).
+pub const SIGN_IN_HOLD_S: f64 = 240.0;
 pub const RECOVER_START_WITHIN_S: f64 = 150.0;
 pub const MAX_RECOVERIES: i64 = 3;
 pub const SAT_AT_END_S: f64 = 2.5;
@@ -33,6 +35,8 @@ struct Asked {
     title: String,
     heard: bool,
     sent: bool,
+    /// when play was sent to the page (the 60 s start limit counts from here once it was sent)
+    sent_at: Option<f64>,
     at: f64,
     limit: f64,
     key: i64,
@@ -161,7 +165,7 @@ impl Host {
                 };
                 let key_i = key.unwrap_or(0);
                 self.gens += 1;
-                self.asked = Some(Asked { id, title: title.to_string(), heard: false, sent: false, at: now, limit: NEVER_STARTED_AFTER_S, key: key_i, tempo: tempo_v,
+                self.asked = Some(Asked { id, title: title.to_string(), heard: false, sent: false, sent_at: None, at: now, limit: NEVER_STARTED_AFTER_S, key: key_i, tempo: tempo_v,
                                           recoveries: 0, last_position: None, resume_at: None, gen: self.gens });
                 self.sat_since = None;
                 self.song_open = true;
@@ -183,6 +187,8 @@ impl Host {
                 } else if w.service_state == "error" {
                     let why = if self.state.1.is_empty() { "KaraFun's web player could not start".to_string() } else { self.state.1.clone() };
                     self.fail(&why, w, &mut o)?;
+                } else {
+                    o.push(json!(["entry_status", "launching", "Waiting for KaraFun to sign in...", true]));
                 }
                 self.arm_watchdog(&mut o);
                 o.push(json!(["returns", true]));
@@ -308,7 +314,9 @@ impl Host {
         }
         if let Some(a) = self.asked.as_mut() {
             a.sent = true;
-            let _ = now;
+            a.sent_at = Some(now);
+            // frames flow now, but the picture goes over the windows only when the song starts (see `started`)
+            o.push(json!(["start_frames_hidden"]));
             o.push(json!(["web_play", a.id]));
         }
     }
@@ -420,11 +428,14 @@ impl Host {
     }
 
     fn check(&mut self, gen: u64, w: &World, now: f64, o: &mut Vec<Value>) -> R<()> {
-        let (id, at, limit) = match &self.asked {
-            Some(a) if a.gen == gen && !a.heard => (a.id, a.at, a.limit),
+        let (id, waited, limit) = match &self.asked {
+            Some(a) if a.gen == gen && !a.heard => match (a.sent, a.sent_at) {
+                (true, Some(sent_at)) => (a.id, now - sent_at, a.limit),            // play was sent: the song has this long to start
+                _ => (a.id, now - a.at, a.limit.max(SIGN_IN_HOLD_S)),             // not sent yet: the player is still coming up; the song is held, not failed
+            },
             _ => return Ok(()),
         };
-        if now - at >= limit {
+        if waited >= limit {
             let cur = self.song_id()?;
             let st = &self.status;
             let playing = st.get("playing").map(truthy).unwrap_or(false) || st.get("moving").map(truthy).unwrap_or(false);
@@ -515,6 +526,7 @@ impl Host {
             (a.title.clone(), a.at, a.key, a.tempo, a.id)
         };
         let _ = id;
+        o.push(json!(["start_frames"])); // the song is really playing: now the picture goes over the windows
         o.push(json!(["entry_set", "karafun_playback_clock_started_at", now - position]));
         o.push(json!(["entry_set", "karafun_display_started_at", now - position]));
         o.push(json!(["entry_wall", "karafun_play_started_at"]));
@@ -548,7 +560,6 @@ impl Host {
             o.push(json!(["web_seek", target]));
             o.push(json!(["log", format!("resumed the song at {}s after restarting the player", f0(target))]));
         }
-        o.push(json!(["start_frames"]));
         o.push(json!(["notify", format!("KaraFun queued and started: {title}"), "success"]));
         Ok(())
     }
