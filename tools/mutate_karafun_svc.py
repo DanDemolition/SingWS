@@ -77,7 +77,7 @@ def blank_strings(line):
 
 def generate(name, text):
     lines = text.split("\n")
-    stop = next((i for i, l in enumerate(lines) if l.startswith(("/// Replay request", "pub fn handle", "#[cfg(target_os"))), len(lines))
+    stop = next((i for i, l in enumerate(lines) if l.startswith(("/// Replay request", "/// One service event", "/// One host event", "pub fn svc_event", "pub fn host_event", "pub fn handle", "#[cfg(target_os"))), len(lines))
     out = []
     for ln, line in enumerate(lines[:stop]):
         s = line.strip()
