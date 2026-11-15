@@ -217,14 +217,20 @@ def hold_story(rng: random.Random) -> dict:
     state = rng.choice(["starting", "sign_in", "preparing"])
     ev.append({"ev": "start", "t": t0, "song_id": rng.choice([3250037, 58970]), "enabled": True, "key": None, "tempo": 100, "title": TITLES[0], "world": world(rng, state, service_present=True)})
     t = t0
-    for dt in sorted(rng.sample([1.0, 30.0, 59.9, 60.0, 60.1, 100.0, 150.0, 200.0, 239.9, 240.0, 240.1, 300.0], rng.choice([1, 2, 3]))):
+    pre = set(rng.sample([1.0, 30.0, 59.9, 60.0, 60.1, 100.0, 150.0, 200.0, 239.9, 240.0, 240.1, 300.0], rng.choice([1, 2, 3])))
+    if rng.random() < 0.5:
+        pre.add(rng.choice([60.0, 240.0]))      # the exact edge of the hold must be exercised often: `>=` against `>` is only seen on equality
+    for dt in sorted(pre):
         ev.append({"ev": "watchdog", "t": t0 + dt, "world": world(rng, rng.choice(["starting", "sign_in", "preparing"]))})
         t = t0 + dt
     if rng.random() < 0.8:                     # the player becomes ready: play is sent now
         t += rng.choice([0.5, 5.0])
         ev.append({"ev": "service", "t": t, "state": "ready", "detail": "Signed in", "world": world(rng, "ready")})
         sent = t
-        for dt in sorted(rng.sample([1.0, 30.0, 59.9, 60.0, 60.1, 100.0, 239.9, 240.0], rng.choice([1, 2, 3]))):
+        post = set(rng.sample([1.0, 30.0, 59.9, 60.0, 60.1, 100.0, 239.9, 240.0], rng.choice([1, 2, 3])))
+        if rng.random() < 0.5:
+            post.add(60.0)
+        for dt in sorted(post):
             ev.append({"ev": "watchdog", "t": sent + dt, "world": world(rng, rng.choice(["ready", "sign_in"]))})
             t = sent + dt
         if rng.random() < 0.5:

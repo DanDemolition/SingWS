@@ -64082,9 +64082,12 @@ class DetachedPainterTicker(QFrame):
         ticker_window.setHidesOnDeactivate_(False)
         ticker_window.setIgnoresMouseEvents_(True)
         base = host_window.windowNumber()
-        owner = self._settings_owner()
-        if owner is not None and hasattr(owner, "_karafun_stack_base"):
-            base = owner._karafun_stack_base(base)       # over the KaraFun picture when one covers the audience window, so they do not swap places
+        try:
+            owner = self._settings_owner()
+            if owner is not None and hasattr(owner, "_karafun_stack_base"):
+                base = int(owner._karafun_stack_base(base))       # over the KaraFun picture when one covers the audience window, so they do not swap places
+        except Exception:
+            pass                                                   # never let the stacking helper stop the ticker from being ordered
         ticker_window.orderWindow_relativeTo_(NSWindowAbove, base)
 
     def sync_surface_geometry(self):

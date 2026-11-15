@@ -274,12 +274,49 @@ def story(rng: random.Random) -> dict:
         t += 0.5
         sc["events"].append(msg(rng, t, rng.random() < 0.2))
         sc["events"][-1]["saved"] = {"result": rng.choice(["found", "none"])}
-    if rng.random() < 0.3:
-        sc["events"].append({"ev": "message", "t": t + 0.5, "message": rng.choice(CRASH_MESSAGES), "saved": {"result": "found"}})
-        for _ in range(rng.choice([0, 20, 60])):
+    if rng.random() < 0.25:                     # the service is started again (a settings change / a new run): every counter starts over, so the one re-login is available again
+        t += 1.0
+        sc["events"].append({"ev": "start", "t": t, "alive": False})
+        t += 0.1
+        sc["events"].append({"ev": "setup", "t": t})
+        for _ in range(17):
             t += 0.5
             sc["events"].append(msg(rng, t, False, pure=True))
             sc["events"][-1]["saved"] = {"result": "found"}
+        for dt in (0.5, 8.0, 0.5):
+            t += dt
+            sc["events"].append(msg(rng, t, True, pure=True))
+            sc["events"][-1]["saved"] = {"result": "found"}
+        for _ in range(rng.choice([39, 41, 45])):
+            t += 0.5
+            sc["events"].append(msg(rng, t, False, pure=True))
+            sc["events"][-1]["saved"] = {"result": "found"}
+    if rng.random() < 0.3:
+        sc["events"].append({"ev": "message", "t": t + 0.5, "message": rng.choice(CRASH_MESSAGES), "saved": {"result": "found"}})
+        t += 0.5
+        if rng.random() < 0.7:                  # the restarted service sets itself up again (the harness does not run the real thread), so its counters start counting
+            t += 0.1
+            sc["events"].append({"ev": "setup", "t": t})
+        for _ in range(rng.choice([0, 20, 60, 130])):
+            t += 0.5
+            sc["events"].append(msg(rng, t, False, pure=True))
+            sc["events"][-1]["saved"] = {"result": "found"}
+        if rng.random() < 0.5:                  # after the restart: the saved login (16), the reload, then signed out again (40): the one re-login
+            for _ in range(17):
+                t += 0.5
+                sc["events"].append(msg(rng, t, False, pure=True))
+                sc["events"][-1]["saved"] = {"result": "found"}
+            for dt in (0.5, 8.0, 0.5):
+                t += dt
+                sc["events"].append(msg(rng, t, True, pure=True))
+                sc["events"][-1]["saved"] = {"result": "found"}
+            for _ in range(rng.choice([39, 41, 45])):
+                t += 0.5
+                sc["events"].append(msg(rng, t, False, pure=True))
+                sc["events"][-1]["saved"] = {"result": "found"}
+        if rng.random() < 0.4:                  # a second crash in the same run: the profile is moved aside only once
+            t += 0.5
+            sc["events"].append({"ev": "message", "t": t, "message": rng.choice(CRASH_MESSAGES), "saved": {"result": "found"}})
     return sc
 
 

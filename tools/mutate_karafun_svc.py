@@ -113,6 +113,13 @@ def corpora(n_svc, n_host):
             host.append((sc, hp.norm(hp.python_trace(sc))))
         except Exception:
             pass
+    rng = r.Random(303)                       # the held-song stories (the 60 s / 240 s windows) are extra scenarios, so the rest of the corpus is unchanged
+    for _ in range(max(1, n_host // 3)):
+        sc = hp.hold_story(rng)
+        try:
+            host.append((sc, hp.norm(hp.python_trace(sc))))
+        except Exception:
+            pass
     return svc, host
 
 
