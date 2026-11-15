@@ -10,6 +10,7 @@ pub mod match_tables;
 pub mod matching;
 pub mod top100;
 pub mod host;
+pub mod session;
 
 /// Seconds after the post-login reload during which the old page's statuses are ignored (`RELOAD_SETTLE_S`).
 pub const RELOAD_SETTLE_S: f64 = 8.0;
@@ -322,6 +323,33 @@ fn saved_from(v: &Value) -> SavedLogin {
     }
 }
 
+/// One service event (the replay format: `{"ev": ..., "t": seconds, ...}`, with `"saved"` answering a `read_saved_login` request) -> the ordered actions as JSON.
+/// `Err(reason)` when the event is not modelled (never guessed).
+pub fn svc_event(m: &mut Machine, e: &Value) -> Result<Vec<Value>, String> {
+    let now = e.get("t").and_then(|x| x.as_f64()).unwrap_or(0.0);
+    let kind = e.get("ev").and_then(|x| x.as_str()).unwrap_or("");
+    let ev = match kind {
+        "start" => Event::Start { alive: e.get("alive").and_then(|x| x.as_bool()).unwrap_or(false) },
+        "run_begin" => Event::RunBegin,
+        "progress" => Event::Progress { done: e.get("done").and_then(|x| x.as_i64()).unwrap_or(0), total: e.get("total").and_then(|x| x.as_i64()).unwrap_or(0) },
+        "browser_found" => Event::BrowserFound,
+        "web_made" => Event::WebMade,
+        "setup_failed" => Event::SetupFailed { error: e.get("error").and_then(|x| x.as_str()).unwrap_or("") },
+        "stop" => Event::Stop,
+        "message" => match e.get("message") {
+            Some(v) => Event::Message(v),
+            None => return Err("message missing".into()),
+        },
+        other => return Err(format!("unknown event {other}")),
+    };
+    let mut acts = m.step(ev, now)?;
+    if acts.last() == Some(&Action::ReadSavedLogin) {
+        let saved = e.get("saved").map(saved_from).unwrap_or(SavedLogin::None);
+        acts.extend(m.step(Event::SavedLogin(saved), now)?);
+    }
+    Ok(acts.iter().map(action_json).collect())
+}
+
 /// Replay request: `{"has_credentials": bool, "events": [{"ev": "...", "t": seconds, ...}]}` -> `{"trace": [[action...] per event], "state": ...}`.
 /// A `message` event may carry `"saved": {"result": "found"|"none"|"error", "kind": TypeName}` which answers a `read_saved_login` request.
 /// Answer is `{"declined": reason}` when a case is not modelled.
@@ -330,34 +358,10 @@ pub fn handle(req: &Value) -> Value {
     let empty = vec![];
     let mut trace = Vec::new();
     for e in req.get("events").and_then(|x| x.as_array()).unwrap_or(&empty) {
-        let now = e.get("t").and_then(|x| x.as_f64()).unwrap_or(0.0);
-        let kind = e.get("ev").and_then(|x| x.as_str()).unwrap_or("");
-        let ev = match kind {
-            "start" => Event::Start { alive: e.get("alive").and_then(|x| x.as_bool()).unwrap_or(false) },
-            "run_begin" => Event::RunBegin,
-            "progress" => Event::Progress { done: e.get("done").and_then(|x| x.as_i64()).unwrap_or(0), total: e.get("total").and_then(|x| x.as_i64()).unwrap_or(0) },
-            "browser_found" => Event::BrowserFound,
-            "web_made" => Event::WebMade,
-            "setup_failed" => Event::SetupFailed { error: e.get("error").and_then(|x| x.as_str()).unwrap_or("") },
-            "stop" => Event::Stop,
-            "message" => match e.get("message") {
-                Some(v) => Event::Message(v),
-                None => return json!({"declined": "message missing"}),
-            },
-            other => return json!({"declined": format!("unknown event {other}")}),
-        };
-        let mut acts = match m.step(ev, now) {
-            Ok(a) => a,
+        match svc_event(&mut m, e) {
+            Ok(acts) => trace.push(Value::Array(acts)),
             Err(r) => return json!({"declined": r}),
-        };
-        if acts.last() == Some(&Action::ReadSavedLogin) {
-            let saved = e.get("saved").map(saved_from).unwrap_or(SavedLogin::None);
-            match m.step(Event::SavedLogin(saved), now) {
-                Ok(more) => acts.extend(more),
-                Err(r) => return json!({"declined": r}),
-            }
         }
-        trace.push(Value::Array(acts.iter().map(action_json).collect()));
     }
     json!({"trace": trace, "state": m.state})
 }

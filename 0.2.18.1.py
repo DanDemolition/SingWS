@@ -4237,6 +4237,10 @@ DEFAULTS = {
     # Waveform-editor shadow (2026-11-15): the Rust analysis (singws-phrase) runs on the same samples as phrase_detect.py and the answers are compared and LOGGED
     # ([PHRASE-SHADOW]); the editor always uses Python's. Default on (log only), read once at launch. NOT in _RUST_EVIDENCE_FLAGS (the Rust settings migration mirrors that list).
     "phrase_shadow": True,
+    # KaraFun web player twin (2026-11-15): the Rust port of the player's sign-in service and song lifecycle hears the same events as karafun_web.py / karafun_web_host.py
+    # and its answers are compared and LOGGED ([KFWEB-SHADOW]); Python always acts. "shadow" (default) compares, "python" switches it off, "rust" is reserved for the day Rust
+    # drives the player (not built: it behaves like "shadow"). Read once at launch. NOT in _RUST_EVIDENCE_FLAGS (a string, and the Rust settings migration mirrors that list).
+    "karafun_web_engine": "shadow",
     # Stage C shadow: compare the background-music window / crossfade-length decisions (transition_analysis) with the Rust
     # singws-plan rules and LOG disagreements only; the app's own answer is always used. Default off until its two-architecture
     # package gate passes. The karaoke effective-end rule runs only in the offline analysis worker and is covered by
@@ -23091,6 +23095,11 @@ class KaraokeApp(QWidget):
         try:
             import phrase_shadow
             phrase_shadow.configure(bool(self.settings.get("phrase_shadow", True)), _diag)
+        except Exception:
+            pass
+        try:
+            import karafun_web_shadow
+            karafun_web_shadow.configure(self.settings.get("karafun_web_engine", "shadow"), _diag)
         except Exception:
             pass
         if _migrate_rust_evidence_defaults(self.settings) or getattr(self, "_rust_defaults_just_migrated", False):

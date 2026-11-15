@@ -16,6 +16,7 @@ The player's own queue is emptied before each song (karafun_bridge.js), so only 
 """
 from __future__ import annotations
 
+import contextlib
 import re
 import sys
 import threading
@@ -63,6 +64,13 @@ class KaraFunWebHost:
         self._frames_shown = False
         self._sat_at_end_since: Optional[float] = None
         self._song_open = False          # a song was handed to the web player and has not been finished by the app yet
+        self._shadow = None              # karafun_web_shadow.Tap: the Rust twin of this class hears every event and its answers are compared (log only)
+        self._shadow_state_read = None
+        try:
+            import karafun_web_shadow
+            self._shadow = karafun_web_shadow.host_tap()
+        except Exception:
+            self._shadow = None
 
     # ---- settings and the service
     def enabled(self) -> bool:
@@ -76,6 +84,30 @@ class KaraFunWebHost:
         except Exception:
             pass
 
+    # ---- the Rust twin (karafun_web_shadow.py): log-only comparison, never changes what happens
+    def _fx(self, *effect) -> None:
+        tap = self._shadow
+        if tap is not None:
+            tap.fx(*effect)
+
+    def _shadow_world(self) -> dict:
+        """What the Rust machine reads from outside, at the moment an event begins."""
+        asked, service = self.asked, self.service
+        try:
+            current = asked is None or self.app._karafun_active_entry() is asked["entry"]
+        except Exception:
+            current = False
+        same = asked is None or getattr(self.app, "_active_external_karafun", None) is asked.get("active")
+        return {"service_present": service is not None, "service_state": str(getattr(service, "state", "idle")),
+                "has_web": bool(service is not None and getattr(service, "web", None) is not None), "entry_current": bool(current), "active_same": bool(same)}
+
+    def _tap(self, kind: str, event: str, compare: bool = True, **fields):
+        """A context manager around one event the Rust twin models (a no-op yielding None when the shadow is off)."""
+        tap = self._shadow
+        if tap is None:
+            return contextlib.nullcontext(None)
+        return tap.event(kind, dict({"ev": event, "t": time.monotonic(), "world": self._shadow_world()}, **fields), compare)
+
     def ensure_service(self) -> None:
         """Start the player's set-up (browser, helper, sign-in) once; safe to call again (UI thread)."""
         if self.service is None:
@@ -86,6 +118,12 @@ class KaraFunWebHost:
                 factory = karafun_web.KaraFunWebService
             self.service = factory(self._service_state, on_message=self._on_message, on_log=self._log,
                                    credentials=self._saved_login)
+            if self._shadow is not None:
+                try:
+                    import karafun_web_shadow
+                    self.service._shadow = karafun_web_shadow.service_tap(True)
+                except Exception:
+                    pass
         if self.service.state in ("idle", "error", "needs_browser"):
             self.service.start()
 
@@ -144,6 +182,10 @@ class KaraFunWebHost:
             self._fail("KaraFun's player needs Chromium, and the download was declined")
 
     def _state_changed(self, state: str, detail: str) -> None:
+        with self._tap("host_service", "service", state=str(state), detail=str(detail)):
+            self._state_changed_impl(state, detail)
+
+    def _state_changed_impl(self, state: str, detail: str) -> None:
         if state == "needs_browser":
             self._ask_for_browser()
             return
@@ -185,6 +227,7 @@ class KaraFunWebHost:
             self.app._show_processing_notification("KaraFun's player stopped: restarting it and resuming the song.", level="warning")
         except Exception:
             pass
+        self._fx("recover")
         try:
             self.service.stop()
             self.service.start()
@@ -208,6 +251,27 @@ class KaraFunWebHost:
         return self.enabled() and self._song_id(entry, song_path) is not None
 
     def start(self, entry: dict, key: int = 0, tempo_percent=None, song_path: str = "") -> bool:
+        if self._shadow is None:
+            return self._start_impl(entry, key, tempo_percent, song_path)
+        try:
+            song_id, enabled = self._song_id(entry, song_path), self.enabled()
+        except Exception:
+            song_id, enabled = None, False
+        self._shadow_state_read = None
+        with self._tap("host_start", "start", song_id=song_id, enabled=bool(enabled), key=key, tempo=tempo_percent, title="x") as b:
+            result = self._start_impl(entry, key, tempo_percent, song_path)
+            if b is not None:
+                service = self.service
+                try:
+                    current = self.app._karafun_active_entry() is entry
+                except Exception:
+                    current = True
+                b.set(world={"service_present": service is not None, "service_state": str(self._shadow_state_read or getattr(service, "state", "idle")),
+                             "has_web": bool(service is not None and getattr(service, "web", None) is not None), "entry_current": bool(current), "active_same": True})
+                self._fx("returns", bool(result))
+        return result
+
+    def _start_impl(self, entry: dict, key: int = 0, tempo_percent=None, song_path: str = "") -> bool:
         song_id = self._song_id(entry, song_path)
         if not self.enabled() or song_id is None:
             return False
@@ -232,6 +296,7 @@ class KaraFunWebHost:
         self._log(f"start id={song_id} title={title!r} key={key} tempo={tempo}")
         self.ensure_service()
         state = self.service.state
+        self._shadow_state_read = state
         if state == "ready":
             self._send_play()
         elif state == "error":
@@ -248,6 +313,7 @@ class KaraFunWebHost:
             return
         asked["sent"] = True
         asked["sent_at"] = time.monotonic()
+        self._fx("play")
         # The page must draw at full speed BEFORE the song starts, not after: KaraFun's player runs on the page's animation frames, which are throttled to a few per
         # second while no picture is wanted, so a player that waited for "started" before getting frames never started (black screen on the Intel Mac, 2026-11-14).
         self._start_frames(show=False)      # frames flow, but the picture stays off the windows until the song really starts (the singer transition must stay visible)
@@ -261,28 +327,37 @@ class KaraFunWebHost:
 
         def _check():
             if self.asked is asked and not asked["heard"]:
-                limit = asked.get("limit", NEVER_STARTED_AFTER_S)
-                if asked.get("sent") and asked.get("sent_at") is not None:
-                    waited = time.monotonic() - asked["sent_at"]        # play was sent: the song has this long to start
-                else:
-                    waited = time.monotonic() - asked["at"]
-                    limit = max(limit, SIGN_IN_HOLD_S)                  # not sent yet: the player is still coming up; the song is held, not failed
-                if waited >= limit:
-                    s = self.status or {}
-                    if (s.get("song") or {}).get("id") == asked["id"] and (s.get("playing") or s.get("moving")):
-                        entry = self._entry_current()
-                        if entry is not None:         # it IS playing: the start was just not noticed in time; treat it as started, never fail a song that is sounding
-                            self._log("the song was playing but its start was not noticed; treating it as started")
-                            self._started(entry, asked, float(s.get("position") or 0.0), float(s.get("duration") or 0.0))
-                            return
-                    self._shadow_observe("watchdog")        # the Rust machine hears the stall too (Warn the operator): the first step to Rust owning stall detection
-                    if self.service is not None and self.service.state == "sign_in":
-                        self._fail("KaraFun's web player is not signed in: sign in to KaraFun in your browser (Settings > KaraFun)")
-                    else:
-                        self._fail("KaraFun's web player never started the song")
-                else:
-                    QTimer.singleShot(1000, _check)
+                with self._tap("host_stall", "watchdog") as b:
+                    if b is not None and not asked.get("_shadow_waited"):
+                        asked["_shadow_waited"] = True
+                        b.always = True                 # the first check of each song is a decision too ("still waiting"), so a show with no stall still proves it
+                    self._check_body(asked, _check)
         QTimer.singleShot(1000, _check)
+
+    def _check_body(self, asked: dict, recheck) -> None:
+        """One tick of the never-started watchdog (every second while the song has not been heard)."""
+        from PyQt6.QtCore import QTimer
+        limit = asked.get("limit", NEVER_STARTED_AFTER_S)
+        if asked.get("sent") and asked.get("sent_at") is not None:
+            waited = time.monotonic() - asked["sent_at"]        # play was sent: the song has this long to start
+        else:
+            waited = time.monotonic() - asked["at"]
+            limit = max(limit, SIGN_IN_HOLD_S)                  # not sent yet: the player is still coming up; the song is held, not failed
+        if waited >= limit:
+            s = self.status or {}
+            if (s.get("song") or {}).get("id") == asked["id"] and (s.get("playing") or s.get("moving")):
+                entry = self._entry_current()
+                if entry is not None:         # it IS playing: the start was just not noticed in time; treat it as started, never fail a song that is sounding
+                    self._log("the song was playing but its start was not noticed; treating it as started")
+                    self._started(entry, asked, float(s.get("position") or 0.0), float(s.get("duration") or 0.0))
+                    return
+            self._shadow_observe("watchdog")        # the Rust machine hears the stall too (Warn the operator): the first step to Rust owning stall detection
+            if self.service is not None and self.service.state == "sign_in":
+                self._fail("KaraFun's web player is not signed in: sign in to KaraFun in your browser (Settings > KaraFun)")
+            else:
+                self._fail("KaraFun's web player never started the song")
+        else:
+            QTimer.singleShot(1000, recheck)
 
     def _entry_current(self) -> Optional[dict]:
         asked = self.asked
@@ -315,6 +390,11 @@ class KaraFunWebHost:
         if asked is None:
             return
         entry = asked["entry"]
+        try:
+            import karafun_web_shadow
+            self._fx("fail", karafun_web_shadow.fail_kind(why[:120]))
+        except Exception:
+            pass
         self._log(f"giving up on the song: {why[:120]} | {self._last_status_summary()}")
         self._stop_frames()
         try:
@@ -338,6 +418,17 @@ class KaraFunWebHost:
         self.app._run_on_ui_thread(lambda: self._handle(message))
 
     def _handle(self, message: dict) -> None:
+        kind = message.get("type") if isinstance(message, dict) else None
+        if self._shadow is None or kind not in ("status", "error"):
+            return self._handle_impl(message)
+        if kind == "status":
+            context = self._tap("host_status", "status", message=message)
+        else:
+            context = self._tap("host_error", "page_error", message=str(message.get("message") or ""))
+        with context:
+            self._handle_impl(message)
+
+    def _handle_impl(self, message: dict) -> None:
         kind = message.get("type")
         if kind == "status":
             self.status = message
@@ -443,6 +534,7 @@ class KaraFunWebHost:
 
     def _started(self, entry: dict, asked: dict, position: float, duration: float) -> None:
         app = self.app
+        self._fx("started")
         asked["heard"] = True
         self._start_frames()                    # the song is really playing: now the picture goes over the windows
         now = time.monotonic()
@@ -486,6 +578,7 @@ class KaraFunWebHost:
         if getattr(app, "_active_external_karafun", None) is not active:
             self.asked = None
             return
+        self._fx("complete")
         self._log(f"song ended ({why})")
         self.asked = None
         self._diag(f"[KARAFUN] completion event received reason=web_{why.replace(' ', '_')} remaining=0 idle=1")
@@ -502,6 +595,10 @@ class KaraFunWebHost:
         return self.asked is not None and self.service is not None and self.service.web is not None and self._entry_current() is not None
 
     def toggle_pause(self) -> bool:
+        with self._tap("host_toggle", "toggle_pause", False):
+            return self._toggle_pause_impl()
+
+    def _toggle_pause_impl(self) -> bool:
         if not self.active() or not self.asked["heard"]:
             return False
         web = self.service.web
@@ -509,6 +606,14 @@ class KaraFunWebHost:
         return True
 
     def seek_to(self, target_sec: float) -> bool:
+        try:
+            target_json = float(target_sec)
+        except (TypeError, ValueError):
+            target_json = 0.0
+        with self._tap("host_seek", "seek", False, target=target_json):
+            return self._seek_to_impl(target_sec)
+
+    def _seek_to_impl(self, target_sec: float) -> bool:
         if not self.active() or not self.asked["heard"]:
             return False
         try:
@@ -533,6 +638,10 @@ class KaraFunWebHost:
         return True
 
     def apply_key_tempo(self, entry: dict, target_key: int, target_tempo: int):
+        with self._tap("host_key_tempo", "key_tempo", False, key=int(target_key), tempo=int(target_tempo)):
+            return self._apply_key_tempo_impl(entry, target_key, target_tempo)
+
+    def _apply_key_tempo_impl(self, entry: dict, target_key: int, target_tempo: int):
         """The app's live key/tempo sync (worker thread): the player's own queue entry takes both, exactly."""
         if self.service is not None and self.service.web is not None:
             self.service.web.set_key(int(target_key))
@@ -542,6 +651,13 @@ class KaraFunWebHost:
         return int(target_key), int(target_tempo)
 
     def on_finish(self) -> bool:
+        with self._tap("host_finish", "finish") as b:
+            result = self._on_finish_impl()
+            if b is not None:
+                self._fx("returns", bool(result))
+            return result
+
+    def _on_finish_impl(self) -> bool:
         """Any end of the KaraFun song (complete, stop, return to queue): the player stops and the picture leaves the audience screen.
 
         Returns True when a web-player song was open, so the app can bring its idle slideshow back. This must not depend on `asked`: a song that ends by itself

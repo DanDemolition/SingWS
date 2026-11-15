@@ -13,7 +13,7 @@ if [[ -n "$PYTHON" && ! -x "$PYTHON" ]]; then
     echo "Configured test interpreter is not executable: $PYTHON" >&2
     exit 1
 fi
-for candidate in "$ROOT/qtvenv" "$ROOT/.venv-test" "$ROOT/.venv-test-brew" "$ROOT/.venv-universal"; do
+for candidate in "$ROOT/qtvenv" "$ROOT/.venv-test" "$ROOT/.venv-test-brew" "$ROOT/.venv-universal" "$ROOT/.venv"; do
     [[ -z "$PYTHON" ]] || break
     if [[ -x "$candidate/bin/python" ]]; then
         PYTHON="$candidate/bin/python"
@@ -28,6 +28,15 @@ done
 if [[ -z "$PYTHON" ]]; then
     echo "Missing test environment: python3.14 -m venv .venv-test" >&2
     exit 1
+fi
+
+# pytest is not installed in the build venv (.venv) and must not be: it would change what the installers are built from. SINGWS_PYTEST_PATH (default
+# ~/.cache/singws-pytest, made with `python -m pip install --target ~/.cache/singws-pytest pytest`) is put on PYTHONPATH when the chosen interpreter has no pytest.
+if ! "$PYTHON" -c 'import pytest' >/dev/null 2>&1; then
+    PYTEST_PATH="${SINGWS_PYTEST_PATH:-$HOME/.cache/singws-pytest}"
+    if [[ -d "$PYTEST_PATH" ]]; then
+        export PYTHONPATH="$PYTEST_PATH${PYTHONPATH:+:$PYTHONPATH}"
+    fi
 fi
 
 # Only fall back to a framework shim when the chosen interpreter cannot start on

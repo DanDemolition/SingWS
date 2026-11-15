@@ -580,43 +580,48 @@ fn int(v: Option<&Value>) -> Option<i64> {
     v.and_then(|x| x.as_i64())
 }
 
+/// One host event (the replay format: `{"ev": ..., "t": monotonic seconds, "world": {...}, ...}`) -> the ordered effects as JSON. `Err(reason)` when not modelled.
+pub fn host_event(h: &mut Host, e: &Value) -> R<Vec<Value>> {
+    let now = e.get("t").and_then(|x| x.as_f64()).unwrap_or(0.0);
+    let wj = e.get("world").cloned().unwrap_or(json!({}));
+    let w = World {
+        service_present: wj.get("service_present").and_then(|x| x.as_bool()).unwrap_or(true),
+        service_state: wj.get("service_state").and_then(|x| x.as_str()).unwrap_or("idle").to_string(),
+        has_web: wj.get("has_web").and_then(|x| x.as_bool()).unwrap_or(true),
+        entry_current: wj.get("entry_current").and_then(|x| x.as_bool()).unwrap_or(true),
+        active_same: wj.get("active_same").and_then(|x| x.as_bool()).unwrap_or(true),
+        restart_error: wj.get("restart_error").and_then(|x| x.as_str()).map(|s| s.to_string()),
+    };
+    let kind = e.get("ev").and_then(|x| x.as_str()).unwrap_or("");
+    let null = Value::Null;
+    let ev = match kind {
+        "start" => Event::Start {
+            song_id: int(e.get("song_id")),
+            enabled: e.get("enabled").and_then(|x| x.as_bool()).unwrap_or(true),
+            key: int(e.get("key")),
+            tempo: e.get("tempo"),
+            title: e.get("title").and_then(|x| x.as_str()).unwrap_or(""),
+        },
+        "service" => Event::Service { state: e.get("state").and_then(|x| x.as_str()).unwrap_or(""), detail: e.get("detail").and_then(|x| x.as_str()).unwrap_or("") },
+        "status" => Event::Status(e.get("message").unwrap_or(&null)),
+        "page_error" => Event::PageError(e.get("message").unwrap_or(&null)),
+        "watchdog" => Event::Watchdog,
+        "toggle_pause" => Event::TogglePause,
+        "seek" => Event::SeekTo(e.get("target").and_then(|x| x.as_f64()).unwrap_or(0.0)),
+        "key_tempo" => Event::ApplyKeyTempo { key: int(e.get("key")).unwrap_or(0), tempo: int(e.get("tempo")).unwrap_or(100) },
+        "finish" => Event::OnFinish,
+        other => return Err(format!("unknown event {other}")),
+    };
+    h.step(ev, &w, now)
+}
+
 /// Replay request: `{"events": [{"ev": ..., "t": monotonic seconds, "world": {...}, ...}]}` -> `{"trace": [[action...] per event]}` or `{"declined": reason}`.
 pub fn handle(req: &Value) -> Value {
     let mut h = Host::new();
     let mut trace = Vec::new();
     let empty = vec![];
     for e in req.get("events").and_then(|x| x.as_array()).unwrap_or(&empty) {
-        let now = e.get("t").and_then(|x| x.as_f64()).unwrap_or(0.0);
-        let wj = e.get("world").cloned().unwrap_or(json!({}));
-        let w = World {
-            service_present: wj.get("service_present").and_then(|x| x.as_bool()).unwrap_or(true),
-            service_state: wj.get("service_state").and_then(|x| x.as_str()).unwrap_or("idle").to_string(),
-            has_web: wj.get("has_web").and_then(|x| x.as_bool()).unwrap_or(true),
-            entry_current: wj.get("entry_current").and_then(|x| x.as_bool()).unwrap_or(true),
-            active_same: wj.get("active_same").and_then(|x| x.as_bool()).unwrap_or(true),
-            restart_error: wj.get("restart_error").and_then(|x| x.as_str()).map(|s| s.to_string()),
-        };
-        let kind = e.get("ev").and_then(|x| x.as_str()).unwrap_or("");
-        let null = Value::Null;
-        let ev = match kind {
-            "start" => Event::Start {
-                song_id: int(e.get("song_id")),
-                enabled: e.get("enabled").and_then(|x| x.as_bool()).unwrap_or(true),
-                key: int(e.get("key")),
-                tempo: e.get("tempo"),
-                title: e.get("title").and_then(|x| x.as_str()).unwrap_or(""),
-            },
-            "service" => Event::Service { state: e.get("state").and_then(|x| x.as_str()).unwrap_or(""), detail: e.get("detail").and_then(|x| x.as_str()).unwrap_or("") },
-            "status" => Event::Status(e.get("message").unwrap_or(&null)),
-            "page_error" => Event::PageError(e.get("message").unwrap_or(&null)),
-            "watchdog" => Event::Watchdog,
-            "toggle_pause" => Event::TogglePause,
-            "seek" => Event::SeekTo(e.get("target").and_then(|x| x.as_f64()).unwrap_or(0.0)),
-            "key_tempo" => Event::ApplyKeyTempo { key: int(e.get("key")).unwrap_or(0), tempo: int(e.get("tempo")).unwrap_or(100) },
-            "finish" => Event::OnFinish,
-            other => return json!({"declined": format!("unknown event {other}")}),
-        };
-        match h.step(ev, &w, now) {
+        match host_event(&mut h, e) {
             Ok(a) => trace.push(Value::Array(a)),
             Err(r) => return json!({"declined": r}),
         }

@@ -37,6 +37,8 @@ KNOWN = (
     + [f"STORE-SHADOW:{k}" for k in ("queue.json",)]
     + [f"WIRE-SHADOW:{k}" for k in ("get", "form")]
     + ["TRANSPORT-SHADOW:session"]
+    # the KaraFun web player's Rust twin (setting karafun_web_engine, 2026-11-15): host_stall is the never-started / sign-in-hold watchdog, the stall detection Rust is to own
+    + [f"KFWEB-SHADOW:{k}" for k in ("svc_message", "host_start", "host_status", "host_stall", "host_finish")]
     # "watchdog" was RETIRED 2026-11-15 (operator): its only caller was the removed KaraFun Mac-app monitor, so no show can ever exercise it; stalled web-player songs are
     # handled by karafun_web_host's own never-started / recovery rules. The decision itself stays in the Rust machine.
     + [f"TRANSPORT-DRIVE:{k}" for k in ("karafun_end", "media_end")]

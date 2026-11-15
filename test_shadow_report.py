@@ -37,7 +37,8 @@ FULL = [
     L("TRANSPORT-SHADOW", "session 1 summary events=40 total_mismatches=0"),
     L("TRANSPORT-DRIVE", "decision=karafun_end python=1 rust=1 selected=1 owner=rust disagreement=0"),
     L("TRANSPORT-DRIVE", "decision=media_end python=1 rust=1 selected=1 owner=rust disagreement=0"),
-]
+    L("KFWEB-SHADOW", "enabled available=1 engine=shadow"),
+] + [L("KFWEB-SHADOW", f"decision kind={k} agree=1") for k in ("svc_message", "host_start", "host_status", "host_stall", "host_finish")]
 
 
 def run(lines, *argv):
@@ -394,6 +395,33 @@ class QuietShadows(unittest.TestCase):
         self.assertIn("OFF", v["NET-SLICE-SHADOW"])
         v = self.verdicts(("NET-SLICE-SHADOW", "enabled available=1"), ("NET-SLICE-SHADOW", "MISMATCH probe at $.result.ok: app=x rust=y"))
         self.assertIn("DISAGREED 1", v["NET-SLICE-SHADOW"])
+
+
+class KaraFunWebTwinRowTests(unittest.TestCase):
+    LINES = [L("KFWEB-SHADOW", "enabled available=1 engine=shadow")] + [L("KFWEB-SHADOW", f"decision kind={k} agree=1") for k in ("svc_message", "host_start", "host_status", "host_stall", "host_finish")]
+
+    def test_clean_when_every_required_decision_agreed(self):
+        self.assertEqual(verdicts([LAUNCH] + self.LINES)["KFWEB-SHADOW"], "CLEAN")
+
+    def test_partial_until_the_song_was_started_and_ended(self):
+        self.assertEqual(verdicts([LAUNCH] + self.LINES[:3])["KFWEB-SHADOW"], "PARTIAL")
+
+    def test_a_mismatch_is_a_disagreement_and_the_ledger_counts_no_decision_from_it(self):
+        lines = [LAUNCH] + self.LINES + [L("KFWEB-SHADOW", 'MISMATCH host_stall python=[["fail","never_started"]] rust=[]')]
+        self.assertEqual(verdicts(lines)["KFWEB-SHADOW"], "DISAGREED")
+
+    def test_python_mode_means_not_enabled_in_the_settings_and_a_silent_log_is_not_exercised_when_on(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "x.log"
+            path.write_text(LAUNCH + "\n", encoding="utf-8")
+            rows = list(sr.read_lines([str(path)], True))
+            self.assertEqual({r.name: r.verdict for r in sr.analyse(rows, {"karafun_web_engine": "python"})}["KFWEB-SHADOW"], "NOT ENABLED")
+            self.assertEqual({r.name: r.verdict for r in sr.analyse(rows, {"karafun_web_engine": "shadow"})}["KFWEB-SHADOW"], "NOT EXERCISED")
+            self.assertEqual({r.name: r.verdict for r in sr.analyse(rows, {})}["KFWEB-SHADOW"], "NOT EXERCISED")
+
+    def test_a_show_without_karafun_songs_is_not_held_against_require_all(self):
+        status, out = run([LAUNCH] + FULL[:-6], "--require-all")
+        self.assertEqual(status, 0, out)
 
 
 if __name__ == "__main__":

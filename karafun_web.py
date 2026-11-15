@@ -244,6 +244,7 @@ class KaraFunWeb:
         self.command("screencast", on=False)
 
 
+ENGINE_CRASH_TEXT = "RuntimeError: memory access out of bounds"   # a page log line with this text: KaraFun's engine crashed on the saved profile
 RELOAD_SETTLE_S = 8.0            # seconds after the post-login reload during which the old page's statuses are ignored
 SIGN_IN_AFTER_STATUSES = 60      # statuses come twice a second: with NO saved login, KaraFun's own sign-in page opens in the browser after 30 s
 LOGIN_AFTER_STATUSES = 16        # the saved login is used 8 s after the page starts (it was 30 s: a song queued early had to wait for it)
@@ -288,9 +289,22 @@ class KaraFunWebService:
         self._allow_download = False
         self._profile_reset_done = False
         self._relogin_tried = False
+        self._shadow = None                      # karafun_web_shadow.Tap: the Rust twin hears every event and its answers are compared (log only); set by the host
+
+    def _fx(self, *effect) -> None:
+        tap = self._shadow
+        if tap is not None:
+            tap.fx(*effect)
+
+    def _feed(self, event: dict) -> None:
+        tap = self._shadow
+        if tap is not None:
+            event["t"] = time.monotonic()
+            tap.feed(event)
 
     def _set(self, state: str, detail: str = "") -> None:
         self.state = state
+        self._fx("set", state)
         try:
             self.on_state(state, detail)
         except Exception as error:
@@ -299,6 +313,7 @@ class KaraFunWebService:
     def start(self, download: bool = False) -> None:
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
+                self._feed({"ev": "start", "alive": True})
                 return
             self._signed_out_seen = 0
             self._sign_in_opened = False
@@ -307,10 +322,12 @@ class KaraFunWebService:
             self._reload_after_login = False
             self._ready_told = False
             self._allow_download = bool(download)
+            self._feed({"ev": "start", "alive": False})
             self._thread = threading.Thread(target=self._run, name="karafun-web-setup", daemon=True)
             self._thread.start()
 
     def stop(self) -> None:
+        self._feed({"ev": "stop"})
         web, self.web = self.web, None
         if web is not None:
             web.close()
@@ -321,18 +338,22 @@ class KaraFunWebService:
 
     def _run(self) -> None:
         try:
+            self._feed({"ev": "run_begin"})
             self._set("preparing", "Looking for a browser")
             try:
                 browser = self._find_browser(self._progress, allow_download=self._allow_download)
             except BrowserMissing as missing:
                 self._set("needs_browser", str(missing))
                 return
+            self._feed({"ev": "browser_found"})
             self._set("starting", "Starting KaraFun's player")
             web = self._make_web(on_message=self._message, on_log=self.on_log, helper_path=browser)
             self.web = web
+            self._feed({"ev": "web_made"})
             web.start()
         except Exception as error:
             self.on_log(f"set-up failed: {error}")
+            self._feed({"ev": "setup_failed", "error": "x"})
             self._set("error", str(error))
 
     def _open_sign_in_page(self) -> None:
@@ -340,14 +361,19 @@ class KaraFunWebService:
             return
         self._sign_in_opened = True
         self._set("sign_in", "Sign in to KaraFun in your browser, then come back")
+        self._fx("sign_in")
         self.web.sign_in()
 
     def _read_saved_login(self):
         try:
-            return self._credentials() if self._credentials else None
+            found = self._credentials() if self._credentials else None
         except Exception as error:
             self.on_log(f"saved login unreadable: {type(error).__name__}")
-            return None
+            found = None
+        tap = self._shadow
+        if tap is not None:
+            tap.saved(bool(found))                # only WHETHER one was found: the Rust twin never sees the login
+        return found
 
     def _reset_profile_after_engine_crash(self) -> None:
         """KaraFun's playback engine (a WebAssembly worker) crashes with "memory access out of bounds" while it restores the session saved in the profile
@@ -356,6 +382,7 @@ class KaraFunWebService:
         if self._profile_reset_done:
             return
         self._profile_reset_done = True
+        self._fx("reset")
 
         def work():
             try:
@@ -373,8 +400,16 @@ class KaraFunWebService:
         threading.Thread(target=work, name="karafun-profile-reset", daemon=True).start()
 
     def _message(self, message: dict) -> None:
+        tap = self._shadow
+        kind = message.get("type") if isinstance(message, dict) else None
+        if tap is None or not (kind in ("status", "error") or (kind == "log" and ENGINE_CRASH_TEXT in str(message.get("message", "")))):
+            return self._message_impl(message)
+        with tap.event("svc_message", {"ev": "message", "t": time.monotonic(), "message": message}):
+            self._message_impl(message)
+
+    def _message_impl(self, message: dict) -> None:
         kind = message.get("type")
-        if kind == "log" and "RuntimeError: memory access out of bounds" in str(message.get("message", "")):
+        if kind == "log" and ENGINE_CRASH_TEXT in str(message.get("message", "")):
             self._reset_profile_after_engine_crash()
         if kind == "status":
             if message.get("signedIn") and self._login_tried and not self._reload_after_login and self.web is not None:
@@ -385,6 +420,7 @@ class KaraFunWebService:
                 self._ready_told = False
                 self.on_log("signed in with the saved login; reloading the player once")
                 self._set("starting", "Starting KaraFun's player")
+                self._fx("reload")
                 self.web.command("reload")
                 self._signed_out_seen = 0
             elif self._reload_after_login and time.monotonic() - self._reload_at < RELOAD_SETTLE_S:
@@ -407,6 +443,7 @@ class KaraFunWebService:
                     if saved:
                         self._login_tried = True
                         self.on_log("signing in with the saved KaraFun login")
+                        self._fx("login")
                         self.web.login(saved[0], saved[1])
                 elif self._signed_out_seen == SIGN_IN_AFTER_STATUSES and self.web is not None and not self._login_tried:
                     self._open_sign_in_page()       # no saved login (or the keychain could not be read): KaraFun's own sign-in, in the browser, once
@@ -416,6 +453,7 @@ class KaraFunWebService:
                     saved = self._read_saved_login()
                     if saved:
                         self.on_log("signed out again after the reload; signing in with the saved login once more")
+                        self._fx("login")
                         self.web.login(saved[0], saved[1])
                 elif self._signed_out_seen == BROWSER_FALLBACK_STATUSES and self.web is not None and self._login_tried:
                     self._open_sign_in_page()       # the saved login did not work (wrong or changed password): the browser way, once

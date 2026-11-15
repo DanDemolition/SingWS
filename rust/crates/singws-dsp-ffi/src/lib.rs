@@ -546,3 +546,33 @@ pub unsafe extern "C" fn singws_phrase_json(request: *const std::os::raw::c_char
         }
     }
 }
+
+/// The KaraFun web player's state machines as live sessions (`singws_karafun_svc::session`): one JSON request in, one JSON answer out. Shadow only for now: the app
+/// feeds it the events it saw and compares the actions it answers with what the Python did. Returns the answer's length, -1 for a bad request, -2 when `out` is too
+/// small, -3 when it panicked (the panic is caught: it never crosses into Python).
+///
+/// # Safety
+/// `request` must be a NUL-terminated string and `out` writable for `cap` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn singws_kfweb_json(request: *const std::os::raw::c_char, out: *mut u8, cap: usize) -> i64 {
+    if request.is_null() || out.is_null() {
+        return -1;
+    }
+    let r = catch_unwind(AssertUnwindSafe(|| {
+        let req = unsafe { std::ffi::CStr::from_ptr(request) }.to_str().map_err(|_| ())?;
+        let value: serde_json::Value = serde_json::from_str(req).map_err(|_| ())?;
+        Ok::<String, ()>(singws_karafun_svc::session::session(&value).to_string())
+    }));
+    match r {
+        Err(_) => -3,
+        Ok(Err(())) => -1,
+        Ok(Ok(json)) => {
+            let b = json.as_bytes();
+            if b.len() > cap {
+                return -2;
+            }
+            unsafe { std::ptr::copy_nonoverlapping(b.as_ptr(), out, b.len()) };
+            b.len() as i64
+        }
+    }
+}

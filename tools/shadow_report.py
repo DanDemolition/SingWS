@@ -20,6 +20,9 @@ Shadows and the log lines they write:
                     decision route=plan agree=1 (setting plan_shadow_live): the whole start plan, one line per song start, checked at once: who was picked, route, transport, artist/title
   STORE-SHADOW      decision store=<file> layout=... agree=1     (every store file the app writes; Rust must reproduce the bytes)
   WIRE-SHADOW       decision endpoint=<file> kind=get|form|json agree=1   (what requests sent vs what the Rust request builder would send)
+  KFWEB-SHADOW      decision kind=svc_message|host_start|host_service|host_status|host_error|host_stall|host_finish agree=1   (the KaraFun web player's sign-in service and song
+                    lifecycle, Rust twin vs Python, setting karafun_web_engine: shadow by default, "python" = off; one line per compared decision that did something,
+                    and the first "still waiting" watchdog check of each song as host_stall outcome=waiting)
   TRANSPORT-SHADOW  session N summary ... total_mismatches=M    (KaraFun and native song lifecycle)
   TRANSPORT-DRIVE   decision=karafun_end|media_end|watchdog ... disagreement=0|1   (Rust-vs-Python drive decisions)
   START-DRIVE       decision=<pick|route|engine|transport_*|zip_args|confirmed|display|rotation|plan|performance_*> ... disagreement=0|1   (setting start_drive, default
@@ -60,11 +63,14 @@ SHADOWS = {
     # one decision line per store file per launch; queue.json changes whenever a request is added, the others only when their data changes
     # kinds of request seen (first agreement per endpoint and kind); needs at least one GET poll and one form POST
     "WIRE-SHADOW": ({"get", "form"}, {"json", "post_empty"}),
+    # the KaraFun web player's Rust twin: CLEAN needs one show with KaraFun songs (sign-in decisions, a song held/played/started/ended, the watchdog checked)
+    "KFWEB-SHADOW": ({"svc_message", "host_start", "host_status", "host_stall", "host_finish"}, {"host_service", "host_error"}),
     "STORE-SHADOW": ({"queue.json"}, {"settings.json", "singer_history.json", "singer_preferences.json", "remote_request_tombstones.json",
                                        "bg_playlist.json", "tracks.json"}),
 }
 # the settings.json key that switches each shadow on (transport_shadow defaults to ON; the others default to off)
 SETTING_KEYS = {
+    "KFWEB-SHADOW": ("karafun_web_engine", True),   # a string: "shadow" (default) or "rust" = on, "python" = off
     "SETTINGS-SHADOW": ("settings_shadow", False), "QUEUE-SHADOW": ("queue_shadow", False), "PLAN-SHADOW": ("plan_shadow", False), "START-SHADOW": ("start_shadow", False),
     "STORE-SHADOW": ("store_shadow", False), "WIRE-SHADOW": ("wire_shadow", False),
     "TRANSPORT-SHADOW": ("transport_shadow", True), "TRANSPORT-DRIVE": ("transport_drive", True),
@@ -98,6 +104,13 @@ _HINTS = {
     "karafun_end": "finish a KaraFun song (automatic end)",
     "media_end": "let a native CDG or MP4 song finish by itself",
     "watchdog": "rare: a KaraFun song whose end cannot be verified until its estimated duration passes",
+    "svc_message": "play a KaraFun song (the player signs in: set ready / saved login / reload)",
+    "host_start": "play a KaraFun song",
+    "host_status": "let a KaraFun song start and end (the player's status stream)",
+    "host_stall": "play a KaraFun song (the never-started watchdog checks it every second until it starts)",
+    "host_finish": "let a KaraFun song end or press Stop on it",
+    "host_service": "rare: a KaraFun song asked for before the player is ready (it is held, then played when the player signs in)",
+    "host_error": "rare: the player reports an error for a song",
 }
 
 
@@ -143,6 +156,8 @@ def analyse(rows, settings=None):
         for r in reports:
             key, default = SETTING_KEYS[r.name]
             on = bool(settings.get(key, default))
+            if r.name == "KFWEB-SHADOW":
+                on = str(settings.get(key, "shadow") or "shadow").strip().lower() != "python"
             if r.name == "SHELL-COMMANDS":
                 configured = str(settings.get(key, "off") or "off").strip().lower()
                 on = configured in ("dry_run", "apply")
@@ -168,7 +183,7 @@ def _analyse(rows):
 
     for name, (required, optional) in SHADOWS.items():
         r = Report(name)
-        key = {"SETTINGS-SHADOW": "check", "QUEUE-SHADOW": "branch", "PLAN-SHADOW": "op", "START-SHADOW": "route", "STORE-SHADOW": "store", "WIRE-SHADOW": "kind"}[name]
+        key = {"SETTINGS-SHADOW": "check", "QUEUE-SHADOW": "branch", "PLAN-SHADOW": "op", "START-SHADOW": "route", "STORE-SHADOW": "store", "WIRE-SHADOW": "kind", "KFWEB-SHADOW": "kind"}[name]
         for t, msg in by_tag.get(name, []):
             kv = _kv(msg)
             if msg.startswith("enabled"):
@@ -329,7 +344,7 @@ def render(reports):
 
 
 # rows that only count when their switch is on: remote shell commands are a feature, not one of the Rust shadows every show must exercise
-OPTIONAL_ROWS = {"SHELL-COMMANDS", "START-DRIVE"}
+OPTIONAL_ROWS = {"SHELL-COMMANDS", "START-DRIVE", "KFWEB-SHADOW"}   # KFWEB-SHADOW needs KaraFun songs in the show: a show without any is not held against --require-all
 
 
 def counted(reports):
