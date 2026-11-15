@@ -183,6 +183,19 @@ class HostTests(unittest.TestCase):
         host._handle(status())                       # the song is heard to start: nothing starts the frames a second time
         self.assertEqual(order.count("frames"), 2)   # frames flow at play, the picture is placed again at started
 
+    def test_the_ticker_is_stacked_over_the_picture_window_not_over_the_window_under_it(self):
+        """The ticker used to order itself directly over the audience window, as the picture does, so the two swapped places at every re-order (flicker behind the ticker, 2026-11-14)."""
+        app, service, host = self._picture_host()
+        self.assertEqual(host.stack_base(7), 7)                                  # no picture yet: over the window itself
+        host._handle({"type": "helper", "state": "window", "id": "audience", "number": 900})
+        self.assertEqual(host.stack_base(7), 7)                                  # the picture's place is not known yet
+        host._place_picture(force=True)
+        target = host._picture_targets["audience"]
+        self.assertEqual(host.stack_base(target), 900)                           # over the picture while it covers the audience window
+        self.assertEqual(host.stack_base(12345), 12345)                          # other windows are left alone
+        host._stop_frames()
+        self.assertEqual(host.stack_base(target), target)                        # picture gone: back over the window itself
+
     def test_no_frames_from_the_graphics_chip_is_logged_and_shown_to_the_operator_but_never_switches_to_software(self):
         app, service, host = self._picture_host()
         notes = []
@@ -329,6 +342,34 @@ class HostTests(unittest.TestCase):
                 host._arm_watchdog()
         self.assertEqual(app.statuses[-1][0], "failed")
         self.assertIn("Press Stop in SingWS to return the song to the queue.", app.notes[-1][1])
+
+    def test_a_song_asked_for_while_the_player_signs_in_is_held_then_played_not_failed(self):
+        """The Intel show Mac took about 2 minutes after launch to sign in; a song queued at 1 minute was failed (2026-11-14). It now waits for the player."""
+        app, entry, service, host = make(state="sign_in")
+        host._arm_watchdog = KaraFunWebHost._arm_watchdog.__get__(host)
+        from PyQt6.QtCore import QTimer
+
+        def check_at(now):
+            pending = []
+            with mock.patch.object(QTimer, "singleShot", side_effect=lambda ms, fn: pending.append(fn)):
+                host._arm_watchdog()                         # arms the first check
+                with mock.patch.object(host_module.time, "monotonic", return_value=now):
+                    pending[0]()                             # runs it once at `now` (a re-arm only queues, never recurses)
+        with mock.patch.object(host_module.time, "monotonic", return_value=1000.0):
+            host.start(entry, 0, 100)
+        self.assertEqual(app.statuses[-1], ("launching", "Waiting for KaraFun to sign in..."))
+        for now in (1000.0 + 61, 1000.0 + 150):              # past the old 60 s limit: still held
+            check_at(now)
+            self.assertNotIn("failed", [s[0] for s in app.statuses])
+        self.assertFalse(host.asked["sent"])
+        service.state = "ready"
+        with mock.patch.object(host_module.time, "monotonic", return_value=1000.0 + 160):
+            host._service_state("ready", "Signed in")        # the player is up: now the song is played
+        self.assertTrue(host.asked["sent"])
+        check_at(1000.0 + 160 + 30)                          # then it has the normal 60 s, counted from when play was sent
+        self.assertNotIn("failed", [s[0] for s in app.statuses])
+        check_at(1000.0 + 160 + 61)
+        self.assertEqual(app.statuses[-1][0], "failed")
 
     def test_the_page_failing_to_play_fails_the_song(self):
         app, entry, service, host = make()
@@ -501,6 +542,7 @@ class HostTests(unittest.TestCase):
         host.start(entry, 0, 100)
         host.status = {"playing": True, "moving": False, "state": 3, "position": 8.0, "duration": 130.0, "song": {"id": 3241559}}
         host.asked["at"] = 0.0                                                   # long overdue
+        host.asked["sent_at"] = 0.0
         from PyQt6.QtCore import QTimer
         with mock.patch.object(QTimer, "singleShot", side_effect=lambda ms, fn: fn()):
             host._arm_watchdog()
@@ -515,6 +557,7 @@ class HostTests(unittest.TestCase):
         host.start(entry, 0, 100)
         host.status = {"playing": False, "moving": False, "state": 0, "position": 0, "duration": 0, "song": None}
         host.asked["at"] = 0.0
+        host.asked["sent_at"] = 0.0
         from PyQt6.QtCore import QTimer
         with mock.patch.object(QTimer, "singleShot", side_effect=lambda ms, fn: fn()):
             host._arm_watchdog()

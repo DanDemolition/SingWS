@@ -232,12 +232,35 @@ class ServiceTests(unittest.TestCase):
         self.signed_out(service, 60)
         self.assertEqual(holder["web"].logins, [("a@b.c", "pw")])
         self.assertEqual(holder["web"].signed_in_called, 0)
-        self.signed_out(service, 59)
+        self.signed_out(service, 419)                             # 479 statuses (4 min) signed out: the browser page is still not opened
         self.assertEqual(holder["web"].signed_in_called, 0)
         self.signed_out(service, 1)
         self.assertEqual(holder["web"].signed_in_called, 1)
         self.signed_out(service, 100)
         self.assertEqual(len(holder["web"].logins), 1)            # tried once only: no hammering KaraFun's login
+
+    def test_the_saved_login_is_used_after_8_seconds_not_30(self):
+        service, states, holder = self.make(credentials=lambda: ("a@b.c", "pw"))
+        self.go(service)
+        self.signed_out(service, 15)
+        self.assertEqual(getattr(holder["web"], "logins", []), [])
+        self.signed_out(service, 1)
+        self.assertEqual(holder["web"].logins, [("a@b.c", "pw")])
+
+    def test_signed_out_again_after_the_reload_uses_the_saved_login_once_more_and_not_the_browser_page(self):
+        service, states, holder = self.make(credentials=lambda: ("a@b.c", "pw"))
+        self.go(service)
+        self.signed_out(service, 16)
+        service._message({"type": "status", "signedIn": True, "plan": "Pro"})      # the login worked: the player reloads
+        self.assertEqual(holder["web"].commands, ["reload"])
+        with mock.patch.object(karafun_web.time, "monotonic", return_value=karafun_web.time.monotonic() + 20):
+            self.signed_out(service, 39)
+            self.assertEqual(len(holder["web"].logins), 1)
+            self.signed_out(service, 1)                                             # 20 s after the reload and still signed out
+            self.assertEqual(len(holder["web"].logins), 2)
+            self.signed_out(service, 300)
+            self.assertEqual(len(holder["web"].logins), 2)                          # once more only
+        self.assertEqual(holder["web"].signed_in_called, 0)                         # and the browser page stays shut (it opened by mistake at 1 minute on the Intel Mac)
 
     def test_a_saved_login_that_works_reloads_the_player_once_then_is_ready(self):
         service, states, holder = self.make(credentials=lambda: ("a@b.c", "pw"))

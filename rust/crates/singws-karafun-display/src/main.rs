@@ -118,12 +118,14 @@ fn window_command(line: &Value) {
     let rect = cocoa_rect(mtm, get("x", 0.0), get("y", 0.0), get("w", 1280.0).max(1.0), get("h", 720.0).max(1.0));
     WINDOWS.with(|w| {
         let mut slot = w.borrow_mut();
-        let (window, _) = slot.entry(id).or_insert_with(|| make_window(mtm, rect));
+        let (window, _) = slot.entry(id.clone()).or_insert_with(|| make_window(mtm, rect));
         window.setFrame_display(rect, true);
         window.setLevel(get("level", 0.0) as isize);
         // `above`: the number of a window to sit directly over (SingWS's audience window), so the ticker and QR windows that are higher stay over the picture.
         let above = get("above", 0.0) as isize;
         if above > 0 { window.orderWindow_relativeTo(NSWindowOrderingMode::Above, above); } else { window.orderFront(None); }
+        // SingWS orders its ticker and overlay windows directly over THIS window (not over the audience window under it), so they never swap places with the picture.
+        say(json!({"type": "helper", "state": "window", "id": id, "number": window.windowNumber()}));
     });
 }
 

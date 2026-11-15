@@ -22,7 +22,8 @@ import threading
 import time
 from typing import Optional
 
-NEVER_STARTED_AFTER_S = 60.0
+NEVER_STARTED_AFTER_S = 60.0       # from the moment play is sent to the page
+SIGN_IN_HOLD_S = 240.0             # a song asked for while the player is still starting / signing in waits this long for it (about 2 min on the Intel show Mac)
 RECOVER_START_WITHIN_S = 150.0     # a restarted player may need to sign itself in again before it plays
 MAX_RECOVERIES = 3
 SAT_AT_END_S = 2.5
@@ -56,6 +57,8 @@ class KaraFunWebHost:
         self.status: dict = {}
         self._picture_timer = None
         self._picture_placed = None
+        self._picture_numbers = {}       # picture window id -> its NSWindow number (the display program says it when a window is placed)
+        self._picture_targets = {}       # picture window id -> number of the SingWS window it sits over
         self._preview_placed = None
         self._frames_shown = False
         self._sat_at_end_since: Optional[float] = None
@@ -233,7 +236,9 @@ class KaraFunWebHost:
             self._send_play()
         elif state == "error":
             self._fail(self.state[1] or "KaraFun's web player could not start")
-        # preparing / starting / sign_in (logging itself in): played as soon as it is ready (_state_changed), or failed after 30 s (_follow's watchdog timer)
+        else:
+            app._set_karafun_entry_status(entry, "launching", message="Waiting for KaraFun to sign in...")
+        # preparing / starting / sign_in (logging itself in): HELD until the player is ready (_state_changed plays it), up to SIGN_IN_HOLD_S (_arm_watchdog)
         self._arm_watchdog()
         return True
 
@@ -256,7 +261,13 @@ class KaraFunWebHost:
 
         def _check():
             if self.asked is asked and not asked["heard"]:
-                if time.monotonic() - asked["at"] >= asked.get("limit", NEVER_STARTED_AFTER_S):
+                limit = asked.get("limit", NEVER_STARTED_AFTER_S)
+                if asked.get("sent") and asked.get("sent_at") is not None:
+                    waited = time.monotonic() - asked["sent_at"]        # play was sent: the song has this long to start
+                else:
+                    waited = time.monotonic() - asked["at"]
+                    limit = max(limit, SIGN_IN_HOLD_S)                  # not sent yet: the player is still coming up; the song is held, not failed
+                if waited >= limit:
                     s = self.status or {}
                     if (s.get("song") or {}).get("id") == asked["id"] and (s.get("playing") or s.get("moving")):
                         entry = self._entry_current()
@@ -340,6 +351,12 @@ class KaraFunWebHost:
                 self._fail(text)
         elif kind in ("log", "ready"):
             self._log(f"page: {message.get('message') or kind}")
+        elif kind == "helper" and message.get("state") == "window":
+            try:
+                self._picture_numbers[str(message.get("id"))] = int(message.get("number"))
+            except (TypeError, ValueError):
+                pass
+            self._restack_overlays()        # the ticker and bars go over the picture now, not over the window under it
         elif kind == "helper" and message.get("state") == "no_frames":
             # The picture window was shown but the graphics chip delivered no frame in 8 s: the picture is black and KaraFun's player does not start without
             # frames. Say so (log + notification); the fix is not a CPU fallback but finding why this Mac's chip gives none (tools/karafun_gpu_test.sh).
@@ -568,6 +585,7 @@ class KaraFunWebHost:
             if placed is None:
                 if self._preview_placed is not None or force:
                     self._preview_placed = None
+                    self._picture_targets.pop("preview", None)
                     self.service.web.window(False, id="preview")
                 return
             if not force and placed == self._preview_placed:
@@ -575,6 +593,7 @@ class KaraFunWebHost:
                 return
             (x, y, w, h), above = placed
             self._preview_placed = placed
+            self._picture_targets["preview"] = above
             self.service.web.window(True, x, y, w, h, 0, above, id="preview")
         except Exception as error:
             self._log(f"could not place the preview picture: {error!r}")
@@ -588,6 +607,7 @@ class KaraFunWebHost:
             if placed is None:
                 if self._picture_placed is not None or force:
                     self._picture_placed = None
+                    self._picture_targets.pop("audience", None)
                     self.service.web.window(False)      # the audience window is hidden or minimised: no loose picture over other windows
                 return
             if not force and placed == self._picture_placed:
@@ -595,6 +615,7 @@ class KaraFunWebHost:
                 return
             (x, y, w, h), above = placed
             self._picture_placed = placed
+            self._picture_targets["audience"] = above
             self.service.web.window(True, x, y, w, h, 0, above)
         except Exception as error:
             self._log(f"could not place the picture: {error!r}")
@@ -646,7 +667,31 @@ class KaraFunWebHost:
                 pass
         self._picture_timer.start()
 
+    def _restack_overlays(self) -> None:
+        for name in ("video_window", "preview_window"):
+            try:
+                raise_surface = getattr(getattr(self.app, name, None), "_raise_ticker_surface", None)
+                if callable(raise_surface):
+                    raise_surface()
+            except Exception:
+                pass
+
+    def stack_base(self, window_number: int) -> int:
+        """The window a SingWS window (the ticker, a bar over the preview) should order itself directly above: the KaraFun picture window sitting over
+        `window_number` while one is shown, else `window_number` itself. Ordering over the picture, not over the window under it, keeps the picture
+        from swapping places with them every time either re-orders (the picture flickered behind the ticker, 2026-11-14)."""
+        try:
+            for pid, target in list(self._picture_targets.items()):
+                number = self._picture_numbers.get(pid)
+                if number and target == window_number:
+                    return number
+        except Exception:
+            pass
+        return window_number
+
     def _stop_frames(self) -> None:
+        self._picture_targets.clear()
+        self._restack_overlays()
         self._frames_flowing = False
         timer = self._picture_timer
         if timer is not None:

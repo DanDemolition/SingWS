@@ -245,7 +245,11 @@ class KaraFunWeb:
 
 
 RELOAD_SETTLE_S = 8.0            # seconds after the post-login reload during which the old page's statuses are ignored
-SIGN_IN_AFTER_STATUSES = 60      # statuses come twice a second
+SIGN_IN_AFTER_STATUSES = 60      # statuses come twice a second: with NO saved login, KaraFun's own sign-in page opens in the browser after 30 s
+LOGIN_AFTER_STATUSES = 16        # the saved login is used 8 s after the page starts (it was 30 s: a song queued early had to wait for it)
+RELOGIN_AFTER_STATUSES = 40      # signed out again 20 s after the post-login reload: the saved login is used once more (the reload can lose the session)
+BROWSER_FALLBACK_STATUSES = 480  # the browser sign-in page only opens after 4 minutes of a saved login that did not work (it opened by mistake at 1 minute
+                                 # on the Intel show Mac, 2026-11-14, while the page was still signing itself in)
 
 
 class KaraFunWebService:
@@ -283,6 +287,7 @@ class KaraFunWebService:
         self._ready_told = False
         self._allow_download = False
         self._profile_reset_done = False
+        self._relogin_tried = False
 
     def _set(self, state: str, detail: str = "") -> None:
         self.state = state
@@ -298,6 +303,7 @@ class KaraFunWebService:
             self._signed_out_seen = 0
             self._sign_in_opened = False
             self._login_tried = False
+            self._relogin_tried = False
             self._reload_after_login = False
             self._ready_told = False
             self._allow_download = bool(download)
@@ -335,6 +341,13 @@ class KaraFunWebService:
         self._sign_in_opened = True
         self._set("sign_in", "Sign in to KaraFun in your browser, then come back")
         self.web.sign_in()
+
+    def _read_saved_login(self):
+        try:
+            return self._credentials() if self._credentials else None
+        except Exception as error:
+            self.on_log(f"saved login unreadable: {type(error).__name__}")
+            return None
 
     def _reset_profile_after_engine_crash(self) -> None:
         """KaraFun's playback engine (a WebAssembly worker) crashes with "memory access out of bounds" while it restores the session saved in the profile
@@ -387,22 +400,25 @@ class KaraFunWebService:
                 if self._signed_out_seen == 4 and self.web is not None:
                     self._ready_told = False
                     self._set("sign_in", "Signing in to KaraFun")
-                # The profile signs itself in about 20 s after the page starts, so nothing is done about it for 30 s (twice a second).
-                if self._signed_out_seen == SIGN_IN_AFTER_STATUSES and self.web is not None and not self._login_tried:
-                    self._login_tried = True
-                    saved = None
-                    try:
-                        saved = self._credentials() if self._credentials else None
-                    except Exception as error:
-                        self.on_log(f"saved login unreadable: {type(error).__name__}")
+                # The saved login is used early (8 s); the profile may also sign itself in (about 20 s), which does no harm. The browser page is only for NO saved
+                # login (after 30 s) or a saved login that really did not work (4 minutes).
+                if self._signed_out_seen == LOGIN_AFTER_STATUSES and self.web is not None and not self._login_tried:
+                    saved = self._read_saved_login()
                     if saved:
+                        self._login_tried = True
                         self.on_log("signing in with the saved KaraFun login")
                         self.web.login(saved[0], saved[1])
-                    else:
-                        self._open_sign_in_page()
-                # The saved login did not work (wrong or changed password; it can take up to ~40 s): the browser way, once.
-                elif self._signed_out_seen == SIGN_IN_AFTER_STATUSES + 60 and self.web is not None:
-                    self._open_sign_in_page()
+                elif self._signed_out_seen == SIGN_IN_AFTER_STATUSES and self.web is not None and not self._login_tried:
+                    self._open_sign_in_page()       # no saved login (or the keychain could not be read): KaraFun's own sign-in, in the browser, once
+                elif (self._signed_out_seen == RELOGIN_AFTER_STATUSES and self.web is not None and self._login_tried and self._reload_after_login
+                      and not self._relogin_tried):
+                    self._relogin_tried = True
+                    saved = self._read_saved_login()
+                    if saved:
+                        self.on_log("signed out again after the reload; signing in with the saved login once more")
+                        self.web.login(saved[0], saved[1])
+                elif self._signed_out_seen == BROWSER_FALLBACK_STATUSES and self.web is not None and self._login_tried:
+                    self._open_sign_in_page()       # the saved login did not work (wrong or changed password): the browser way, once
         elif kind == "error" and message.get("message") == "KaraFun's web player stopped":
             self._set("error", "KaraFun's player stopped")
         elif kind == "error" and message.get("message") == "Chrome stopped" and self.web is not None and self.state not in ("idle", "error"):

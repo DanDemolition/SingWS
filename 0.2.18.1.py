@@ -22,7 +22,7 @@ from pathlib import Path
 sys.setswitchinterval(0.001)
 
 _GST_RUNTIME_DEBUG = {}
-APP_VERSION = "1.0.3.7"
+APP_VERSION = "1.0.3.8"
 PROCESS_STARTUP_UTC = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
 PROCESS_SESSION_UUID = str(uuid.uuid4())
 PROCESSING_NOTIFICATION_TIMEOUT_MS = 15000
@@ -16462,7 +16462,10 @@ class PreviewWindow(QWidget):
             ov_w.setLevel_(host_w.level())
             ov_w.setHidesOnDeactivate_(False)
             ov_w.setOpaque_(False)
-            ov_w.orderWindow_relativeTo_(NSWindowAbove, host_w.windowNumber())
+            base = host_w.windowNumber()
+            if hasattr(host, "_karafun_stack_base"):
+                base = host._karafun_stack_base(base)    # over the KaraFun picture when one covers the host window
+            ov_w.orderWindow_relativeTo_(NSWindowAbove, base)
         except Exception as exc:
             _diag(f"[PREVIEW-OVERLAY] ordering failed: {exc}")
 
@@ -57142,6 +57145,14 @@ class KaraokeApp(QWidget):
             self._karafun_web = host
         return host
 
+    def _karafun_stack_base(self, window_number: int) -> int:
+        """What a window ordered "directly over" `window_number` should really sit over while a KaraFun picture covers that window (see KaraFunWebHost.stack_base)."""
+        host = getattr(self, "_karafun_web", None)
+        try:
+            return int(host.stack_base(window_number)) if host is not None else window_number
+        except Exception:
+            return window_number
+
     def _karafun_web_active(self) -> bool:
         """A KaraFun song is playing through the web player (the controls then go to it, not to the KaraFun app)."""
         host = getattr(self, "_karafun_web", None)
@@ -64050,7 +64061,11 @@ class DetachedPainterTicker(QFrame):
         # WA_MacAlwaysShowToolWindow is no use here: it also drops the window to level 0.
         ticker_window.setHidesOnDeactivate_(False)
         ticker_window.setIgnoresMouseEvents_(True)
-        ticker_window.orderWindow_relativeTo_(NSWindowAbove, host_window.windowNumber())
+        base = host_window.windowNumber()
+        owner = self._settings_owner()
+        if owner is not None and hasattr(owner, "_karafun_stack_base"):
+            base = owner._karafun_stack_base(base)       # over the KaraFun picture when one covers the audience window, so they do not swap places
+        ticker_window.orderWindow_relativeTo_(NSWindowAbove, base)
 
     def sync_surface_geometry(self):
         try:
