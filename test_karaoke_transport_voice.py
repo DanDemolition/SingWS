@@ -305,3 +305,47 @@ class ResyncLogTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class ConvertedCopyTests(unittest.TestCase):
+    """2026-11-16: a song the Rust decoder cannot open plays from a converted WAV copy in the Rust engine instead of falling back to mpv's own audio."""
+
+    class PickyVoice(FakeVoice):
+        def load(self, path, norm_gain=1.0, paused=True, volume=1.0):
+            if path.endswith(".mp3"):
+                raise RuntimeError("unsupported: aac too complex")
+            super().load(path, norm_gain, paused, volume)
+
+    def run_load(self, voice, convert):
+        from unittest import mock
+        import voice_audio_fallback
+        t, plugin = make(voice)
+        with mock.patch.object(voice_audio_fallback, "convert", convert):
+            return t, t._voice_load(0.0)
+
+    def test_the_converted_copy_is_played_by_the_rust_engine(self):
+        v = self.PickyVoice()
+        t, ok = self.run_load(v, lambda path, log=print: "/tmp/copy.wav")
+        self.assertTrue(ok)
+        self.assertTrue(t.voice_active())                                   # still the Rust voice, not mpv's audio
+        self.assertEqual([c for c in v.calls if c[0] == "load"][0][1], "/tmp/copy.wav")
+
+    def test_a_failed_conversion_gives_the_song_back_to_mpv_as_before(self):
+        v = self.PickyVoice()
+        t, ok = self.run_load(v, lambda path, log=print: None)
+        self.assertFalse(ok)
+        self.assertFalse(t.voice_active())
+
+    def test_a_file_the_engine_can_open_is_never_converted(self):
+        from unittest import mock
+        v = FakeVoice()
+        called = []
+        t, ok = self.run_load(v, lambda path, log=print: called.append(path))
+        self.assertTrue(ok)
+        self.assertEqual(called, [])
+
+    def test_a_copy_the_engine_cannot_open_either_falls_back_to_mpv(self):
+        v = FakeVoice(load_error="no decoder")
+        t, ok = self.run_load(v, lambda path, log=print: "/tmp/copy.wav")
+        self.assertFalse(ok)
+        self.assertFalse(t.voice_active())
+

@@ -147,16 +147,31 @@ class MpvKaraokeTransport(QObject):
     def _voice_load(self, start_seconds: float) -> bool:
         voice = self._voice
         path = self.audio_path or self.video_path
-        try:
-            voice.load(path, norm_gain=self._voice_norm, paused=True, volume=self._volume)
+
+        def open_it(source):
+            voice.load(source, norm_gain=self._voice_norm, paused=True, volume=self._volume)
             voice.set_key_semitones(self._pitch_semitones)
             voice.set_tempo_percent(self._tempo_ratio * 100.0)
             if float(start_seconds or 0.0) > 0.0:
                 voice.seek_seconds(float(start_seconds))
+        try:
+            open_it(path)
             return True
         except Exception as exc:
-            self._drop_voice(f"could not open {path!r}: {exc}")
-            return False
+            failure = exc
+        # The Rust decoder could not open it (an AAC variant it does not support): macOS decodes it into a WAV copy, which the Rust engine plays, instead of
+        # handing the song to mpv's own audio (the path that skipped on the Intel Mac, 2026-11-16).
+        try:
+            import voice_audio_fallback
+            copy = voice_audio_fallback.convert(path, self._voice_log)
+            if copy:
+                open_it(copy)
+                self._voice_log("[KARAOKE-RUST] the Rust engine plays the converted copy of this song's sound")
+                return True
+        except Exception as exc:
+            failure = exc
+        self._drop_voice(f"could not open {path!r}: {failure}")
+        return False
 
     def start(self, start_seconds: float = 0.0):
         source = self.video_path if self.mode in {"cdg", "mp4"} else self.audio_path
