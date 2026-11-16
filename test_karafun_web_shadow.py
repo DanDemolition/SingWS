@@ -95,6 +95,18 @@ class FakeLibrary(unittest.TestCase):
             b.always = True
         self.assertEqual([x for x in self.lines if "decision" in x], ["[KFWEB-SHADOW] decision kind=host_stall agree=1 outcome=waiting"])
 
+    def test_an_event_inside_another_is_sent_to_rust_after_it_and_compared_on_its_own(self):
+        tap, calls = self.tap_with([{"actions": [["finish_complete"]]}, {"actions": []}])
+        tap.project = shadow.project_host
+        tap.machine = "host"
+        with tap.event("host_status", {"ev": "status", "t": 1.0}):
+            tap.fx("complete")
+            with tap.event("host_finish", {"ev": "finish", "t": 1.0}):
+                pass
+        self.assertEqual([c["event"]["ev"] for c in calls if c["op"] == "host_step"], ["status", "finish"])
+        self.assertEqual([x for x in self.lines if "decision" in x], ["[KFWEB-SHADOW] decision kind=host_status agree=1"])
+        self.assertFalse([x for x in self.lines if "MISMATCH" in x])
+
     def test_a_python_exception_still_reaches_the_caller_and_is_not_compared(self):
         tap, _ = self.tap_with([{"actions": [["login"]]}])
         with self.assertRaises(ValueError):
@@ -220,6 +232,8 @@ class RealHostTwin(unittest.TestCase):
         host._shadow = shadow.host_tap()
         service._shadow = shadow.service_tap(True)
         self.assertIsNotNone(host._shadow)
+        self.addCleanup(host._shadow.close)             # the Rust side keeps at most 16 live sessions
+        self.addCleanup(service._shadow.close)
         return app, entry, service, host
 
     def agreed(self, *kinds):
@@ -246,6 +260,29 @@ class RealHostTwin(unittest.TestCase):
                 host._handle(self.fx.status(playing=False, song=None))   # gone: the song is over
                 host.on_finish()
         self.agreed("host_start", "host_stall", "host_status", "host_finish")
+        self.assertEqual(app.finished[0][0], "complete")
+
+    def test_the_finish_that_runs_inside_the_ending_status_agrees_with_rust(self):
+        """The real app finishes the song INSIDE the status event that ended it (2026-11-15 show: six songs, six false MISMATCH host_status python=[complete] rust=[])."""
+        app, entry, service, host = self.make("ready")
+        fired = []
+        from PyQt6.QtCore import QTimer
+        original = app._finish_external_karafun_playback
+
+        def finish_and_report(*a, **k):
+            result = original(*a, **k)
+            host.on_finish()
+            return result
+        app._finish_external_karafun_playback = finish_and_report
+        with mock.patch.object(QTimer, "singleShot", side_effect=lambda ms, fn: fired.append(fn)):
+            self.assertTrue(host.start(entry, 0, 100))
+            host.asked["active"] = app._active_external_karafun
+            clock = [5000.0]
+            with mock.patch.object(self.fx.host_module.time, "monotonic", side_effect=lambda: clock[0]):
+                host._handle(self.fx.status(position=2.0))
+                clock[0] += 120
+                host._handle(self.fx.status(playing=False, song=None))
+        self.agreed("host_start", "host_status", "host_finish")
         self.assertEqual(app.finished[0][0], "complete")
 
     def test_a_song_asked_for_while_the_player_signs_in_is_held_then_played_and_rust_agrees(self):

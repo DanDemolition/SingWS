@@ -150,6 +150,7 @@ class _Bracket:
         self.effects: list = []
         self.saved = None            # the saved-login read's answer, when the Python read it during this event
         self.always = False          # log the decision even when neither side did anything (the first "still waiting" check of a song)
+        self.inner: list = []        # events that began and ended INSIDE this one (a song's finish runs inside the status that ended it): sent to Rust after this one
 
     def set(self, **fields):
         self.event.update(fields)
@@ -192,10 +193,13 @@ class Tap:
             raise
         finally:
             self._local.bracket = previous
-            try:
-                self._finish(bracket, failed)
-            except Exception:
-                pass
+            if previous is not None:
+                previous.inner.append((bracket, failed))     # Rust must hear the OUTER event first: it caused the inner one
+            else:
+                try:
+                    self._finish(bracket, failed)
+                except Exception:
+                    pass
 
     def feed(self, event: dict) -> None:
         """An event the Rust machine must hear to stay in step, with nothing to compare."""
@@ -212,6 +216,16 @@ class Tap:
             return _call({"op": op, "id": self.id, "event": event})
 
     def _finish(self, b: _Bracket, failed: bool) -> None:
+        try:
+            self._finish_one(b, failed)
+        finally:
+            for inner, inner_failed in b.inner:
+                try:
+                    self._finish(inner, inner_failed)
+                except Exception:
+                    pass
+
+    def _finish_one(self, b: _Bracket, failed: bool) -> None:
         event = dict(b.event)
         if self.machine == "svc" and b.saved is not None:
             event["saved"] = {"result": "found" if b.saved else "none"}

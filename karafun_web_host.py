@@ -580,6 +580,7 @@ class KaraFunWebHost:
             return
         self._fx("complete")
         self._log(f"song ended ({why})")
+        self._shadow_observe("idle")        # the song is no longer in the player: the machine must hear that (never throttled) even when the page's own playing flag still lingers
         self.asked = None
         self._diag(f"[KARAFUN] completion event received reason=web_{why.replace(' ', '_')} remaining=0 idle=1")
         try:

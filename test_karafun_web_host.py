@@ -121,6 +121,23 @@ class TransportFeedTests(unittest.TestCase):
         self.assertEqual(calls[-1], ("app_auto_complete", 7))
         self.assertEqual({c[1] for c in calls if c[0] == "observe"}, {7})
 
+    def test_the_machine_hears_idle_when_the_song_is_gone_even_if_the_page_still_says_playing(self):
+        """2026-11-15 show: seven KaraFun songs ended with 'gone from the player' and seven `MISMATCH app auto-completed ... machine had not completed it`."""
+        calls = []
+
+        class Recorder:
+            def observe(self, sid, kind, **kw): calls.append(("observe", kind))
+            def app_auto_complete(self, sid): calls.append(("app_auto_complete", sid))
+        app, entry, host = self._host_with(Recorder())
+        clock = [1000.0]
+        with mock.patch.object(host_module.time, "monotonic", side_effect=lambda: clock[0]):
+            self._feed(host, position=5.0)
+            clock[0] += 100
+            self._feed(host, position=129.0)
+            clock[0] += 1
+            self._feed(host, playing=True, song=None)             # the song is gone but the page's playing flag lingers
+        self.assertEqual(calls[-2:], [("observe", "idle"), ("app_auto_complete", 7)])
+
     def test_a_song_that_never_starts_tells_the_machine_before_the_app_gives_up(self):
         calls = []
 
