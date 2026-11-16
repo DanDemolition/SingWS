@@ -11,7 +11,29 @@
           ]
         }
       ],
-      "clean": []
+      "clean": [
+        {
+          "date": "2026-11-16",
+          "label": "rehearsal 2026-11-16 dev Mac arm64 1.0.3.9 (3 KaraFun songs, web player, countdown hold)",
+          "logs": [
+            "singws_2026-11-16.log"
+          ],
+          "at": "14:57:00"
+        }
+      ]
+    },
+    "KFWEB-SHADOW:host_service": {
+      "bad": [],
+      "clean": [
+        {
+          "date": "2026-11-16",
+          "label": "rehearsal 2026-11-16 dev Mac arm64 1.0.3.9 (3 KaraFun songs, web player, countdown hold)",
+          "logs": [
+            "singws_2026-11-16.log"
+          ],
+          "at": "14:57:00"
+        }
+      ]
     },
     "KFWEB-SHADOW:host_stall": {
       "bad": [
@@ -24,7 +46,16 @@
           ]
         }
       ],
-      "clean": []
+      "clean": [
+        {
+          "date": "2026-11-16",
+          "label": "rehearsal 2026-11-16 dev Mac arm64 1.0.3.9 (3 KaraFun songs, web player, countdown hold)",
+          "logs": [
+            "singws_2026-11-16.log"
+          ],
+          "at": "14:57:00"
+        }
+      ]
     },
     "KFWEB-SHADOW:host_start": {
       "bad": [
@@ -37,7 +68,16 @@
           ]
         }
       ],
-      "clean": []
+      "clean": [
+        {
+          "date": "2026-11-16",
+          "label": "rehearsal 2026-11-16 dev Mac arm64 1.0.3.9 (3 KaraFun songs, web player, countdown hold)",
+          "logs": [
+            "singws_2026-11-16.log"
+          ],
+          "at": "14:57:00"
+        }
+      ]
     },
     "KFWEB-SHADOW:host_status": {
       "bad": [
@@ -50,7 +90,29 @@
           ]
         }
       ],
-      "clean": []
+      "clean": [
+        {
+          "date": "2026-11-16",
+          "label": "rehearsal 2026-11-16 dev Mac arm64 1.0.3.9 (3 KaraFun songs, web player, countdown hold)",
+          "logs": [
+            "singws_2026-11-16.log"
+          ],
+          "at": "14:57:00"
+        }
+      ]
+    },
+    "KFWEB-SHADOW:svc_message": {
+      "bad": [],
+      "clean": [
+        {
+          "date": "2026-11-16",
+          "label": "rehearsal 2026-11-16 dev Mac arm64 1.0.3.9 (3 KaraFun songs, web player, countdown hold)",
+          "logs": [
+            "singws_2026-11-16.log"
+          ],
+          "at": "14:57:00"
+        }
+      ]
     },
     "PLAN-SHADOW:crossfade": {
       "bad": [],
@@ -143,6 +205,14 @@
             "singws_2026-11-14.log",
             "singws_2026-11-14.log.2026-11-14"
           ]
+        },
+        {
+          "date": "2026-11-16",
+          "label": "rehearsal 2026-11-16 dev Mac arm64 1.0.3.9 (3 KaraFun songs, web player, countdown hold)",
+          "logs": [
+            "singws_2026-11-16.log"
+          ],
+          "at": "14:57:00"
         }
       ]
     },
@@ -237,6 +307,14 @@
             "singws_2026-11-14.log",
             "singws_2026-11-14.log.2026-11-14"
           ]
+        },
+        {
+          "date": "2026-11-16",
+          "label": "rehearsal 2026-11-16 dev Mac arm64 1.0.3.9 (3 KaraFun songs, web player, countdown hold)",
+          "logs": [
+            "singws_2026-11-16.log"
+          ],
+          "at": "14:57:00"
         }
       ]
     },
@@ -331,6 +409,14 @@
             "singws_2026-11-14.log",
             "singws_2026-11-14.log.2026-11-14"
           ]
+        },
+        {
+          "date": "2026-11-16",
+          "label": "rehearsal 2026-11-16 dev Mac arm64 1.0.3.9 (3 KaraFun songs, web player, countdown hold)",
+          "logs": [
+            "singws_2026-11-16.log"
+          ],
+          "at": "14:57:00"
         }
       ]
     },
@@ -460,6 +546,14 @@
             "singws_2026-11-14.log",
             "singws_2026-11-14.log.2026-11-14"
           ]
+        },
+        {
+          "date": "2026-11-16",
+          "label": "rehearsal 2026-11-16 dev Mac arm64 1.0.3.9 (3 KaraFun songs, web player, countdown hold)",
+          "logs": [
+            "singws_2026-11-16.log"
+          ],
+          "at": "14:57:00"
         }
       ]
     },
@@ -554,6 +648,14 @@
             "singws_2026-11-14.log",
             "singws_2026-11-14.log.2026-11-14"
           ]
+        },
+        {
+          "date": "2026-11-16",
+          "label": "rehearsal 2026-11-16 dev Mac arm64 1.0.3.9 (3 KaraFun songs, web player, countdown hold)",
+          "logs": [
+            "singws_2026-11-16.log"
+          ],
+          "at": "14:57:00"
         }
       ]
     },
@@ -648,6 +750,14 @@
             "singws_2026-11-14.log",
             "singws_2026-11-14.log.2026-11-14"
           ]
+        },
+        {
+          "date": "2026-11-16",
+          "label": "rehearsal 2026-11-16 dev Mac arm64 1.0.3.9 (3 KaraFun songs, web player, countdown hold)",
+          "logs": [
+            "singws_2026-11-16.log"
+          ],
+          "at": "14:57:00"
         }
       ]
     },
@@ -1088,6 +1198,14 @@
             "singws_2026-11-14.log",
             "singws_2026-11-15.log"
           ]
+        },
+        {
+          "date": "2026-11-16",
+          "label": "rehearsal 2026-11-16 dev Mac arm64 1.0.3.9 (3 KaraFun songs, web player, countdown hold)",
+          "logs": [
+            "singws_2026-11-16.log"
+          ],
+          "at": "14:57:00"
         }
       ]
     },
@@ -1265,6 +1383,14 @@
             "singws_2026-11-14.log",
             "singws_2026-11-15.log"
           ]
+        },
+        {
+          "date": "2026-11-16",
+          "label": "rehearsal 2026-11-16 dev Mac arm64 1.0.3.9 (3 KaraFun songs, web player, countdown hold)",
+          "logs": [
+            "singws_2026-11-16.log"
+          ],
+          "at": "14:57:00"
         }
       ]
     },
@@ -1865,6 +1991,14 @@
             "singws_2026-11-14.log",
             "singws_2026-11-14.log.2026-11-14"
           ]
+        },
+        {
+          "date": "2026-11-16",
+          "label": "rehearsal 2026-11-16 dev Mac arm64 1.0.3.9 (3 KaraFun songs, web player, countdown hold)",
+          "logs": [
+            "singws_2026-11-16.log"
+          ],
+          "at": "14:57:00"
         }
       ]
     },
@@ -2091,6 +2225,14 @@
             "singws_2026-11-14.log",
             "singws_2026-11-14.log.2026-11-14"
           ]
+        },
+        {
+          "date": "2026-11-16",
+          "label": "rehearsal 2026-11-16 dev Mac arm64 1.0.3.9 (3 KaraFun songs, web player, countdown hold)",
+          "logs": [
+            "singws_2026-11-16.log"
+          ],
+          "at": "14:57:00"
         }
       ]
     },
@@ -2578,6 +2720,14 @@
             "singws_2026-11-14.log",
             "singws_2026-11-15.log"
           ]
+        },
+        {
+          "date": "2026-11-16",
+          "label": "rehearsal 2026-11-16 dev Mac arm64 1.0.3.9 (3 KaraFun songs, web player, countdown hold)",
+          "logs": [
+            "singws_2026-11-16.log"
+          ],
+          "at": "14:57:00"
         }
       ]
     },
@@ -2651,6 +2801,14 @@
             "singws_2026-11-14.log",
             "singws_2026-11-14.log.2026-11-14"
           ]
+        },
+        {
+          "date": "2026-11-16",
+          "label": "rehearsal 2026-11-16 dev Mac arm64 1.0.3.9 (3 KaraFun songs, web player, countdown hold)",
+          "logs": [
+            "singws_2026-11-16.log"
+          ],
+          "at": "14:57:00"
         }
       ]
     },
@@ -2745,6 +2903,14 @@
             "singws_2026-11-14.log",
             "singws_2026-11-14.log.2026-11-14"
           ]
+        },
+        {
+          "date": "2026-11-16",
+          "label": "rehearsal 2026-11-16 dev Mac arm64 1.0.3.9 (3 KaraFun songs, web player, countdown hold)",
+          "logs": [
+            "singws_2026-11-16.log"
+          ],
+          "at": "14:57:00"
         }
       ]
     },
@@ -2832,6 +2998,14 @@
             "singws_2026-11-14.log",
             "singws_2026-11-14.log.2026-11-14"
           ]
+        },
+        {
+          "date": "2026-11-16",
+          "label": "rehearsal 2026-11-16 dev Mac arm64 1.0.3.9 (3 KaraFun songs, web player, countdown hold)",
+          "logs": [
+            "singws_2026-11-16.log"
+          ],
+          "at": "14:57:00"
         }
       ]
     },
@@ -2926,6 +3100,14 @@
             "singws_2026-11-14.log",
             "singws_2026-11-14.log.2026-11-14"
           ]
+        },
+        {
+          "date": "2026-11-16",
+          "label": "rehearsal 2026-11-16 dev Mac arm64 1.0.3.9 (3 KaraFun songs, web player, countdown hold)",
+          "logs": [
+            "singws_2026-11-16.log"
+          ],
+          "at": "14:57:00"
         }
       ]
     },
@@ -3020,6 +3202,14 @@
             "singws_2026-11-14.log",
             "singws_2026-11-14.log.2026-11-14"
           ]
+        },
+        {
+          "date": "2026-11-16",
+          "label": "rehearsal 2026-11-16 dev Mac arm64 1.0.3.9 (3 KaraFun songs, web player, countdown hold)",
+          "logs": [
+            "singws_2026-11-16.log"
+          ],
+          "at": "14:57:00"
         }
       ]
     },
@@ -3114,6 +3304,14 @@
             "singws_2026-11-14.log",
             "singws_2026-11-14.log.2026-11-14"
           ]
+        },
+        {
+          "date": "2026-11-16",
+          "label": "rehearsal 2026-11-16 dev Mac arm64 1.0.3.9 (3 KaraFun songs, web player, countdown hold)",
+          "logs": [
+            "singws_2026-11-16.log"
+          ],
+          "at": "14:57:00"
         }
       ]
     },
@@ -3179,6 +3377,14 @@
             "singws_2026-11-14.log",
             "singws_2026-11-14.log.2026-11-14"
           ]
+        },
+        {
+          "date": "2026-11-16",
+          "label": "rehearsal 2026-11-16 dev Mac arm64 1.0.3.9 (3 KaraFun songs, web player, countdown hold)",
+          "logs": [
+            "singws_2026-11-16.log"
+          ],
+          "at": "14:57:00"
         }
       ]
     },
@@ -3277,6 +3483,14 @@
             "singws_2026-11-14.log",
             "singws_2026-11-14.log.2026-11-14"
           ]
+        },
+        {
+          "date": "2026-11-16",
+          "label": "rehearsal 2026-11-16 dev Mac arm64 1.0.3.9 (3 KaraFun songs, web player, countdown hold)",
+          "logs": [
+            "singws_2026-11-16.log"
+          ],
+          "at": "14:57:00"
         }
       ]
     },
@@ -3533,6 +3747,14 @@
             "singws_2026-11-08.log",
             "singws_2026-11-08.log.2026-11-08"
           ]
+        },
+        {
+          "date": "2026-11-16",
+          "label": "rehearsal 2026-11-16 dev Mac arm64 1.0.3.9 (3 KaraFun songs, web player, countdown hold)",
+          "logs": [
+            "singws_2026-11-16.log"
+          ],
+          "at": "14:57:00"
         }
       ]
     },
@@ -3628,6 +3850,14 @@
             "singws_2026-11-14.log",
             "singws_2026-11-15.log"
           ]
+        },
+        {
+          "date": "2026-11-16",
+          "label": "rehearsal 2026-11-16 dev Mac arm64 1.0.3.9 (3 KaraFun songs, web player, countdown hold)",
+          "logs": [
+            "singws_2026-11-16.log"
+          ],
+          "at": "14:57:00"
         }
       ]
     },
@@ -3715,6 +3945,14 @@
             "singws_2026-11-14.log",
             "singws_2026-11-14.log.2026-11-14"
           ]
+        },
+        {
+          "date": "2026-11-16",
+          "label": "rehearsal 2026-11-16 dev Mac arm64 1.0.3.9 (3 KaraFun songs, web player, countdown hold)",
+          "logs": [
+            "singws_2026-11-16.log"
+          ],
+          "at": "14:57:00"
         }
       ]
     },

@@ -154,7 +154,7 @@ def save(data, path=LEDGER):
 def record(data, proven, label, logs, when=None):
     """Add one session to the ledger. Returns (newly_clean, newly_bad) decision lists."""
     when = when or time.strftime("%Y-%m-%d")
-    entry = {"label": label, "date": when, "logs": sorted(re.sub(r"^\d+_", "", os.path.basename(p)) for p in logs)}
+    entry = {"label": label, "date": when, "at": time.strftime("%H:%M:%S"), "logs": sorted(re.sub(r"^\d+_", "", os.path.basename(p)) for p in logs)}
     good, bad = [], []
     for decision, clean in sorted(proven.items()):
         row = data["decisions"].setdefault(decision, {"clean": [], "bad": []})
@@ -169,8 +169,10 @@ def status(data):
     for name in names:
         row = data["decisions"].get(name, {"clean": [], "bad": []})
         clean, bad = row.get("clean", []), row.get("bad", [])
-        last_clean = max((e["date"] + "|" + e["label"] for e in clean), default="")
-        last_bad = max((e["date"] + "|" + e["label"] for e in bad), default="")
+        # Newest first by date, then by the time it was added (`at`; older entries have none and so come before any that has one), then label.
+        order = lambda e: (e["date"], e.get("at", ""), e["label"])
+        last_clean = max((order(e) for e in clean), default=())
+        last_bad = max((order(e) for e in bad), default=())
         if bad and last_bad >= last_clean:
             verdict = "REGRESSED"
         elif len(clean) >= REQUIRED_CLEAN:
