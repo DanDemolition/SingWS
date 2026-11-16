@@ -248,7 +248,7 @@ ENGINE_CRASH_TEXT = "RuntimeError: memory access out of bounds"   # a page log l
 RELOAD_SETTLE_S = 8.0            # seconds after the post-login reload during which the old page's statuses are ignored
 SIGN_IN_AFTER_STATUSES = 60      # statuses come twice a second: with NO saved login, KaraFun's own sign-in page opens in the browser after 30 s
 LOGIN_AFTER_STATUSES = 16        # the saved login is used 8 s after the page starts (it was 30 s: a song queued early had to wait for it)
-RELOGIN_AFTER_STATUSES = 40      # signed out again 20 s after the post-login reload: the saved login is used once more (the reload can lose the session)
+RELOGIN_AFTER_STATUSES = 16      # signed out again 8 s after the reload settled: the saved login is used once more (the reload can lose the session; it was 40 = 28 s, seen on the Intel show Mac 2026-11-15)
 BROWSER_FALLBACK_STATUSES = 480  # the browser sign-in page only opens after 4 minutes of a saved login that did not work (it opened by mistake at 1 minute
                                  # on the Intel show Mac, 2026-11-14, while the page was still signing itself in)
 

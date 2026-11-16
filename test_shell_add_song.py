@@ -190,6 +190,16 @@ class AddSongTests(unittest.TestCase):
         for bad in ("", "   ", "x" * 61, "line\nbreak", "tab\there", "bell\x07ring", "nul\x00byte", "esc\x1bseq", "del\x7fchar"):
             self.assertEqual(self.refusal(h, bad, ids["a.mp4"]), "bad_singer", repr(bad))
 
+    def test_every_singer_name_is_first_letter_capital_and_the_rest_lowercase(self):
+        """2026-11-16, the operator: no all-caps names, everyone shown the same way."""
+        h = self.harness([])
+        cap = h.app._capitalize_singer_name
+        for raw, want in [("DAN", "Dan"), ("dan", "Dan"), ("dAn SMITH", "Dan Smith"), ("McKay", "Mckay"), ("amber & DELORES", "Amber & Delores"), ("", ""), ("  ", "  ")]:
+            self.assertEqual(cap(raw), want, raw)
+        ok, code = h.app.shell_queue_add_song("TOMMY LEE", env()["ids"]["a.mp4"], 0)
+        self.assertTrue(ok, code)
+        self.assertEqual([x.get("name") for x in h.app.queue], ["Tommy Lee"])
+
     def test_names_with_emoji_joiners_and_no_break_spaces_are_fine(self):
         h = self.harness([])
         for n, name in enumerate(("Mom \u200d\U0001F469 Dad", "Dan\u00a0Smith", "\u65e5\u672c \u592a\u90ce")):

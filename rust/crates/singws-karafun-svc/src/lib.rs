@@ -19,7 +19,7 @@ pub const SIGN_IN_AFTER_STATUSES: u64 = 60;
 /// Statuses before the saved login is used (`LOGIN_AFTER_STATUSES`, 8 s; it was 30 s until 1.0.3.8).
 pub const LOGIN_AFTER_STATUSES: u64 = 16;
 /// Statuses after the post-login reload before the saved login is used once more (`RELOGIN_AFTER_STATUSES`).
-pub const RELOGIN_AFTER_STATUSES: u64 = 40;
+pub const RELOGIN_AFTER_STATUSES: u64 = 16;
 /// Statuses of a saved login that did not work before the browser sign-in page opens (`BROWSER_FALLBACK_STATUSES`, 4 minutes).
 pub const BROWSER_FALLBACK_STATUSES: u64 = 480;
 /// A page log line carrying this text means KaraFun's engine crashed on the saved profile (`_reset_profile_after_engine_crash`).

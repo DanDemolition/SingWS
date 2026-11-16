@@ -285,6 +285,26 @@ class RealHostTwin(unittest.TestCase):
         self.agreed("host_start", "host_status", "host_finish")
         self.assertEqual(app.finished[0][0], "complete")
 
+    def test_a_song_whose_play_is_held_for_the_countdown_agrees_with_rust(self):
+        app, entry, service, host = self.make("ready")
+        host.countdown_hold_s = 3.5
+        fired = []
+        from PyQt6.QtCore import QTimer
+        clock = [5000.0]
+        with mock.patch.object(QTimer, "singleShot", side_effect=lambda ms, fn: fired.append((ms, fn))), \
+                mock.patch.object(self.fx.host_module.time, "monotonic", side_effect=lambda: clock[0]):
+            self.assertTrue(host.start(entry, 0, 100))
+            host.asked["active"] = app._active_external_karafun
+            self.assertEqual([c for c in service.web.calls if c[0] == "play"], [])
+            clock[0] += 3.6
+            for ms, fn in list(fired):
+                if 3400 <= ms <= 3700:
+                    fn()
+            self.assertEqual(len([c for c in service.web.calls if c[0] == "play"]), 1)
+            clock[0] += 1
+            host._handle(self.fx.status(position=1.0))
+        self.agreed("host_start", "host_service", "host_status")
+
     def test_a_song_asked_for_while_the_player_signs_in_is_held_then_played_and_rust_agrees(self):
         app, entry, service, host = self.make("sign_in")
         service.state = "sign_in"

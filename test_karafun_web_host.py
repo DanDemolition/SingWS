@@ -71,6 +71,7 @@ def make(state="ready"):
     host._start_frames = mock.Mock()
     host._stop_frames = mock.Mock()
     host._arm_watchdog = mock.Mock()
+    host.countdown_hold_s = 0.0          # the countdown hold has its own tests (CountdownHoldTests); the others assert the play at once
     return app, entry, service, host
 
 
@@ -207,6 +208,79 @@ class TransportFeedTests(unittest.TestCase):
             self._feed(host, playing=False, song=None)
         self.assertEqual([l for l in lines if "MISMATCH" in l], [], lines)
         self.assertTrue(any("CompleteSong" in l for l in lines), lines)
+
+
+class CountdownHoldTests(unittest.TestCase):
+    """The play of a fresh KaraFun song is sent a few seconds after the start: the countdown animation and the background music go first, then the song, then the
+    music fades (KaraFun's own start was being cut off by the animation)."""
+
+    def run_start(self, state="ready"):
+        app, entry, service, host = make(state)
+        host.countdown_hold_s = 3.5
+        fired = []
+        clock = [1000.0]
+        from PyQt6.QtCore import QTimer
+        patches = [mock.patch.object(QTimer, "singleShot", side_effect=lambda ms, fn: fired.append((ms, fn))),
+                   mock.patch.object(host_module.time, "monotonic", side_effect=lambda: clock[0])]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        return app, entry, service, host, fired, clock
+
+    def plays(self, service):
+        return [c for c in service.web.calls if c[0] == "play"]
+
+    def test_the_play_waits_for_the_countdown_and_the_music_is_not_faded_meanwhile(self):
+        app, entry, service, host, fired, clock = self.run_start()
+        self.assertTrue(host.start(entry, 0, 100))
+        self.assertEqual(self.plays(service), [])                      # nothing sent at the start
+        self.assertEqual(app.faded, [])                                # the background music keeps playing
+        self.assertEqual(app.statuses[-1][0], "launching")
+        self.assertTrue(any(3400 <= ms <= 3700 for ms, _ in fired), fired)
+        clock[0] += 3.6
+        for ms, fn in list(fired):
+            if 3400 <= ms <= 3700:
+                fn()
+        self.assertEqual(len(self.plays(service)), 1)                  # then the song is asked for
+        self.assertEqual(app.faded, [])                                # and the music fades only when the player confirms it
+        host.asked["active"] = app._active_external_karafun
+        host._handle(status(position=1.0))
+        self.assertEqual(app.faded, [1])
+
+    def test_a_player_that_becomes_ready_during_the_hold_still_waits_out_the_rest(self):
+        app, entry, service, host, fired, clock = self.run_start("starting")
+        host.start(entry, 0, 100)
+        clock[0] += 1.0
+        service.state = "ready"
+        host._state_changed("ready", "")
+        self.assertEqual(self.plays(service), [])
+        clock[0] += 3.0
+        for ms, fn in list(fired):
+            fn()
+        self.assertEqual(len(self.plays(service)), 1)
+
+    def test_a_player_that_became_ready_after_the_hold_plays_at_once(self):
+        app, entry, service, host, fired, clock = self.run_start("starting")
+        host.start(entry, 0, 100)
+        clock[0] += 30.0
+        service.state = "ready"
+        host._state_changed("ready", "")
+        self.assertEqual(len(self.plays(service)), 1)
+
+    def test_a_song_stopped_during_the_hold_is_never_played(self):
+        app, entry, service, host, fired, clock = self.run_start()
+        host.start(entry, 0, 100)
+        host.asked = None                                              # stopped / skipped
+        clock[0] += 4.0
+        for ms, fn in list(fired):
+            fn()
+        self.assertEqual(self.plays(service), [])
+
+    def test_the_hold_is_off_when_set_to_zero(self):
+        app, entry, service, host, fired, clock = self.run_start()
+        host.countdown_hold_s = 0.0
+        host.start(entry, 0, 100)
+        self.assertEqual(len(self.plays(service)), 1)
 
 
 class IdTests(unittest.TestCase):

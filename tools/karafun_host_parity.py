@@ -106,6 +106,7 @@ def python_trace(sc: dict) -> dict:
             log.append(["diag", text])
 
     host = karafun_web_host.KaraFunWebHost(app, diag=diag)
+    host.countdown_hold_s = 0.0      # the countdown hold is a delay in WHEN the play is sent (the shadow tells Rust the player is not ready until it is sent); the rules compared here are unchanged
     service = Service()
     host.ensure_service = lambda: log.append(["ensure_service"])
     host._start_frames = lambda show=True: log.append(["start_frames"] if show else ["start_frames_hidden"])

@@ -254,9 +254,9 @@ class ServiceTests(unittest.TestCase):
         service._message({"type": "status", "signedIn": True, "plan": "Pro"})      # the login worked: the player reloads
         self.assertEqual(holder["web"].commands, ["reload"])
         with mock.patch.object(karafun_web.time, "monotonic", return_value=karafun_web.time.monotonic() + 20):
-            self.signed_out(service, 39)
+            self.signed_out(service, 15)
             self.assertEqual(len(holder["web"].logins), 1)
-            self.signed_out(service, 1)                                             # 20 s after the reload and still signed out
+            self.signed_out(service, 1)                                             # 8 s after the reload settled (it was 20 s: 28 s lost at every Intel launch) and still signed out
             self.assertEqual(len(holder["web"].logins), 2)
             self.signed_out(service, 300)
             self.assertEqual(len(holder["web"].logins), 2)                          # once more only

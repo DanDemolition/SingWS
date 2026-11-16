@@ -27,6 +27,7 @@ NEVER_STARTED_AFTER_S = 60.0       # from the moment play is sent to the page
 SIGN_IN_HOLD_S = 240.0             # a song asked for while the player is still starting / signing in waits this long for it (about 2 min on the Intel show Mac)
 RECOVER_START_WITHIN_S = 150.0     # a restarted player may need to sign itself in again before it plays
 MAX_RECOVERIES = 3
+COUNTDOWN_HOLD_S = 3.5             # a fresh song's play is sent this long after the start: the countdown animation and the background music run first (KaraFun's own start was cut off by the animation)
 SAT_AT_END_S = 2.5
 END_MARGIN_S = 1.5
 SEEK_END_GUARD_S = 8.0
@@ -63,6 +64,7 @@ class KaraFunWebHost:
         self._preview_placed = None
         self._frames_shown = False
         self._sat_at_end_since: Optional[float] = None
+        self.countdown_hold_s = COUNTDOWN_HOLD_S
         self._song_open = False          # a song was handed to the web player and has not been finished by the app yet
         self._shadow = None              # karafun_web_shadow.Tap: the Rust twin of this class hears every event and its answers are compared (log only)
         self._shadow_state_read = None
@@ -182,7 +184,8 @@ class KaraFunWebHost:
             self._fail("KaraFun's player needs Chromium, and the download was declined")
 
     def _state_changed(self, state: str, detail: str) -> None:
-        with self._tap("host_service", "service", state=str(state), detail=str(detail)):
+        told = "starting" if str(state) == "ready" and self._hold_left() > 0 else str(state)     # the Rust twin is told "ready" when the play is really sent
+        with self._tap("host_service", "service", state=told, detail=str(detail)):
             self._state_changed_impl(state, detail)
 
     def _state_changed_impl(self, state: str, detail: str) -> None:
@@ -198,7 +201,7 @@ class KaraFunWebHost:
         if asked.get("heard"):
             return
         if state == "ready" and not asked.get("sent"):
-            self._send_play()
+            self._play_after_hold()
         elif state == "error":
             self._fail(detail)
         # "sign_in" is also what the player says for the few seconds before it has logged itself in from its saved profile: wait for "ready"
@@ -288,6 +291,7 @@ class KaraFunWebHost:
         self.asked = {"id": song_id, "entry": entry, "title": title, "artist": artist, "queries": ladder, "query": f"{artist} {title}".strip(), "key": int(key or 0),
                       "tempo": tempo, "at": time.monotonic(), "heard": False, "sent": False,
                       "active": getattr(app, "_active_external_karafun", None)}
+        self.asked["play_not_before"] = self.asked["at"] + max(0.0, float(self.countdown_hold_s or 0.0))
         self._sat_at_end_since = None
         self._song_open = True
         entry["karafun_pending_at"] = int(time.time())
@@ -296,9 +300,9 @@ class KaraFunWebHost:
         self._log(f"start id={song_id} title={title!r} key={key} tempo={tempo}")
         self.ensure_service()
         state = self.service.state
-        self._shadow_state_read = state
+        self._shadow_state_read = "starting" if state == "ready" and self._hold_left() > 0 else state      # the Rust twin hears "not ready yet" while the play is held
         if state == "ready":
-            self._send_play()
+            self._play_after_hold()
         elif state == "error":
             self._fail(self.state[1] or "KaraFun's web player could not start")
         else:
@@ -306,6 +310,35 @@ class KaraFunWebHost:
         # preparing / starting / sign_in (logging itself in): HELD until the player is ready (_state_changed plays it), up to SIGN_IN_HOLD_S (_arm_watchdog)
         self._arm_watchdog()
         return True
+
+    def _hold_left(self) -> float:
+        """Seconds still to wait before the play is sent (the countdown animation and the background music play first)."""
+        asked = self.asked
+        if asked is None or asked.get("sent"):
+            return 0.0
+        return max(0.0, float(asked.get("play_not_before", 0.0)) - time.monotonic())
+
+    def _play_after_hold(self) -> None:
+        asked = self.asked
+        if asked is None:
+            return
+        left = self._hold_left()
+        if left <= 0.02:
+            self._send_play()
+            return
+        if asked.get("_hold_armed"):
+            return
+        asked["_hold_armed"] = True
+        self._log(f"holding the play for {left:.1f}s: the countdown animation and the background music go first")
+        from PyQt6.QtCore import QTimer
+        QTimer.singleShot(int(left * 1000) + 25, lambda: self._hold_over(asked))
+
+    def _hold_over(self, asked: dict) -> None:
+        if self.asked is not asked or asked.get("sent") or asked.get("heard"):
+            return
+        asked["_hold_armed"] = False
+        if self.service is not None and self.service.state == "ready":
+            self._state_changed("ready", "")
 
     def _send_play(self) -> None:
         asked = self.asked

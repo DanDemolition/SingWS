@@ -7166,6 +7166,13 @@ Rectangle {
     clip: true
     property bool effectsEnabled: true
     property bool active: false
+    // The transition animations are drawn into an offscreen picture of at most 720 lines and scaled up to the window while they run
+    // (2026-11-16, the operator: choppy on the Intel Mac; a Retina window is about 7 million pixels per frame, a 1080p TV 2 million, 720p 0.9 million).
+    // Idle windows and the small host preview (already under 720 lines) are untouched.
+    readonly property real renderScale: height > 720 ? 720 / height : 1.0
+    layer.enabled: active && renderScale < 1.0
+    layer.smooth: true
+    layer.textureSize: Qt.size(Math.max(1, Math.round(width * renderScale)), Math.max(1, Math.round(height * renderScale)))
     property string singerText: ""
     property string songText: ""
     property string artistText: ""
@@ -45613,12 +45620,13 @@ class KaraokeApp(QWidget):
 
     @staticmethod
     def _capitalize_singer_name(name):
-        """Capitalize the first letter of every word in a singer's name
-        (e.g. 'dan smith' -> 'Dan Smith'), leaving the rest of each word exactly
-        as entered (so 'McKay' stays 'McKay'). Empty input is returned as-is."""
+        """First letter of every word a capital, the rest lowercase, for everyone
+        (e.g. 'dan smith' -> 'Dan Smith', 'DAN' -> 'Dan', 'McKay' -> 'Mckay').
+        The operator wants every singer shown the same way (2026-11-16): no all-caps
+        names. Empty input is returned as-is."""
         import re as _re
         s = str(name or "")
-        return _re.sub(r"\S+", lambda m: m.group(0)[0].upper() + m.group(0)[1:], s)
+        return _re.sub(r"\S+", lambda m: m.group(0)[0].upper() + m.group(0)[1:].lower(), s)
 
     def _queue_singer_match_index(self, singer_name: str, remote_meta: dict | None = None) -> int:
         """Find a rotation row by immutable identity first, display name second.
@@ -45765,9 +45773,9 @@ class KaraokeApp(QWidget):
             self._log_active_background_workers("queue_add_start")
         except Exception:
             pass
-        # Always capitalize the first letter of every word in the singer's name,
-        # whether typed by the operator or submitted remotely
-        # (e.g. "dan smith" -> "Dan Smith").
+        # Every singer name is shown the same way, whether typed by the operator or
+        # submitted remotely: first letter of each word a capital, the rest
+        # lowercase (e.g. "dan smith" -> "Dan Smith", "DAN" -> "Dan").
         singer_name = self._capitalize_singer_name(singer_name)
         # Check for pending track data from search results
         if track is None and hasattr(self, '_pending_track_data') and self._pending_track_data:
@@ -47839,6 +47847,7 @@ class KaraokeApp(QWidget):
         pushed to the server's request store immediately."""
         if singer_idx < 0 or singer_idx >= len(self.queue):
             return False
+        new_name = self._capitalize_singer_name(new_name)       # a renamed singer follows the same rule as a new one
         singer = self.queue[singer_idx]
         # Snapshot immutable server ownership before any display-name merge.
         # The server can use these fields to retain the existing signup
@@ -50801,7 +50810,7 @@ class KaraokeApp(QWidget):
         idx = self._queue_singer_index_by_id(singer_id)
         if idx < 0:
             return False, "unknown_singer"
-        name = str(new_name or "").strip()
+        name = self._capitalize_singer_name(str(new_name or "").strip())
         if not name or len(name) > 60 or any(unicodedata.category(c) == "Cc" for c in name):
             return False, "bad_name"
         old = str(self.queue[idx].get("name", "") or "").strip()

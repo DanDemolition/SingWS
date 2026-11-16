@@ -270,7 +270,7 @@ def story(rng: random.Random) -> dict:
     for dt in rng.choice([[0.5, 7.5, 0.5], [0.5, 7.999, 0.001, 0.5], [0.5, 8.0, 0.5, 0.5], [0.5, 4.0, 4.0, 4.0], [30.0, 0.5]]):
         t += dt
         sc["events"].append(msg(rng, t, rng.random() < 0.75))
-    for _ in range(rng.choice([0, 3, 39, 40, 41, 70, 479, 480, 481])):
+    for _ in range(rng.choice([0, 3, 15, 16, 17, 39, 40, 41, 70, 479, 480, 481])):
         t += 0.5
         sc["events"].append(msg(rng, t, rng.random() < 0.2))
         sc["events"][-1]["saved"] = {"result": rng.choice(["found", "none"])}
