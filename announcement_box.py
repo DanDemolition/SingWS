@@ -29,6 +29,8 @@ MAX_BYTES = 3_000_000
 MAX_CHUNKS = 400
 MIN_RATE, MAX_RATE = 8000, 48000
 HOLD_SECONDS = 15 * 60          # an armed clip nobody played is dropped after this long
+DUCK_FACTOR = 0.5                # music level while the clip plays (-6 dB)
+DUCK_IN_MS, DUCK_OUT_MS = 200, 700
 PEAK_LIMIT = 32767 * 0.995       # the phone's limiter keeps below this; a clip that clips anyway is refused
 
 
@@ -72,6 +74,7 @@ class AnnouncementBox:
         self._building: dict | None = None
         self._armed: dict | None = None
         self._channel = None
+        self._duck: tuple | None = None      # (engine, level before, level ducked to)
 
     # ---- state ----
 
@@ -189,12 +192,36 @@ class AnnouncementBox:
             raise
         a["wav"] = b""
         self._channel = channel
+        self._duck_music(runtime)
         self._log(f"[ANNOUNCE] playing id={a['id']} {a['seconds']:.1f}s; the file is already deleted")
         return True, "playing"
 
     # ---- finishing ----
 
+    def _duck_music(self, engine) -> None:
+        try:
+            before = float(engine.master_volume)
+            if self._duck is None and before > 0.0:
+                ducked = before * DUCK_FACTOR
+                engine.slide_master_volume(ducked, DUCK_IN_MS)
+                self._duck = (engine, before, ducked)
+        except Exception:
+            self._duck = None
+
+    def _unduck_music(self) -> None:
+        duck, self._duck = self._duck, None
+        if duck is None:
+            return
+        engine, before, ducked = duck
+        try:
+            # only if nothing else (a fade, the volume slider) has moved the music since; never fight it
+            if not getattr(engine, "_closed", False) and abs(float(engine.master_volume) - ducked) < 1e-6:
+                engine.slide_master_volume(before, DUCK_OUT_MS)
+        except Exception:
+            pass
+
     def _close_channel(self) -> None:
+        self._unduck_music()
         ch, self._channel = self._channel, None
         if ch is not None:
             try:

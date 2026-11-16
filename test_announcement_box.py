@@ -14,6 +14,9 @@ class FakeEngine:
     def __init__(self):
         self.loaded_paths, self.existed_at_load, self.played, self.instances, self._closed = [], [], 0, 0, False
         self.released = 0
+        self.master_volume = 0.8
+        self.slides = []
+    def slide_master_volume(self, v, ms): self.master_volume = v; self.slides.append((v, ms))
     def pad_allocate_slot(self): return 3
     def pad_load(self, slot, path, volume):
         self.loaded_paths.append(path); self.existed_at_load.append(os.path.exists(path))
@@ -54,6 +57,20 @@ class AnnouncementBoxTests(unittest.TestCase):
         self.now[0] += 1.0
         self.box.tick()
         self.assertEqual(self.engine.released, 1)
+
+    def test_music_ducks_while_playing_then_returns(self):
+        import time
+        send(self.box, self.clip); self.box.handle("announce.play", {"id": "a"})
+        self.assertAlmostEqual(self.engine.master_volume, 0.4)
+        self.engine.instances = 0; time.sleep(0.07); self.box.tick()
+        self.assertAlmostEqual(self.engine.master_volume, 0.8)
+
+    def test_music_is_left_alone_if_something_else_moved_it(self):
+        import time
+        send(self.box, self.clip); self.box.handle("announce.play", {"id": "a"})
+        self.engine.master_volume = 0.0           # e.g. a fade-out started meanwhile
+        self.engine.instances = 0; time.sleep(0.07); self.box.tick()
+        self.assertEqual(self.engine.master_volume, 0.0)
 
     def test_no_second_play_and_discard(self):
         send(self.box, self.clip)
