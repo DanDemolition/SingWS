@@ -6907,6 +6907,14 @@ def _apply_double_buffered_quick_format(view) -> None:
     try:
         fmt = view.format()
         fmt.setSwapBehavior(QSurfaceFormat.SwapBehavior.DoubleBuffer)
+        # Transitions are capped at 60 fps: on a display faster than 90 Hz
+        # (ProMotion) present every second vblank. A 60 Hz panel keeps 1.
+        try:
+            screen = QApplication.primaryScreen()
+            hz = float(screen.refreshRate()) if screen is not None else 60.0
+        except Exception:
+            hz = 60.0
+        fmt.setSwapInterval(max(1, int(round(hz / 60.0))) if hz > 90.0 else 1)
         view.setFormat(fmt)
     except Exception as exc:
         _diag(f"[SURFACE] Quick view kept default swap behaviour: {exc}")
@@ -29287,6 +29295,8 @@ class KaraokeApp(QWidget):
             ok, message = False, str(e)
             _diag(f"[HOST-RELAY] command failed id={request_id} action={action} reason={message}")
         worker.send_json({"type": "ack", "request_id": request_id, "ok": bool(ok), "message": str(message or "")})
+        if action in ("announce.begin", "announce.chunk", "announce.end", "announce.discard"):
+            return          # a clip upload is many small commands: no full state after each
         # Push a fresh full state right after a command so the UI snaps to truth.
         self._publish_host_state_ws(force=True)
 
@@ -34692,7 +34702,25 @@ class KaraokeApp(QWidget):
 
         threading.Thread(target=send, daemon=True).start()
 
+    def _announcement_box(self):
+        """The announcement box (announcement_box.py): a phone-recorded clip held in memory until it is played. Built on first use."""
+        box = getattr(self, "_announce_box", None)
+        if box is None:
+            import announcement_box
+            announcement_box.sweep_stale_files()
+            box = announcement_box.AnnouncementBox(
+                self.soundboard_runtime, volume=lambda: float(getattr(self, "soundboard_volume", 1.0) or 1.0), log=_diag)
+            self._announce_box = box
+            timer = QTimer(self)
+            timer.setInterval(1000)
+            timer.timeout.connect(box.tick)
+            timer.start()
+            self._announce_timer = timer
+        return box
+
     def _execute_host_control_command(self, action: str, args: dict) -> tuple[bool, str]:
+        if action.startswith("announce."):
+            return self._announcement_box().handle(action, args)
         if action.startswith(("queue.", "library.", "bg.", "eq.", "waitlist.", "history.", "settings.", "chat.")):
             return self._execute_shell_queue_command(action, args)
         if str(args.get("source") or "").strip().lower() == "shell" and action != "state":
