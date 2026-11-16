@@ -117,6 +117,15 @@ class AnnouncementBoxTests(unittest.TestCase):
         self.assertEqual(os.listdir(self.dir), [])
 
 
+class AppWiringTests(unittest.TestCase):
+    def test_the_box_finds_the_engine_through_bg_music_not_the_window(self):
+        src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "0.2.18.1.py"), encoding="utf-8").read()
+        i = src.index("def _announcement_box(self):")
+        body = src[i:src.index("def _execute_host_control_command", i)]
+        self.assertIn("bg_music", body)
+        self.assertNotIn("self.soundboard_runtime", body)   # that method lives on BackgroundMusicPlayer; the window has none
+
+
 class PhoneSideTests(unittest.TestCase):
     ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "SingWS-Server")
 

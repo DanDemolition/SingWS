@@ -22,7 +22,7 @@ from pathlib import Path
 sys.setswitchinterval(0.001)
 
 _GST_RUNTIME_DEBUG = {}
-APP_VERSION = "1.0.3.8"
+APP_VERSION = "1.0.3.9"
 PROCESS_STARTUP_UTC = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
 PROCESS_SESSION_UUID = str(uuid.uuid4())
 PROCESSING_NOTIFICATION_TIMEOUT_MS = 15000
@@ -34708,8 +34708,15 @@ class KaraokeApp(QWidget):
         if box is None:
             import announcement_box
             announcement_box.sweep_stale_files()
-            box = announcement_box.AnnouncementBox(
-                self.soundboard_runtime, volume=lambda: float(getattr(self, "soundboard_volume", 1.0) or 1.0), log=_diag)
+            # the pads live on the background music player (`bg_music`), not on this window
+            def runtime():
+                player = getattr(self, "bg_music", None)
+                return player.soundboard_runtime() if player is not None and hasattr(player, "soundboard_runtime") else None
+
+            def volume():
+                player = getattr(self, "bg_music", None)
+                return float(getattr(player, "soundboard_volume", 1.0) or 1.0)
+            box = announcement_box.AnnouncementBox(runtime, volume=volume, log=_diag)
             self._announce_box = box
             timer = QTimer(self)
             timer.setInterval(1000)
