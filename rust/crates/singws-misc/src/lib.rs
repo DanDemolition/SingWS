@@ -1,6 +1,9 @@
 //! Small pure rules of the app, each proven against the app's own Python by a tools/*_parity.py script.
 use serde_json::Value;
 
+pub mod announce;
+pub mod voice;
+
 pub type R<T> = Result<T, String>;
 
 /// Python `float(v)` for a JSON value: numbers and booleans convert; null, lists and mappings raise (None); text is declined.
@@ -398,4 +401,36 @@ pub fn find_mp3_pair_for_cdg(cdg_path: &str) -> String {
         }
     }
     String::new()
+}
+
+/// Python's `str.isspace()` (what `re`'s `\s` uses for text): Unicode White_Space plus the four separators U+001C..U+001F.
+fn is_py_space(c: char) -> bool {
+    c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c)
+}
+
+/// `_capitalize_singer_name(name)`: every run of non-space characters gets its first character upper-cased and the rest lower-cased
+/// (`re.sub(r"\S+", lambda m: m.group(0)[0].upper() + m.group(0)[1:].lower(), s)`). Empty input comes back as it is.
+pub fn capitalize_singer_name(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    let mut word = String::new();
+    let flush = |word: &mut String, out: &mut String| {
+        if word.is_empty() {
+            return;
+        }
+        let mut it = word.chars();
+        let first = it.next().unwrap();
+        out.extend(first.to_uppercase());
+        out.push_str(&it.as_str().to_lowercase());
+        word.clear();
+    };
+    for c in name.chars() {
+        if is_py_space(c) {
+            flush(&mut word, &mut out);
+            out.push(c);
+        } else {
+            word.push(c);
+        }
+    }
+    flush(&mut word, &mut out);
+    out
 }

@@ -106,7 +106,7 @@ def python_trace(sc: dict) -> dict:
             log.append(["diag", text])
 
     host = karafun_web_host.KaraFunWebHost(app, diag=diag)
-    host.countdown_hold_s = 0.0      # the countdown hold is a delay in WHEN the play is sent (the shadow tells Rust the player is not ready until it is sent); the rules compared here are unchanged
+    host.countdown_hold_s = sc.get("hold_s", 0.0)      # most scenarios run without the hold; the countdown stories run with it (the Rust host takes the same `hold_s`)
     service = Service()
     host.ensure_service = lambda: log.append(["ensure_service"])
     host._start_frames = lambda show=True: log.append(["start_frames"] if show else ["start_frames_hidden"])
@@ -115,7 +115,13 @@ def python_trace(sc: dict) -> dict:
     clock = [0.0]
     traces = []
 
+    holds: list = []
+
     def single_shot(ms, fn):
+        if "_hold_over" in getattr(fn, "__code__", None).co_names:
+            log.append(["hold_timer", ms])         # the countdown hold's timer (fired by an explicit "hold_over" event)
+            holds.append(fn)
+            return
         log.append(["arm_watchdog"])
         pending.append(fn)
 
@@ -157,6 +163,9 @@ def python_trace(sc: dict) -> dict:
             elif kind == "watchdog":
                 if pending:
                     pending.pop(0)()
+            elif kind == "hold_over":
+                if holds:
+                    holds.pop(0)()
             elif kind == "toggle_pause":
                 ret = host.toggle_pause()
             elif kind == "seek":
@@ -176,7 +185,7 @@ ACTIVE = {"_shadow_id": None, "active": True}
 
 
 def rust_trace(sc: dict, cli: str) -> dict:
-    p = subprocess.run([cli], input=json.dumps({"kind": "host", "events": sc["events"]}), capture_output=True, text=True, timeout=30)
+    p = subprocess.run([cli], input=json.dumps({"kind": "host", "events": sc["events"], "hold_s": sc.get("hold_s", 0.0)}), capture_output=True, text=True, timeout=30)
     return json.loads(p.stdout)
 
 
@@ -238,6 +247,32 @@ def hold_story(rng: random.Random) -> dict:
             t += 1.0
             ev.append({"ev": "status", "t": t, "message": {"playing": True, "position": 3.0, "duration": 200.0, "song": {"id": ev[0]["song_id"]}}, "world": world(rng, "ready")})
     return {"events": ev}
+
+
+def countdown_story(rng: random.Random) -> dict:
+    """The countdown hold (1.0.3.9): the play of a fresh song is sent `hold_s` after the start. Starts with the player ready or not, the player becoming ready before or after the
+    hold ends, the hold timer firing (or firing for a song that was replaced), the player erroring, the song being heard or finished meanwhile."""
+    hold = rng.choice([3.5, 3.5, 1.0, 0.0, 0.02, 0.015, 0.03, 10.0, 0.5])
+    ev, t = [], rng.choice([0.0, 100.0])
+    sid = rng.choice([3250037, 58970])
+    ev.append({"ev": "start", "t": t, "song_id": sid, "enabled": True, "key": None, "tempo": 100, "title": TITLES[0], "world": world(rng, rng.choice(["ready", "ready", "starting", "sign_in", "error"]), service_present=True)})
+    for _ in range(rng.randint(3, 9)):
+        t += rng.choice([0.0, 0.1, 0.5, 1.0, 2.0, 3.4, 3.5, 3.5, 3.52, 3.53, 4.0, 10.0, 30.0])
+        kind = rng.choice(["ready", "ready", "hold_over", "hold_over", "hold_over", "sign_in", "error", "status", "watchdog", "start", "finish"])
+        if kind in ("ready", "sign_in", "error"):
+            ev.append({"ev": "service", "t": t, "state": kind, "detail": rng.choice(["", "Signed in", "no internet"]), "world": world(rng, kind)})
+        elif kind == "hold_over":
+            ev.append({"ev": "hold_over", "t": t, "world": world(rng, rng.choice(["ready", "ready", "starting"]))})
+        elif kind == "status":
+            ev.append({"ev": "status", "t": t, "message": {"playing": True, "position": 1.0, "duration": 200.0, "song": {"id": sid}}, "world": world(rng, "ready")})
+        elif kind == "watchdog":
+            ev.append({"ev": "watchdog", "t": t, "world": world(rng, rng.choice(["ready", "starting"]))})
+        elif kind == "start":
+            sid = rng.choice([3250037, 58970, 777])
+            ev.append({"ev": "start", "t": t, "song_id": sid, "enabled": True, "key": None, "tempo": 100, "title": TITLES[1], "world": world(rng, rng.choice(["ready", "starting"]), service_present=True)})
+        else:
+            ev.append({"ev": "finish", "t": t, "world": world(rng, "ready")})
+    return {"events": ev, "hold_s": hold}
 
 
 def gen(rng: random.Random) -> dict:
@@ -371,7 +406,7 @@ def main() -> int:
     py_errors: dict = {}
     first = []
     for i in range(a.cases):
-        sc = storm(rng) if i % 4 == 0 else (zero_clock(rng) if i % 7 == 1 else (hold_story(rng) if i % 5 == 2 else gen(rng)))
+        sc = countdown_story(rng) if i % 6 == 5 else storm(rng) if i % 4 == 0 else (zero_clock(rng) if i % 7 == 1 else (hold_story(rng) if i % 5 == 2 else gen(rng)))
         try:
             py = python_trace(sc)
         except Exception as error:   # a case the real code itself cannot run (e.g. a list where a number is expected): not comparable

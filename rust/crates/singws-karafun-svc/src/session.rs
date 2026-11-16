@@ -45,7 +45,11 @@ pub fn session(req: &Value) -> Value {
             if op == "svc_new" {
                 st.svc.insert(n, Machine::new(req.get("has_credentials").and_then(|x| x.as_bool()).unwrap_or(false)));
             } else {
-                st.host.insert(n, Host::new());
+                // The live shadow is fed what Python really did, and Python tells the twin the player is not ready until it has SENT the play (the hold is Python's
+                // delay), so the twin runs with no hold of its own. The hold rule is proven by tools/karafun_host_parity.py and takes over when Rust drives the player.
+                let mut host = Host::new();
+                host.hold_s = 0.0;
+                st.host.insert(n, host);
             }
             json!({"id": n})
         }

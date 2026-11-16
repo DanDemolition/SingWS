@@ -4,6 +4,8 @@
 //! Cases whose Python spelling is not modelled (string-valued numbers, non-ASCII text in a repr) are DECLINED with `Err`, never guessed.
 use serde_json::{json, Value};
 
+/// A fresh song's play is sent this long after the start (`COUNTDOWN_HOLD_S`, 1.0.3.9): the countdown animation and the background music run first.
+pub const COUNTDOWN_HOLD_S: f64 = 3.5;
 pub const NEVER_STARTED_AFTER_S: f64 = 60.0;
 /// A song asked for while the player is still starting / signing in is held this long before it is failed (`SIGN_IN_HOLD_S`, 1.0.3.8).
 pub const SIGN_IN_HOLD_S: f64 = 240.0;
@@ -38,6 +40,10 @@ struct Asked {
     /// when play was sent to the page (the 60 s start limit counts from here once it was sent)
     sent_at: Option<f64>,
     at: f64,
+    /// the earliest moment the play may be sent (`asked["play_not_before"]`)
+    play_not_before: f64,
+    /// a hold timer is already running for this song (`asked["_hold_armed"]`)
+    hold_armed: bool,
     limit: f64,
     key: i64,
     tempo: i64,
@@ -57,6 +63,10 @@ pub struct Host {
     status: Value,
     gens: u64,
     watchdogs: Vec<u64>,
+    /// generations of the running hold timers, oldest first
+    hold_timers: Vec<u64>,
+    /// seconds the play is held after a start (`countdown_hold_s`; 0 = no hold)
+    pub hold_s: f64,
     paused_at: Option<f64>,
     key_current: Option<i64>,
     tempo_current: Option<i64>,
@@ -68,6 +78,8 @@ pub enum Event<'a> {
     Status(&'a Value),
     PageError(&'a Value),
     Watchdog,
+    /// the hold timer fired (the oldest one)
+    HoldOver,
     TogglePause,
     SeekTo(f64),
     ApplyKeyTempo { key: i64, tempo: i64 },
@@ -140,6 +152,8 @@ impl Host {
             status: json!({}),
             gens: 0,
             watchdogs: vec![],
+            hold_timers: vec![],
+            hold_s: COUNTDOWN_HOLD_S,
             paused_at: None,
             key_current: None,
             tempo_current: None,
@@ -165,7 +179,7 @@ impl Host {
                 };
                 let key_i = key.unwrap_or(0);
                 self.gens += 1;
-                self.asked = Some(Asked { id, title: title.to_string(), heard: false, sent: false, sent_at: None, at: now, limit: NEVER_STARTED_AFTER_S, key: key_i, tempo: tempo_v,
+                self.asked = Some(Asked { id, title: title.to_string(), heard: false, sent: false, sent_at: None, at: now, play_not_before: now + self.hold_s.max(0.0), hold_armed: false, limit: NEVER_STARTED_AFTER_S, key: key_i, tempo: tempo_v,
                                           recoveries: 0, last_position: None, resume_at: None, gen: self.gens });
                 self.sat_since = None;
                 self.song_open = true;
@@ -183,7 +197,7 @@ impl Host {
                 o.push(json!(["log", format!("start id={id} title={} key={keytxt} tempo={tempo_v}", repr(title)?)]));
                 o.push(json!(["ensure_service"]));
                 if w.service_state == "ready" {
-                    self.send_play(w, now, &mut o);
+                    self.play_after_hold(w, now, &mut o);
                 } else if w.service_state == "error" {
                     let why = if self.state.1.is_empty() { "KaraFun's web player could not start".to_string() } else { self.state.1.clone() };
                     self.fail(&why, w, &mut o)?;
@@ -230,6 +244,21 @@ impl Host {
                 }
                 let gen = self.watchdogs.remove(0);
                 self.check(gen, w, now, &mut o)?;
+            }
+            Event::HoldOver => {
+                if self.hold_timers.is_empty() {
+                    return Ok(o);
+                }
+                let gen = self.hold_timers.remove(0);
+                let live = matches!(&self.asked, Some(a) if a.gen == gen && !a.sent && !a.heard);
+                if live {
+                    if let Some(a) = self.asked.as_mut() {
+                        a.hold_armed = false;
+                    }
+                    if w.service_present && w.service_state == "ready" {
+                        self.state_changed("ready", "", w, now, &mut o)?;
+                    }
+                }
             }
             Event::TogglePause => {
                 let ok = self.active(w) && self.asked.as_ref().map(|a| a.heard).unwrap_or(false);
@@ -308,6 +337,37 @@ impl Host {
         }
     }
 
+    /// `_hold_left`: seconds still to wait before the play is sent.
+    fn hold_left(&self, now: f64) -> f64 {
+        match &self.asked {
+            Some(a) if !a.sent => (a.play_not_before - now).max(0.0),
+            _ => 0.0,
+        }
+    }
+
+    /// `_play_after_hold`: send the play now when the hold is over, else (once) start the hold timer.
+    fn play_after_hold(&mut self, w: &World, now: f64, o: &mut Vec<Value>) {
+        if self.asked.is_none() {
+            return;
+        }
+        let left = self.hold_left(now);
+        if left <= 0.02 {
+            self.send_play(w, now, o);
+            return;
+        }
+        let gen = {
+            let a = self.asked.as_mut().unwrap();
+            if a.hold_armed {
+                return;
+            }
+            a.hold_armed = true;
+            a.gen
+        };
+        o.push(json!(["log", format!("holding the play for {}s: the countdown animation and the background music go first", format!("{left:.1}"))]));
+        o.push(json!(["hold_timer", (left * 1000.0) as i64 + 25]));
+        self.hold_timers.push(gen);
+    }
+
     fn send_play(&mut self, w: &World, now: f64, o: &mut Vec<Value>) {
         if !(w.service_present && w.has_web) {
             return;
@@ -344,7 +404,7 @@ impl Host {
             return Ok(());
         }
         if state == "ready" && !sent {
-            self.send_play(w, now, o);
+            self.play_after_hold(w, now, o);
         } else if state == "error" {
             self.fail(detail, w, o)?;
         }
@@ -606,6 +666,7 @@ pub fn host_event(h: &mut Host, e: &Value) -> R<Vec<Value>> {
         "status" => Event::Status(e.get("message").unwrap_or(&null)),
         "page_error" => Event::PageError(e.get("message").unwrap_or(&null)),
         "watchdog" => Event::Watchdog,
+        "hold_over" => Event::HoldOver,
         "toggle_pause" => Event::TogglePause,
         "seek" => Event::SeekTo(e.get("target").and_then(|x| x.as_f64()).unwrap_or(0.0)),
         "key_tempo" => Event::ApplyKeyTempo { key: int(e.get("key")).unwrap_or(0), tempo: int(e.get("tempo")).unwrap_or(100) },
@@ -618,6 +679,7 @@ pub fn host_event(h: &mut Host, e: &Value) -> R<Vec<Value>> {
 /// Replay request: `{"events": [{"ev": ..., "t": monotonic seconds, "world": {...}, ...}]}` -> `{"trace": [[action...] per event]}` or `{"declined": reason}`.
 pub fn handle(req: &Value) -> Value {
     let mut h = Host::new();
+    h.hold_s = req.get("hold_s").and_then(|x| x.as_f64()).unwrap_or(COUNTDOWN_HOLD_S);
     let mut trace = Vec::new();
     let empty = vec![];
     for e in req.get("events").and_then(|x| x.as_array()).unwrap_or(&empty) {
@@ -627,4 +689,56 @@ pub fn handle(req: &Value) -> Value {
         }
     }
     json!({"trace": trace})
+}
+
+#[cfg(test)]
+mod hold_tests {
+    use super::*;
+
+    fn world(state: &str) -> World {
+        World { service_present: true, service_state: state.into(), has_web: true, entry_current: true, active_same: true, restart_error: None }
+    }
+    fn start(h: &mut Host, state: &str, now: f64) -> Vec<Value> {
+        h.step(Event::Start { song_id: Some(7), enabled: true, key: None, tempo: None, title: "T" }, &world(state), now).unwrap()
+    }
+    fn has(o: &[Value], name: &str) -> bool {
+        o.iter().any(|a| a[0] == name)
+    }
+
+    #[test]
+    fn a_ready_player_waits_for_the_hold_then_plays_once() {
+        let mut h = Host::new();
+        let o = start(&mut h, "ready", 100.0);
+        assert!(!has(&o, "web_play"));
+        assert!(has(&o, "hold_timer"));
+        // the timer fires after the hold: the play goes out
+        let o = h.step(Event::HoldOver, &world("ready"), 103.53).unwrap();
+        assert!(has(&o, "web_play"));
+        // a second timer (none left) does nothing
+        assert!(h.step(Event::HoldOver, &world("ready"), 104.0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_player_that_becomes_ready_late_plays_at_once() {
+        let mut h = Host::new();
+        start(&mut h, "starting", 100.0);
+        let o = h.step(Event::Service { state: "ready", detail: "" }, &world("ready"), 110.0).unwrap();
+        assert!(has(&o, "web_play") && !has(&o, "hold_timer"));
+    }
+
+    #[test]
+    fn a_replaced_song_ignores_the_old_timer() {
+        let mut h = Host::new();
+        start(&mut h, "ready", 100.0);
+        start(&mut h, "starting", 101.0);
+        let o = h.step(Event::HoldOver, &world("ready"), 103.6).unwrap();
+        assert!(!has(&o, "web_play"));
+    }
+
+    #[test]
+    fn no_hold_sends_at_once() {
+        let mut h = Host::new();
+        h.hold_s = 0.0;
+        assert!(has(&start(&mut h, "ready", 100.0), "web_play"));
+    }
 }
