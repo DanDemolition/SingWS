@@ -72,6 +72,30 @@ class AnnouncementBoxTests(unittest.TestCase):
         self.engine.instances = 0; time.sleep(0.07); self.box.tick()
         self.assertEqual(self.engine.master_volume, 0.0)
 
+    def test_music_is_lowered_while_recording_and_restored(self):
+        self.assertEqual(self.box.handle("announce.hush", {"on": True}), (True, "music lowered"))
+        self.assertAlmostEqual(self.engine.master_volume, 0.8 * ab.HUSH_FACTOR)
+        self.assertEqual(self.box.handle("announce.hush", {"on": False}), (True, "music restored"))
+        self.assertAlmostEqual(self.engine.master_volume, 0.8)
+
+    def test_hush_never_outlasts_a_vanished_page(self):
+        self.box.handle("announce.hush", {"on": True})
+        self.now[0] += ab.HUSH_MAX_SECONDS + 1
+        self.box.tick()
+        self.assertAlmostEqual(self.engine.master_volume, 0.8)
+
+    def test_playing_after_a_hush_ducks_from_the_real_level(self):
+        import time
+        self.box.handle("announce.hush", {"on": True})
+        send(self.box, self.clip); self.box.handle("announce.play", {"id": "a"})
+        self.assertAlmostEqual(self.engine.master_volume, 0.8 * ab.DUCK_FACTOR)
+        self.engine.instances = 0; time.sleep(0.07); self.box.tick()
+        self.assertAlmostEqual(self.engine.master_volume, 0.8)
+
+    def test_hush_without_an_engine_still_lets_recording_go_ahead(self):
+        box = ab.AnnouncementBox(lambda: None, temp_dir=self.dir)
+        self.assertTrue(box.handle("announce.hush", {"on": True})[0])
+
     def test_no_second_play_and_discard(self):
         send(self.box, self.clip)
         self.box.handle("announce.play", {"id": "a"})

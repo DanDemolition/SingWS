@@ -29295,7 +29295,7 @@ class KaraokeApp(QWidget):
             ok, message = False, str(e)
             _diag(f"[HOST-RELAY] command failed id={request_id} action={action} reason={message}")
         worker.send_json({"type": "ack", "request_id": request_id, "ok": bool(ok), "message": str(message or "")})
-        if action in ("announce.begin", "announce.chunk", "announce.end", "announce.discard"):
+        if action in ("announce.begin", "announce.chunk", "announce.end", "announce.discard", "announce.hush"):
             return          # a clip upload is many small commands: no full state after each
         # Push a fresh full state right after a command so the UI snaps to truth.
         self._publish_host_state_ws(force=True)

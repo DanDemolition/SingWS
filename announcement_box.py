@@ -30,6 +30,8 @@ MAX_CHUNKS = 400
 MIN_RATE, MAX_RATE = 8000, 48000
 HOLD_SECONDS = 15 * 60          # an armed clip nobody played is dropped after this long
 DUCK_FACTOR = 0.5                # music level while the clip plays (-6 dB)
+HUSH_FACTOR = 0.12               # music level while the host is RECORDING (-18 dB), so the phone mic does not pick the room music up
+HUSH_MAX_SECONDS = 40.0          # never leave the music low if the page vanishes mid-recording
 DUCK_IN_MS, DUCK_OUT_MS = 200, 700
 PEAK_LIMIT = 32767 * 0.995       # the phone's limiter keeps below this; a clip that clips anyway is refused
 
@@ -74,6 +76,7 @@ class AnnouncementBox:
         self._building: dict | None = None
         self._armed: dict | None = None
         self._channel = None
+        self._hush_at: float | None = None
         self._duck: tuple | None = None      # (engine, level before, level ducked to)
 
     # ---- state ----
@@ -99,6 +102,8 @@ class AnnouncementBox:
 
     def handle(self, action: str, args: dict) -> tuple[bool, str]:
         try:
+            if action == "announce.hush":
+                return self._hush(bool(args.get("on")))
             if action == "announce.begin":
                 return self._begin(args)
             if action == "announce.chunk":
@@ -115,6 +120,19 @@ class AnnouncementBox:
             self._log(f"[ANNOUNCE] {action} refused: {exc}")
             return False, str(exc)
         return False, "unknown_announce_command"
+
+    def _hush(self, on: bool) -> tuple[bool, str]:
+        if not on:
+            self._hush_at = None
+            self._unduck_music()
+            return True, "music restored"
+        runtime = self._provider()
+        if runtime is None or not hasattr(runtime, "slide_master_volume"):
+            return True, "no music engine"      # nothing to lower; the recording still goes ahead
+        self._duck_music(runtime, HUSH_FACTOR)
+        self._hush_at = self._clock()
+        self._log("[ANNOUNCE] music lowered while recording")
+        return True, "music lowered"
 
     def _begin(self, args: dict) -> tuple[bool, str]:
         self.discard()
@@ -192,17 +210,19 @@ class AnnouncementBox:
             raise
         a["wav"] = b""
         self._channel = channel
+        self._hush_at = None
+        self._unduck_music()               # leave the recording level first, then duck for the clip
         self._duck_music(runtime)
         self._log(f"[ANNOUNCE] playing id={a['id']} {a['seconds']:.1f}s; the file is already deleted")
         return True, "playing"
 
     # ---- finishing ----
 
-    def _duck_music(self, engine) -> None:
+    def _duck_music(self, engine, factor: float = DUCK_FACTOR) -> None:
         try:
             before = float(engine.master_volume)
             if self._duck is None and before > 0.0:
-                ducked = before * DUCK_FACTOR
+                ducked = before * factor
                 engine.slide_master_volume(ducked, DUCK_IN_MS)
                 self._duck = (engine, before, ducked)
         except Exception:
@@ -232,6 +252,10 @@ class AnnouncementBox:
     def tick(self) -> None:
         """Called by a timer: release the engine slot once the clip has finished, and drop an expired armed clip."""
         self._expire()
+        if self._hush_at is not None and self._clock() - self._hush_at > HUSH_MAX_SECONDS:
+            self._hush_at = None
+            self._unduck_music()
+            self._log("[ANNOUNCE] recording hush timed out; music restored")
         ch = self._channel
         if ch is not None and not ch.is_playing():
             self._close_channel()
