@@ -64,6 +64,10 @@ if settingsmig_bin.is_file() and "arm64" in subprocess.getoutput(f"/usr/bin/lipo
 songend_bin = project_root / "native" / "singws_songend" / "arm64" / "singws-songend"
 if songend_bin.is_file() and "arm64" in subprocess.getoutput(f"/usr/bin/lipo -archs '{songend_bin}'"):
     binaries.append((str(songend_bin), "."))
+# Rust KaraFun driver (rust/build_karafun_svc.sh): runs the KaraFun song and sign-in machines when karafun_web_engine=rust. Optional: without it the Python host is used.
+karafun_svc_bin = project_root / "native" / "singws_karafun_svc" / "arm64" / "singws-karafun-svc"
+if karafun_svc_bin.is_file() and "arm64" in subprocess.getoutput(f"/usr/bin/lipo -archs '{karafun_svc_bin}'"):
+    binaries.append((str(karafun_svc_bin), "."))
 # Rust KaraFun display program (rust/build_karafun_display.sh): KaraFun's web player in Chromium (CEF), drawn on the graphics chip. Required for KaraFun songs.
 # Chromium's graphics libraries sit beside it (it looks for them there); Chromium's framework itself is fetched once, after the user agrees.
 karafun_display_dir = project_root / "native" / "singws_karafun_display" / "arm64"
