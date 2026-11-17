@@ -74,6 +74,11 @@ pub struct Host {
 
 pub enum Event<'a> {
     Start { song_id: Option<i64>, enabled: bool, key: Option<i64>, tempo: Option<&'a Value>, title: &'a str },
+    /// The first half of `Start`, up to and including the `ensure_service` effect: the caller carries that effect out (the set-up runs and the service reports states), then sends
+    /// `StartBranch` with a `World` that shows the service's state AFTER the set-up, as the Python reads it. `Start` is both halves in one step (the replay tools).
+    StartPrefix { song_id: Option<i64>, enabled: bool, key: Option<i64>, tempo: Option<&'a Value>, title: &'a str },
+    /// The second half of `Start` (nothing happens when no song was asked for).
+    StartBranch,
     Service { state: &'a str, detail: &'a str },
     Status(&'a Value),
     PageError(&'a Value),
@@ -160,10 +165,26 @@ impl Host {
         }
     }
 
+    /// What follows the set-up in `start`: play (after the hold) when the player is ready, fail when it could not start, otherwise wait; then the watchdog.
+    fn start_branch(&mut self, w: &World, now: f64, o: &mut Vec<Value>) -> R<()> {
+        if w.service_state == "ready" {
+            self.play_after_hold(w, now, o);
+        } else if w.service_state == "error" {
+            let why = if self.state.1.is_empty() { "KaraFun's web player could not start".to_string() } else { self.state.1.clone() };
+            self.fail(&why, w, o)?;
+        } else {
+            o.push(json!(["entry_status", "launching", "Waiting for KaraFun to sign in...", true]));
+        }
+        self.arm_watchdog(o);
+        o.push(json!(["returns", true]));
+        Ok(())
+    }
+
     pub fn step(&mut self, ev: Event, w: &World, now: f64) -> R<Vec<Value>> {
         let mut o = Vec::new();
+        let prefix_only = matches!(ev, Event::StartPrefix { .. });
         match ev {
-            Event::Start { song_id, enabled, key, tempo, title } => {
+            Event::Start { song_id, enabled, key, tempo, title } | Event::StartPrefix { song_id, enabled, key, tempo, title } => {
                 let id = match song_id {
                     Some(i) if enabled => i,
                     _ => {
@@ -196,16 +217,17 @@ impl Host {
                 };
                 o.push(json!(["log", format!("start id={id} title={} key={keytxt} tempo={tempo_v}", repr(title)?)]));
                 o.push(json!(["ensure_service"]));
-                if w.service_state == "ready" {
-                    self.play_after_hold(w, now, &mut o);
-                } else if w.service_state == "error" {
-                    let why = if self.state.1.is_empty() { "KaraFun's web player could not start".to_string() } else { self.state.1.clone() };
-                    self.fail(&why, w, &mut o)?;
-                } else {
-                    o.push(json!(["entry_status", "launching", "Waiting for KaraFun to sign in...", true]));
+                if !prefix_only {
+                    self.start_branch(w, now, &mut o)?;
                 }
-                self.arm_watchdog(&mut o);
-                o.push(json!(["returns", true]));
+            }
+            Event::StartBranch => {
+                if self.asked.is_some() {
+                    self.start_branch(w, now, &mut o)?;
+                } else {
+                    // the song already failed while the player was being set up (the failure was told then): `start` still answers True, as the Python does
+                    o.push(json!(["returns", true]));
+                }
             }
             Event::Service { state, detail } => {
                 self.state = (state.to_string(), detail.to_string());

@@ -195,8 +195,8 @@ pub fn run() -> i32 {
     };
     let (tx, rx) = channel::<Msg>();
     let io = Real { display_path, profile: arg("--profile"), email: arg("--email").unwrap_or_default(), child: None, stdin: None, generation: 0, tx: tx.clone() };
-    let has_credentials = credentials::clean_email(&io.email).is_some();
-    let mut d = Driver::new(io, has_credentials);
+    // the Python host always hands its service a saved-login reader (it answers None when no email is saved), so the machine always asks
+    let mut d = Driver::new(io, true);
     let start = Instant::now();
     // the app's monotonic clock: every op carries its `t`, and the driver's time is that plus what has passed since (entry times the app stores are in its clock)
     let offset = std::cell::Cell::new(0.0f64);

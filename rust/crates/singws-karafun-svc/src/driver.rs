@@ -67,6 +67,11 @@ impl<I: Io> Driver<I> {
         Driver { io, svc: Machine::new(has_credentials), host: Host::new(), timers: Vec::new(), play: Value::Null, returns: None, last_message: None, entry_current: true, active_same: true }
     }
 
+    /// Whether the display program is up (messages can only come from it then).
+    pub fn service_has_web(&self) -> bool {
+        self.svc.has_web
+    }
+
     pub fn service_state(&self) -> &str {
         &self.svc.state
     }
@@ -90,9 +95,16 @@ impl<I: Io> Driver<I> {
     pub fn start_song(&mut self, req: &StartRequest, now: f64) -> bool {
         self.play = req.play.clone();
         self.returns = None;
+        // two halves, because the Python reads the sign-in state AFTER the set-up has started: the first half ends with `ensure_service` (carried out here, in order, with
+        // the state changes it causes), the second half decides on what the service says by then
         let w = self.world();
-        let ev = HostEvent::Start { song_id: req.song_id, enabled: req.enabled, key: req.key, tempo: req.tempo.as_ref(), title: &req.title };
+        let ev = HostEvent::StartPrefix { song_id: req.song_id, enabled: req.enabled, key: req.key, tempo: req.tempo.as_ref(), title: &req.title };
         self.host_step(ev, w, now);
+        if self.returns == Some(false) {
+            return false;
+        }
+        let w = self.world();
+        self.host_step(HostEvent::StartBranch, w, now);
         self.returns.unwrap_or(false)
     }
 
@@ -137,7 +149,14 @@ impl<I: Io> Driver<I> {
     /// Run the timers that are due.
     pub fn tick(&mut self, now: f64) {
         loop {
-            let Some(pos) = self.timers.iter().position(|t| t.0 <= now) else { return };
+            // the earliest due timer first (ties: the one armed first), as real timers fire
+            let mut pos = None;
+            for (i, t) in self.timers.iter().enumerate() {
+                if t.0 <= now && pos.map_or(true, |p: usize| t.0 < self.timers[p].0) {
+                    pos = Some(i);
+                }
+            }
+            let Some(pos) = pos else { return };
             let (_, kind) = self.timers.remove(pos);
             let w = self.world();
             let ev = match kind {
@@ -410,5 +429,128 @@ mod tests {
         assert_eq!(d.next_deadline(), None);
         assert_eq!(d.io.stopped, 1);
         assert_eq!(d.service_state(), "idle");
+    }
+}
+
+/// Replay of a whole session for the parity tool (`{"kind":"driver", ...}`): a scripted clock, a fake display program and a fake saved login. Events (each with `t`):
+/// start {song_id, key, tempo, title}, msg {message}, tick, toggle_pause, seek {target}, key_tempo {key, tempo}, finish. Timers due before an event fire first, each at its
+/// own due time. The trace per event is the ordered list of what happened outside the driver, in the same spelling the Python oracle records.
+pub mod replay {
+    use super::*;
+
+    #[derive(Default)]
+    struct Rec {
+        log: Vec<Value>,
+        chromium: bool,
+        saved: String,
+    }
+
+    impl Io for Rec {
+        fn display(&mut self, c: Value) {
+            let name = c["cmd"].as_str().unwrap_or("").to_string();
+            let entry = match name.as_str() {
+                "play" => json!(["web_play", c["id"]]),
+                "pause" => json!(["web_pause"]),
+                "resume" => json!(["web_resume"]),
+                "stop" => json!(["web_stop"]),
+                "seek" => json!(["web_seek", c["seconds"]]),
+                "key" => json!(["web_set_key", c["semitones"]]),
+                "tempo" => json!(["web_set_tempo", c["percent"]]),
+                "reload" => json!(["reload"]),
+                "signin" => json!(["sign_in"]),
+                "quit" => json!(["close"]),
+                other => json!(["display", other]),
+            };
+            self.log.push(entry);
+        }
+        fn start_display(&mut self) -> Result<bool, String> {
+            self.log.push(json!(["display_start"]));
+            Ok(self.chromium)
+        }
+        fn stop_display(&mut self) {}
+        fn reset_profile(&mut self) {
+            self.log.push(json!(["reset_profile"]));
+        }
+        fn saved_login(&mut self) -> SavedLogin {
+            self.log.push(json!(["read_saved_login"]));
+            match self.saved.as_str() {
+                "found" => SavedLogin::Found,
+                "error" => SavedLogin::Error("RuntimeError".into()),
+                _ => SavedLogin::None,
+            }
+        }
+        fn login(&mut self) {
+            self.log.push(json!(["login"]));
+        }
+        fn app(&mut self, e: &Value) {
+            match e.get(0).and_then(|n| n.as_str()) {
+                Some("finish_complete") => self.log.push(json!(["finish_complete"])),
+                Some("page_message") => {
+                    let m = &e[1];
+                    let kind = m.get("type").and_then(|k| k.as_str()).unwrap_or("");
+                    if kind == "helper" && m.get("state").and_then(|x| x.as_str()) == Some("no_frames") {
+                        self.log.push(json!(["log", "NO PICTURE FRAMES from the graphics chip 8 s after the picture was shown"]));
+                        self.log.push(json!(["notify", "KaraFun: the graphics chip is giving no picture. Send the log (see the KaraFun GPU test).", "warning"]));
+                    }
+                    if kind == "log" || kind == "ready" {
+                        let text = m.get("message").and_then(|t| t.as_str()).filter(|t| !t.is_empty()).unwrap_or(kind);
+                        self.log.push(json!(["log", format!("page: {text}")]));
+                    }
+                }
+                _ => self.log.push(e.clone()),
+            }
+        }
+    }
+
+    pub fn handle(req: &Value) -> Value {
+        let io = Rec { log: Vec::new(), chromium: req.get("chromium").and_then(|x| x.as_bool()).unwrap_or(true), saved: req.get("saved").and_then(|x| x.as_str()).unwrap_or("none").to_string() };
+        let has_credentials = req.get("has_credentials").and_then(|x| x.as_bool()).unwrap_or(true);
+        let mut d = Driver::new(io, has_credentials);
+        let mut trace = Vec::new();
+        for e in req.get("events").and_then(|x| x.as_array()).unwrap_or(&vec![]) {
+            let t = e.get("t").and_then(|x| x.as_f64()).unwrap_or(0.0);
+            let mark = d.io.log.len();
+            // timers that fell due before this event fire at their own due times (their effects belong to this event's trace)
+            while let Some(due) = d.next_deadline() {
+                if due > t {
+                    break;
+                }
+                d.tick(due);
+            }
+            d.entry_current = e.get("entry_current").and_then(|x| x.as_bool()).unwrap_or(true);
+            d.active_same = e.get("active_same").and_then(|x| x.as_bool()).unwrap_or(true);
+            let mut ret = None;
+            match e.get("ev").and_then(|x| x.as_str()).unwrap_or("") {
+                "start" => {
+                    let req = StartRequest {
+                        song_id: e.get("song_id").and_then(|x| x.as_i64()),
+                        enabled: e.get("enabled").and_then(|x| x.as_bool()).unwrap_or(true),
+                        key: e.get("key").and_then(|x| x.as_i64()),
+                        tempo: e.get("tempo").filter(|x| !x.is_null()).cloned(),
+                        title: e.get("title").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                        play: json!({}),
+                    };
+                    ret = Some(d.start_song(&req, t));
+                }
+                "msg" => {
+                    if d.service_has_web() {
+                        d.on_display_message(e.get("message").unwrap_or(&Value::Null), t)
+                    }
+                }
+                "tick" => {}
+                "toggle_pause" => ret = Some(d.toggle_pause(t)),
+                "seek" => ret = Some(d.seek_to(e.get("target").and_then(|x| x.as_f64()).unwrap_or(0.0), t)),
+                "key_tempo" => {
+                    d.apply_key_tempo(e.get("key").and_then(|x| x.as_i64()).unwrap_or(0), e.get("tempo").and_then(|x| x.as_i64()).unwrap_or(100), t); // the Python answers (key, tempo) always
+                }
+                "finish" => ret = Some(d.on_finish(t)),
+                other => return json!({"declined": format!("unknown event {other}")}),
+            }
+            if let Some(r) = ret {
+                d.io.log.push(json!(["returns", r]));
+            }
+            trace.push(Value::Array(d.io.log[mark..].to_vec()));
+        }
+        json!({"trace": trace, "service": d.service_state()})
     }
 }
