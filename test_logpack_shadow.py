@@ -73,6 +73,7 @@ class Compare(unittest.TestCase):
 class RunShadow(unittest.TestCase):
     def setUp(self):
         ls._seen.clear()
+        ls._clean_noted = True   # the once-per-launch "first check clean" note must not depend on which test ran first
         self.lines = []
         self.tmp = tempfile.mkdtemp()
 

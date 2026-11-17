@@ -98,6 +98,7 @@ class Compare(unittest.TestCase):
 class Runner(unittest.TestCase):
     def setUp(self):
         reset()
+        rs._clean_noted = True   # the once-per-launch "first check clean" note must not depend on which test ran first
         self.tmp = tempfile.mkdtemp()
         self.log = []
         self.batch = [("state", {"op": "state"}, '{"type":"state","a":1}')]
