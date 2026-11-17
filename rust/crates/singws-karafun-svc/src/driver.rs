@@ -220,7 +220,11 @@ impl<I: Io> Driver<I> {
         let w = self.world();
         match kind {
             "status" => self.host_step(HostEvent::Status(m), w, now),
-            "error" => self.host_step(HostEvent::PageError(m), w, now),
+            "error" => {
+                // the song machine takes the error's TEXT (`str(message.get("message") or "")`)
+                let text = Value::String(m.get("message").map(|t| t.as_str().map(|s| s.to_string()).unwrap_or_else(|| t.to_string())).filter(|t| t != "null").unwrap_or_default());
+                self.host_step(HostEvent::PageError(&text), w, now)
+            }
             // `log` / `ready` / `helper` lines carry nothing for the song machine: the app logs them and places the picture windows
             _ => self.io.app(&json!(["page_message", m])),
         }

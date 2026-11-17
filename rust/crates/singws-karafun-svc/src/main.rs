@@ -10,6 +10,9 @@ fn answer(text: &str) -> serde_json::Value {
 }
 
 fn main() {
+    if std::env::args().any(|a| a == "--drive") {
+        std::process::exit(singws_karafun_svc::runtime::run());
+    }
     if std::env::args().any(|a| a == "--batch") {
         for line in std::io::stdin().lock().lines().map_while(Result::ok) {
             if !line.trim().is_empty() {
