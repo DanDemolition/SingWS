@@ -15,7 +15,8 @@ echo '{"type":"status","signedIn":true,"plan":"Plus","playing":false,"position":
 while IFS= read -r line; do
   echo "$line" >> "$LOG"
   case "$line" in
-    *'"cmd": "play"'*|*'"cmd":"play"'*) echo '{"type":"status","signedIn":true,"playing":true,"state":"playing","position":1.0,"duration":30.0,"song":{"id":58970}}';;
+    *'"cmd": "play"'*|*'"cmd":"play"'*) [[ $line =~ \"id\":\ *([0-9]+) ]]; echo '{"type":"status","signedIn":true,"playing":true,"state":"playing","position":1.0,"duration":30.0,"song":{"id":'"${BASH_REMATCH[1]}"'}}';;
+    *'"cmd":"endsong"'*|*'"cmd": "endsong"'*) echo '{"type":"status","signedIn":true,"playing":false,"state":"idle","position":30.0,"duration":30.0,"song":{"id":3241559}}';;
     *'"cmd":"quit"'*|*'"cmd": "quit"'*) exit 0;;
   esac
 done

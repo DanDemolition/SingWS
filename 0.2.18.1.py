@@ -57213,8 +57213,18 @@ class KaraokeApp(QWidget):
         """The KaraFun web-player host (karafun_web_host.py), made on first use."""
         host = getattr(self, "_karafun_web", None)
         if host is None:
-            import karafun_web_host
-            host = karafun_web_host.KaraFunWebHost(self, diag=_diag)
+            if str(self.settings.get("karafun_web_engine", "shadow") or "shadow") == "rust":
+                # the song logic runs in Rust (singws-karafun-svc --drive); the Python host below stays the fallback when the program is not here
+                try:
+                    import karafun_web_host_rust
+                    host = karafun_web_host_rust.make_host(self, diag=_diag)
+                    _diag(f"[KARAFUN-WEB] engine=rust: {'the Rust driver runs the player' if host is not None else 'the Rust driver is not here; using the Python host'}")
+                except Exception as error:
+                    host = None
+                    _diag(f"[KARAFUN-WEB] engine=rust could not start ({error!r}); using the Python host")
+            if host is None:
+                import karafun_web_host
+                host = karafun_web_host.KaraFunWebHost(self, diag=_diag)
             self._karafun_web = host
         return host
 

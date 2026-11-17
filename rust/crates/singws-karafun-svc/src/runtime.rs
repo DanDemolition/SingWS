@@ -97,9 +97,20 @@ impl Io for Real {
         }
     }
     fn reset_profile(&mut self) {
-        if let Some(p) = &self.profile {
-            let aside = format!("{p}.crashed-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0));
-            let _ = std::fs::rename(p, aside);
+        // as the Python does: only one `<profile>.engine-crash-*` copy is ever kept, the saved profile is moved beside it
+        let Some(p) = &self.profile else { return };
+        let path = std::path::Path::new(p);
+        let (Some(parent), Some(name)) = (path.parent(), path.file_name().and_then(|n| n.to_str())) else { return };
+        if let Ok(entries) = std::fs::read_dir(parent) {
+            for e in entries.flatten() {
+                if e.file_name().to_string_lossy().starts_with(&format!("{name}.engine-crash-")) {
+                    let _ = std::fs::remove_dir_all(e.path());
+                }
+            }
+        }
+        if path.exists() {
+            let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+            let _ = std::fs::rename(path, parent.join(format!("{name}.engine-crash-{stamp}")));
         }
     }
     fn saved_login(&mut self) -> SavedLogin {
@@ -161,6 +172,10 @@ fn op(d: &mut Driver<Real>, v: &Value, now: f64) -> bool {
             }
             None
         }
+        "retry_service" => {
+            d.ensure_service(now);
+            None
+        }
         "shutdown" => {
             d.shutdown(now);
             return false;
@@ -183,7 +198,9 @@ pub fn run() -> i32 {
     let has_credentials = credentials::clean_email(&io.email).is_some();
     let mut d = Driver::new(io, has_credentials);
     let start = Instant::now();
-    let now = || start.elapsed().as_secs_f64();
+    // the app's monotonic clock: every op carries its `t`, and the driver's time is that plus what has passed since (entry times the app stores are in its clock)
+    let offset = std::cell::Cell::new(0.0f64);
+    let now = || offset.get() + start.elapsed().as_secs_f64();
     let app_tx = tx.clone();
     std::thread::spawn(move || {
         for line in std::io::stdin().lock().lines().map_while(Result::ok) {
@@ -200,6 +217,9 @@ pub fn run() -> i32 {
         let wait = d.next_deadline().map(|t| Duration::from_secs_f64((t - now()).clamp(0.0, 3600.0))).unwrap_or(Duration::from_secs(3600));
         match rx.recv_timeout(wait) {
             Ok(Msg::App(v)) => {
+                if let Some(t) = v.get("t").and_then(|x| x.as_f64()) {
+                    offset.set(t - start.elapsed().as_secs_f64());
+                }
                 if !op(&mut d, &v, now()) {
                     return 0;
                 }
@@ -208,7 +228,12 @@ pub fn run() -> i32 {
                 d.shutdown(now());
                 return 0;
             }
-            Ok(Msg::Display(v)) => d.on_display_message(&v, now()),
+            Ok(Msg::Display(v)) => {
+                if v.get("type").and_then(|t| t.as_str()) == Some("status") {
+                    out(json!({"ev": "status", "message": v})); // the app keeps the latest status and feeds its own log-only shadows from it
+                }
+                d.on_display_message(&v, now());
+            }
             Ok(Msg::DisplayGone(g)) => {
                 if g == d.io.generation {
                     d.io.child = None;

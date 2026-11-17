@@ -193,7 +193,7 @@ impl<I: Io> Driver<I> {
     }
 
     /// `ensure_service`: start the set-up once (idle / error / needs_browser), then run the set-up the way the Python thread does.
-    fn ensure_service(&mut self, now: f64) {
+    pub fn ensure_service(&mut self, now: f64) {
         if !matches!(self.svc.state.as_str(), "idle" | "error" | "needs_browser") {
             return;
         }
@@ -256,6 +256,8 @@ impl<I: Io> Driver<I> {
                 self.io.display(c);
             }
             "web_stop" => self.io.display(json!({"cmd": "stop"})),
+            "web_pause" => self.io.display(json!({"cmd": "pause"})),
+            "web_resume" => self.io.display(json!({"cmd": "resume"})),
             "web_seek" => self.io.display(json!({"cmd": "seek", "seconds": arg(1)})),
             "web_set_key" => self.io.display(json!({"cmd": "key", "semitones": arg(1)})),
             "web_set_tempo" => self.io.display(json!({"cmd": "tempo", "percent": arg(1)})),
@@ -365,6 +367,20 @@ mod tests {
         }
         let n: Vec<String> = d.io.app.iter().map(|e| e.to_string()).collect();
         assert!(n.iter().any(|x| x.contains("never started") || x.contains("failed") || x.contains("did not start")), "{n:?}");
+    }
+
+    #[test]
+    fn pause_and_resume_reach_the_player() {
+        let mut d = driver();
+        d.start_song(&req(), 0.0);
+        d.on_display_message(&status(true, false, 0.0, 0.0), 0.5);
+        d.tick(5.0);
+        d.on_display_message(&status(true, true, 1.0, 120.0), 5.5);
+        assert!(d.toggle_pause(6.0));
+        d.on_display_message(&status(true, false, 2.0, 120.0), 6.5);
+        assert!(d.toggle_pause(7.0));
+        let cmds: Vec<String> = d.io.display.iter().filter_map(|c| c["cmd"].as_str().map(|s| s.to_string())).collect();
+        assert_eq!(cmds, ["play", "pause", "resume"], "{cmds:?}");
     }
 
     #[test]
