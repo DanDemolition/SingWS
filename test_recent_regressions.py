@@ -1472,7 +1472,7 @@ class KaraFunHistoryReAddTests(unittest.TestCase):
     never present in the library index or tracks list, so the local-only
     lookup in _resolve_history_song_track always failed and the operator got
     "Could not match this history song to a local track". The stored catalog
-    id is a display reference: playback drives KaraFun.app by artist/title
+    id is a display reference: playback plays through the KaraFun web player by artist/title
     search, so an id the server has since renumbered must not block the add.
     """
 

@@ -39061,7 +39061,7 @@ class KaraokeApp(QWidget):
 
         These songs have no local library row: their path is the synthetic
         "karafun_streaming:<id>" reference, which is never indexed. Playback
-        drives KaraFun.app by artist/title search, so the stored catalog id is
+        plays through the KaraFun web player by artist/title search, so the stored catalog id is
         a display reference only and a catalog that has renumbered since does
         not prevent the add.
         """

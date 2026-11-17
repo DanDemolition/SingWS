@@ -7,7 +7,7 @@
 //! "cross-origin isolated", which KaraFun asks for in a way WebKit doesn't
 //! support yet (Cross-Origin-Embedder-Policy: credentialless). Chromium does.
 //!
-//! The page is driven as before (karafun_mac.rs), over Chromium's DevTools
+//! The page is driven as before, over Chromium's DevTools
 //! protocol: the page script's messages come back through a binding
 //! (`singwsIpc`). A few commands the screencast used are taken here instead:
 //! the page size, and starting and stopping the frames.

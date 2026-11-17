@@ -278,100 +278,6 @@ fn mac_identity(r: &mut Report) {
     r.check("keep awake", if began && active { "pass" } else { "warn" }, if began && active { "an assertion was taken and released" } else { "could not take a keep-awake assertion" });
 }
 
-fn describe_script_error(err: &str) -> String {
-    if err.contains("-25211") || err.contains("not allowed assistive") {
-        "Accessibility is not granted to this app (-25211)".into()
-    } else if err.contains("-1743") || err.contains("not authorized to send Apple events") {
-        "Automation is not granted: allow this app to control System Events / KaraFun (-1743)".into()
-    } else if err == "timeout" {
-        "the script did not answer in time".into()
-    } else {
-        err.chars().take(160).collect()
-    }
-}
-
-/// A script that timed out is "not tested" (an unanswered macOS permission prompt looks exactly like this), any other error is a real failure.
-fn script_error_status(err: &str) -> &'static str {
-    if err == "timeout" { "warn" } else { "fail" }
-}
-
-fn karafun(r: &mut Report) {
-    let app = ["/Applications/KaraFun.app", "~/Applications/KaraFun.app"].iter().map(|p| p.replace('~', &std::env::var("HOME").unwrap_or_default()))
-        .find(|p| std::path::Path::new(p).exists());
-    let version = app.as_ref().and_then(|a| out("defaults", &["read", &format!("{a}/Contents/Info"), "CFBundleShortVersionString"]));
-    r.fact("karafun_installed", json!(app.is_some()));
-    r.fact("karafun_version", json!(version.clone().unwrap_or_default()));
-    match &app {
-        Some(a) => r.check("KaraFun installed", "pass", format!("{a} version {}", version.clone().unwrap_or_else(|| "?".into()))),
-        None => {
-            r.check("KaraFun installed", "warn", "KaraFun.app is not in /Applications or ~/Applications (KaraFun songs cannot be tested on this Mac)");
-            return;
-        }
-    }
-    // 1. can this process drive System Events at all
-    let t = Instant::now();
-    // the FIRST Apple event of a new app identity makes macOS ask "allow this app to control System Events?": give the operator a minute to answer it
-    let probe = singws_mac::run_applescript("tell application \"System Events\" to return (count of application processes)", Duration::from_secs(60));
-    if !probe.ok {
-        r.check("System Events (shell)", script_error_status(&probe.err), if probe.err == "timeout" {
-            "no answer within 60 s: if macOS asked whether this app may control System Events (Automation), click Allow and run this again".to_string()
-        } else {
-            describe_script_error(&probe.err)
-        });
-        return;
-    }
-    r.check("System Events (shell)", "pass", format!("answered in {} ms ({} processes)", t.elapsed().as_millis(), probe.out));
-    // 2. is KaraFun running, and what are its windows (read only, the same questions the Python app's monitor asks)
-    let running = singws_mac::run_applescript(
-        "tell application \"System Events\"\nset m to every application process whose name contains \"KaraFun\"\nif (count of m) is 0 then return \"not running\"\nreturn name of item 1 of m\nend tell",
-        Duration::from_secs(15));
-    if !running.ok {
-        r.check("KaraFun process", "fail", describe_script_error(&running.err));
-        return;
-    }
-    r.fact("karafun_process", json!(running.out));
-    if running.out == "not running" {
-        r.check("KaraFun process", "warn", "KaraFun is installed but not running: start it and run this again to test its UI from the shell");
-        return;
-    }
-    r.check("KaraFun process", "pass", format!("running as \"{}\"", running.out));
-    let t = Instant::now();
-    // Fetch the list first, then count it, as the app's own scripts do: on macOS 27 the one-liner `count of (entire contents of w)` answers 0
-    // for every window while `set x to entire contents of w` returns the real list (139 elements for KaraFun, measured 2026-11-06).
-    // The cheap read first: the number of windows and of top-level UI elements of window 1 (proves Accessibility reaches KaraFun in well under a second).
-    let top = singws_mac::run_applescript(
-        "tell application \"System Events\"\ntell (first application process whose name contains \"KaraFun\")\nset n to count of windows\nif n is 0 then return \"0|0\"\nreturn (n as string) & \"|\" & (count of UI elements of window 1) as string\nend tell\nend tell",
-        Duration::from_secs(20));
-    if top.ok {
-        r.fact("karafun_ui_top", json!(top.out));
-    }
-    // The full tree is slow on an Intel Mac (the app's own KaraFun probes take 5-10 s there): give it two minutes, and a timeout is a warning, not a failure.
-    let windows = singws_mac::run_applescript(
-        "tell application \"System Events\"\ntell (first application process whose name contains \"KaraFun\")\nset n to count of windows\nif n is 0 then return \"0\"\nset elems to entire contents of window 1\nreturn (n as string) & \"|\" & (count of elems) as string\nend tell\nend tell",
-        Duration::from_secs(120));
-    let ms = t.elapsed().as_millis();
-    if !windows.ok {
-        if windows.err.contains("timeout") && top.ok {
-            r.check("KaraFun UI (shell)", "warn", format!("reading the whole window tree did not finish in 120 s, but Accessibility does reach KaraFun (windows|top-level elements = {}): the full read is just slow on this Mac", top.out));
-        } else {
-            r.check("KaraFun UI (shell)", "fail", describe_script_error(&windows.err));
-        }
-        return;
-    }
-    r.fact("karafun_ui_read_ms", json!(ms));
-    r.fact("karafun_ui", json!(windows.out));
-    let mut parts = windows.out.split('|');
-    let n: i64 = parts.next().and_then(|s| s.trim().parse().ok()).unwrap_or(0);
-    let elems: i64 = parts.next().and_then(|s| s.trim().parse().ok()).unwrap_or(0);
-    if n == 0 {
-        r.check("KaraFun UI (shell)", "warn", "KaraFun is running but shows no window (is it hidden or minimised?)");
-    } else if elems < 20 {
-        r.check("KaraFun UI (shell)", "warn", format!("{n} window(s) but only {elems} UI elements were readable ({ms} ms): KaraFun's controls may not be exposed to Accessibility"));
-    } else {
-        r.check("KaraFun UI (shell)", "pass", format!("{n} window(s), {elems} UI elements read from the front window in {ms} ms: the shell can read KaraFun's UI"));
-    }
-}
-
 fn collect() -> Report {
     let mut r = Report::new();
     platform(&mut r);
@@ -379,7 +285,6 @@ fn collect() -> Report {
     helpers(&mut r);
     mac_identity(&mut r);
     libmpv(&mut r);
-    karafun(&mut r);
     r
 }
 
