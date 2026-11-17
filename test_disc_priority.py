@@ -27,6 +27,19 @@ class DiscPriorityTests(unittest.TestCase):
             for disc_id in disc_ids
         ]
 
+    def test_acoustic_not_chosen_for_plain_request(self):
+        ms = [{"disc_id": "KV1", "title": "Valerie (Acoustic)"}, {"disc_id": "SC2", "title": "Valerie"}]
+        self.assertEqual(self.singws.pick_by_disc_priority(ms, ["KV", "SC"], "Velerie")["disc_id"], "SC2")
+
+    def test_acoustic_kept_when_requested_or_only_one(self):
+        ms = [{"disc_id": "KV1", "title": "Valerie (Acoustic)"}, {"disc_id": "SC2", "title": "Valerie"}]
+        self.assertEqual(self.singws.pick_by_disc_priority(ms, ["KV", "SC"], "Valerie (Acoustic)")["disc_id"], "KV1")
+        self.assertEqual(self.singws.pick_by_disc_priority(ms[:1], ["KV"], "Valerie")["disc_id"], "KV1")
+
+    def test_live_and_dash_variants_also_skipped(self):
+        ms = [{"disc_id": "KV1", "title": "Valerie - Live"}, {"disc_id": "KV2", "title": "Valerie [Remix]"}, {"disc_id": "ZM3", "title": "Valerie"}]
+        self.assertEqual(self.singws.pick_by_disc_priority(ms, ["KV", "ZM"], "Valerie")["disc_id"], "ZM3")
+
     def test_singer_sc_promotes_soundchoice_when_available(self):
         host = self.singws.normalize_disc_priority("Karaoke Version, ZOOM, CC, Karafun, Party Tyme, SBI, SoundChoice, SunFly")
         info = self.singws.effective_disc_priority(host, singer_brand_raw="SC")

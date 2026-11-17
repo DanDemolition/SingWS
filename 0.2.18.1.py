@@ -4885,7 +4885,36 @@ def request_preferred_disc_brand(req):
             return value
     return ""
 
-def pick_by_disc_priority(matches, priority_list=None):
+_VARIANT_TITLE_WORDS = (
+    "acoustic", "live", "remix", "demo", "unplugged", "instrumental", "karaoke version",
+    "radio edit", "extended", "reprise", "cover", "a cappella", "acapella", "stripped",
+    "piano version", "duet", "medley", "remastered live", "orchestral", "slowed", "sped up",
+)
+
+
+def _title_variant_tags(title) -> set:
+    """Variant words in a title's brackets or after a dash: "Valerie (Acoustic)" -> {"acoustic"}."""
+    import re as _re
+    text = str(title or "").lower()
+    parts = _re.findall(r"[(\[]([^)\]]*)[)\]]", text) + _re.findall(r"\s[-\u2013]\s(.*)$", text)
+    blob = " ".join(parts)
+    return {w for w in _VARIANT_TITLE_WORDS if _re.search(r"\b" + _re.escape(w) + r"\b", blob)}
+
+
+def prefer_plain_versions(matches, requested_title=""):
+    """Drop (Acoustic)/(Live)/(Remix)... versions unless the request asked for that variant.
+
+    A plain version, from any disc brand, beats a variant one, so a typo such as
+    "Velerie" never lands on "Valerie (Acoustic)" just because that disc came first.
+    If every version is a variant, they all stay.
+    """
+    wanted = _title_variant_tags(requested_title)
+    plain = [m for m in matches if _title_variant_tags(m.get("title")) <= wanted]
+    return plain or list(matches)
+
+
+def pick_by_disc_priority(matches, priority_list=None, requested_title=""):
+    matches = prefer_plain_versions(matches, requested_title)
     priorities = normalize_disc_priority(priority_list if priority_list is not None else DISC_ID_PRIORITY)
     if not priorities:
         return matches[0]
@@ -39164,7 +39193,7 @@ class KaraokeApp(QWidget):
         )
         runtime_priority = runtime_info.get("effective", [])
         try:
-            return pick_by_disc_priority(matches, runtime_priority)
+            return pick_by_disc_priority(matches, runtime_priority, title)
         except Exception:
             return matches[0] if matches else None
 
@@ -61096,7 +61125,7 @@ class KaraokeApp(QWidget):
             max_items=10,
         )
         runtime_priority = runtime_info.get("effective", [])
-        chosen = pick_by_disc_priority(matches, runtime_priority)
+        chosen = pick_by_disc_priority(matches, runtime_priority, title)
         chosen_path = str(chosen.get("path") or "")
         base, ext = os.path.splitext(chosen_path)
         ext = ext.lower()
