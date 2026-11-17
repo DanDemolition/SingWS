@@ -36953,6 +36953,7 @@ class KaraokeApp(QWidget):
         })
         if updated is None:
             return False
+        self._learn_spelling_fix(old_artist, old_title, artist, title)
         try:
             entry = self._build_queue_entry_from_track_choice({
                 "remote_request_id": rid,
@@ -51876,6 +51877,7 @@ class KaraokeApp(QWidget):
             self.post_rotation()
         except Exception:
             pass
+        self._learn_spelling_fix(old_artist, old_title, new_artist, new_title)
         self._push_remote_request_replacement(
             new_entry,
             singer_name=singer_name,
@@ -51885,6 +51887,16 @@ class KaraokeApp(QWidget):
         )
         KaraokeApp._commit_undoable_action(self, undo, "Song replaced")
         return True
+
+    @staticmethod
+    def _learn_spelling_fix(old_artist, old_title, new_artist, new_title) -> None:
+        """The host replaced a request with the same song spelled differently: remember it so the next request spelled that way needs no fixing (spelling_memory.py)."""
+        try:
+            import spelling_memory
+            if spelling_memory.learn(old_artist, old_title, new_artist, new_title):
+                _diag(f"[SPELLING] learned {old_artist!r}/{old_title!r} -> {new_artist!r}/{new_title!r}")
+        except Exception:
+            pass
 
     def _push_remote_request_replacement(self, entry, *, singer_name: str = "", old_artist: str = "", old_title: str = "", source: str = "replace_track"):
         request_id = self._queue_entry_remote_request_id(entry)
@@ -60884,6 +60896,10 @@ class KaraokeApp(QWidget):
         # formatting differences that the strict path chokes on).
         try:
             candidates = song_index.search_songs(query, limit=60, fuzzy=False)
+            if not candidates:
+                # a misspelled request finds nothing by substring: the tolerant pass (only reached when the strict one found nothing, so a burst of
+                # normal requests stays fast)
+                candidates = song_index.search_songs(query, limit=60, fuzzy=True)
         except Exception:
             candidates = []
         if not candidates:
@@ -60895,6 +60911,10 @@ class KaraokeApp(QWidget):
         req_tt = _tokens(title)
         req_at = _tokens(artist)
 
+        def _overlap(req: set, cand: set) -> int:
+            """How many requested words the candidate has, a word with a typo (rightous / righteous, cryin / crying) counting as present."""
+            return sum(1 for w in req if w in cand or any(song_index.tokens_close(w, c, 5) >= 0 for c in cand))
+
         def _score(c) -> int:
             ct = _tokens(str(c.get("title") or ""))
             ca = _tokens(str(c.get("artist") or ""))
@@ -60902,16 +60922,12 @@ class KaraokeApp(QWidget):
             # Title is the strong signal: reward how many of the requested title
             # words appear in the candidate title (all present == best).
             if req_tt:
-                if req_tt <= ct:
-                    s += 100
-                else:
-                    s += int(80 * len(req_tt & ct) / len(req_tt))
+                n = _overlap(req_tt, ct)
+                s += 100 if n == len(req_tt) else int(80 * n / len(req_tt))
             # Artist confirms it's the right performer.
             if req_at:
-                if req_at <= ca:
-                    s += 50
-                else:
-                    s += int(40 * len(req_at & ca) / len(req_at))
+                n = _overlap(req_at, ca)
+                s += 50 if n == len(req_at) else int(40 * n / len(req_at))
             return s
 
         best = max(candidates, key=_score)
@@ -60925,10 +60941,10 @@ class KaraokeApp(QWidget):
         best_tk = song_index.fuzzy_match_key(str(best.get("title") or ""))
         same = [
             c for c in candidates
-            if song_index.fuzzy_match_key(str(c.get("title") or "")) == best_tk
-            and song_index.artist_names_match(
-                str(c.get("artist") or ""), str(best.get("artist") or "")
-            )
+            if (song_index.fuzzy_match_key(str(c.get("title") or "")) == best_tk
+                and song_index.artist_names_match(str(c.get("artist") or ""), str(best.get("artist") or "")))
+            # near-spellings of the same song ("Todd" / "Rodd" Rundgren) are versions of it too: the disc priority chooses among all of them
+            or song_index.same_song(str(c.get("artist") or ""), str(c.get("title") or ""), str(best.get("artist") or ""), str(best.get("title") or ""))
         ]
         return same or [best]
 

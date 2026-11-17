@@ -183,6 +183,70 @@ def artist_match_keys(s: str) -> set[str]:
 def artist_names_match(left: str, right: str) -> bool:
     return bool(artist_match_keys(left) & artist_match_keys(right))
 
+
+# --- Spelling-tolerant "same song" (the automatic version picker) ---------------------------------------------------------
+# People mistype requests ("Rightous Brothers", "Cryin", "Todd Rundgren" / "Rodd Rundgren") and so do some library file names. The picker must still see every
+# disc version of the song, so two (artist, title) pairs count as the SAME song when one field matches and the other differs only by a few typos. Never both fields
+# at once: that is how "Fire" and "Fine" by two artists would be confused.
+def _dropped_g(a: str, b: str) -> bool:
+    """'cryin' / 'crying', 'doin' / 'doing': a dropped final g is a spelling variant, not a typo."""
+    return (a.endswith("in") and a + "g" == b) or (b.endswith("in") and b + "g" == a)
+
+def tokens_close(a: str, b: str, min_len: int) -> int:
+    """Typos between two words: 0 = the same, 1..2 = close enough, -1 = different words. Short words (below min_len) must match exactly."""
+    if a == b or _dropped_g(a, b):
+        return 0
+    n = min(len(a), len(b))
+    if n < min_len:
+        return -1
+    maxd = 2 if n >= 9 else 1
+    d = _bounded_levenshtein(a, b, maxd)
+    return d if d <= maxd else -1
+
+def phrase_close(left: str, right: str, *, min_len: int, max_typos: int = 2) -> bool:
+    """The two phrases have the same words (in order, after the usual identity clean-up) except for at most `max_typos` typos in words of `min_len`+ letters."""
+    a, b = _identity_tokens(left), _identity_tokens(right)
+    if not a or len(a) != len(b):
+        return False
+    typos = 0
+    for x, y in zip(a, b):
+        d = tokens_close(x, y, min_len)
+        if d < 0:
+            return False
+        typos += d
+    return typos <= max_typos
+
+def _artist_close(left: str, right: str, min_len: int) -> bool:
+    """Same artist despite typos. A one-word name needs 5+ letters ("Abba" / "Ebba" are two artists); a longer name needs one word spelled exactly right."""
+    if artist_names_match(left, right):
+        return True
+    ta, tb = _identity_tokens(left), _identity_tokens(right)
+
+    def close(x: List[str], y: List[str]) -> bool:
+        if not x or len(x) != len(y):
+            return False
+        if len(x) == 1:
+            return phrase_close(" ".join(x), " ".join(y), min_len=max(min_len, 5))
+        return any(p == q for p, q in zip(x, y)) and phrase_close(" ".join(x), " ".join(y), min_len=min_len)
+    if close(ta, tb):
+        return True
+    if len(ta) == 2 and close(list(reversed(ta)), tb):
+        return True                      # "Rundgren Todd" for "Todd Rundgren"
+    return len(tb) == 2 and close(ta, list(reversed(tb)))
+
+def same_song(artist_a: str, title_a: str, artist_b: str, title_b: str) -> bool:
+    """Same song despite typos: an identical artist with a title that differs by typos (words of 5+ letters), or an identical title with an artist that differs by typos
+    (words of 4+ letters). Identical on both counts is the plain tolerant match that already existed."""
+    title_same = fuzzy_match_key(title_a) == fuzzy_match_key(title_b)
+    artist_same = artist_names_match(artist_a, artist_b)
+    if title_same and artist_same:
+        return True
+    if artist_same:
+        return phrase_close(title_a, title_b, min_len=5)
+    if title_same:
+        return _artist_close(artist_a, artist_b, 4)
+    return False
+
 def _get_track_path(track: Dict[str, Any]) -> str:
     return str(track.get("path") or track.get("file") or "")
 
@@ -767,7 +831,12 @@ def find_by_artist_title(artist: str, title: str, *, dbfile: Optional[Path]=None
     dbfile = dbfile or db_path()
     if not dbfile.exists():
         return []
-    cache_key = (*_db_signature(dbfile), "artist_title", normalize_text(artist), normalize_text(title))
+    try:
+        import spelling_memory
+        learned_version = spelling_memory.version()
+    except Exception:
+        spelling_memory, learned_version = None, 0
+    cache_key = (*_db_signature(dbfile), "artist_title", normalize_text(artist), normalize_text(title), learned_version)
     cached = _cache_get(_LOOKUP_CACHE, cache_key)
     if cached is not None:
         return _copy_rows(cached)
@@ -799,6 +868,37 @@ def find_by_artist_title(artist: str, title: str, *, dbfile: Optional[Path]=None
             # Older DBs without *_norm columns retain their exact results until
             # the next explicit index rebuild performs the schema migration.
             pass
+
+    # Misspellings ("Rightous Brothers", "Cryin", "Rodd Rundgren"): every near-spelling of the same song joins the set, so the automatic version picker chooses
+    # the best disc among ALL of them. Then whatever the host taught us about this request's spelling (spelling_memory).
+    try:
+        seen = {str(row["path"] or "") for row in rows}
+        pairs = [(artist, title)]
+        if spelling_memory is not None:
+            learned = spelling_memory.lookup(artist, title)
+            if learned and learned != (artist, title):
+                pairs.append(learned)
+        for a, t in pairs:
+            if a is not artist or t is not title:
+                for row in con.execute("SELECT * FROM songs WHERE LOWER(artist) = LOWER(?) AND LOWER(title) = LOWER(?)", (a, t)).fetchall():
+                    if str(row["path"] or "") not in seen:
+                        seen.add(str(row["path"] or ""))
+                        rows.append(row)
+            keys = artist_match_keys(a)
+            if keys:
+                marks = ",".join("?" for _ in keys)
+                for row in con.execute(f"SELECT * FROM songs WHERE artist_norm IN ({marks})", sorted(keys)).fetchall():
+                    if str(row["path"] or "") not in seen and same_song(a, t, str(row["artist"] or ""), str(row["title"] or "")):
+                        seen.add(str(row["path"] or ""))
+                        rows.append(row)
+            tkey = fuzzy_match_key(t)
+            if tkey:
+                for row in con.execute("SELECT * FROM songs WHERE title_norm = ?", (tkey,)).fetchall():
+                    if str(row["path"] or "") not in seen and same_song(a, t, str(row["artist"] or ""), str(row["title"] or "")):
+                        seen.add(str(row["path"] or ""))
+                        rows.append(row)
+    except sqlite3.OperationalError:
+        pass
 
     con.close()
     result = [dict(r) for r in rows]

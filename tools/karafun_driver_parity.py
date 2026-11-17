@@ -88,6 +88,8 @@ def python_trace(sc: dict) -> dict:
             log.append(["close"])
             if state["web"] is self:
                 state["web"] = None
+            if state.get("in_recover") and state.get("restart_error"):
+                raise RuntimeError(state["restart_error"])
         def play(self, song_id, query=None, queries=None, artist="", title=""): log.append(["web_play", song_id])
         def pause(self): log.append(["web_pause"])
         def resume(self): log.append(["web_resume"])
@@ -145,6 +147,16 @@ def python_trace(sc: dict) -> dict:
     host.enabled = lambda: True
     host._start_frames = lambda show=True: log.append(["start_frames"] if show else ["start_frames_hidden"])
     host._stop_frames = lambda: log.append(["stop_frames"])
+    real_recover = host._recover
+
+    def recover(why):
+        state["in_recover"] = True
+        try:
+            real_recover(why)
+        finally:
+            state["in_recover"] = False
+
+    host._recover = recover
     host._ask_for_browser = lambda: None            # the dialog is the app's; the machine's answer to "needs_browser" is to wait
 
     def saved_login():
@@ -188,14 +200,16 @@ def python_trace(sc: dict) -> dict:
             mark = len(log)
             fire_due(e["t"])
             clock[0] = e["t"]
+            after_timers = len(log)       # what the timers that fell due before this event did stays in its trace
             state["entry_current"] = e.get("entry_current", True)
+            state["restart_error"] = e.get("restart_error")
             app._active_external_karafun = ACTIVE if e.get("active_same", True) else OTHER_ACTIVE
             kind = e["ev"]
             ret = None
             if kind == "start":
                 entry = Entry()
                 entry["title_for_test"] = e["title"]
-                del log[mark:]
+                del log[after_timers:]       # building the entry is the test's, not the host's
                 prev, state["entry"] = state["entry"], entry
                 app._active_external_karafun = ACTIVE
                 ret = host.start(entry, key=e["key"], tempo_percent=e["tempo"], song_path=f"karafun_streaming:kf_{e['song_id']}")
@@ -272,6 +286,8 @@ def gen(rng: random.Random) -> dict:
             ev["entry_current"] = False
         if rng.random() < 0.03:
             ev["active_same"] = False
+        if rng.random() < 0.05:
+            ev["restart_error"] = rng.choice(["the player would not close", "x" * 40, "boom"])
         sc["events"].append(ev)
 
     add(ev="start", song_id=asked, key=rng.choice([0, 0, 2, -3, 5]), tempo=rng.choice([None, 100, 100, 110, 90]), title=rng.choice(TITLES))

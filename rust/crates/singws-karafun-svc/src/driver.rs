@@ -26,6 +26,11 @@ pub trait Io {
     fn saved_login(&mut self) -> SavedLogin;
     /// Send the saved login to the page (`login` command with the email and password the Io holds).
     fn login(&mut self);
+    /// Whether stopping and restarting the player right now would FAIL, and why (Python: `service.stop()` raising during a recovery). The song machine then gives up on
+    /// the song with "could not be restarted" instead of waiting for a player that is not coming back. Read before every step; most Ios never fail.
+    fn restart_error(&mut self) -> Option<String> {
+        None
+    }
     /// An effect only the app can perform: `entry_set`, `entry_status`, `entry_wall`, `entry_pop`, `notify`, `fade_bg`, `update_queue`, `save`,
     /// `start_frames`, `start_frames_hidden`, `stop_frames`, `show_key_tempo`, `verified_duration`, `finish_complete`, `diag`, `log`, ...
     fn app(&mut self, effect: &Value);
@@ -85,8 +90,9 @@ impl<I: Io> Driver<I> {
         self.timers.iter().map(|t| t.0).fold(None, |m, t| Some(m.map_or(t, |x: f64| x.min(t))))
     }
 
-    fn world(&self) -> World {
-        World { service_present: true, service_state: self.svc.state.clone(), has_web: self.svc.has_web, entry_current: self.entry_current, active_same: self.active_same, restart_error: None }
+    fn world(&mut self) -> World {
+        let restart_error = self.io.restart_error();
+        World { service_present: true, service_state: self.svc.state.clone(), has_web: self.svc.has_web, entry_current: self.entry_current, active_same: self.active_same, restart_error }
     }
 
     // ---- what the app asks for
@@ -306,6 +312,7 @@ mod tests {
         logins: u32,
         saved: Option<SavedLogin>,
         chromium_here: bool,
+        restart_error: Option<String>,
     }
 
     impl Io for Fake {
@@ -313,6 +320,7 @@ mod tests {
         fn start_display(&mut self) -> Result<bool, String> { self.started += 1; Ok(self.chromium_here) }
         fn stop_display(&mut self) { self.stopped += 1; }
         fn reset_profile(&mut self) {}
+        fn restart_error(&mut self) -> Option<String> { self.restart_error.clone() }
         fn saved_login(&mut self) -> SavedLogin { self.saved.clone().unwrap_or(SavedLogin::None) }
         fn login(&mut self) { self.logins += 1; }
         fn app(&mut self, e: &Value) { self.app.push(e.clone()); }
@@ -368,10 +376,33 @@ mod tests {
         assert_eq!(d.io.display.iter().filter(|c| c["cmd"] == "play").count(), 1);
         d.on_display_message(&status(true, true, 1.0, 10.0), 5.5);
         d.on_display_message(&status(true, true, 9.9, 10.0), 14.5);
+        assert_eq!(names(&d.io.app).iter().filter(|n| *n == "finish_complete").count(), 0, "not finished while it still plays");
+        // stopped at the end: the song is complete, exactly once, and the picture leaves
         d.on_display_message(&status(true, false, 10.0, 10.0), 15.0);
-        d.tick(20.0);
         let n = names(&d.io.app);
-        assert!(n.iter().any(|x| x == "finish_complete") || n.iter().any(|x| x == "entry_status"), "the song is finished for the app: {n:?}");
+        assert_eq!(n.iter().filter(|x| *x == "finish_complete").count(), 1, "{n:?}");
+        // the player keeps saying the same thing: the song is not completed again
+        d.on_display_message(&status(true, false, 10.0, 10.0), 15.5);
+        d.tick(20.0);
+        assert_eq!(names(&d.io.app).iter().filter(|x| *x == "finish_complete").count(), 1);
+        // the app's own finish then stops the player and clears the picture
+        assert!(d.on_finish(16.0), "a web song was open, so the app may bring its slideshow back");
+        assert_eq!(d.io.display.last().map(|c| c["cmd"].clone()), Some(json!("stop")), "{:?}", d.io.display);
+        assert_eq!(names(&d.io.app).last().map(|s| s.as_str()), Some("stop_frames"), "the picture leaves after the stop: {:?}", names(&d.io.app));
+    }
+
+    #[test]
+    fn a_player_that_cannot_be_restarted_fails_the_song_instead_of_waiting() {
+        let mut d = driver();
+        d.start_song(&req(), 0.0);
+        d.on_display_message(&status(true, false, 0.0, 0.0), 0.5);
+        d.tick(5.0);
+        d.on_display_message(&status(true, true, 1.0, 120.0), 5.5);
+        d.io.restart_error = Some("the player would not close".into());
+        d.on_display_message(&json!({"type": "error", "message": "KaraFun's web player stopped"}), 8.0);
+        let text: Vec<String> = d.io.app.iter().map(|e| e.to_string()).collect();
+        assert!(text.iter().any(|t| t.contains("could not be restarted")), "{text:?}");
+        assert!(names(&d.io.app).iter().any(|n| n == "update_queue"), "the failed song is shown as failed");
     }
 
     #[test]
@@ -443,6 +474,7 @@ pub mod replay {
         log: Vec<Value>,
         chromium: bool,
         saved: String,
+        restart: Option<String>,
     }
 
     impl Io for Rec {
@@ -468,6 +500,9 @@ pub mod replay {
             Ok(self.chromium)
         }
         fn stop_display(&mut self) {}
+        fn restart_error(&mut self) -> Option<String> {
+            self.restart.clone()
+        }
         fn reset_profile(&mut self) {
             self.log.push(json!(["reset_profile"]));
         }
@@ -503,7 +538,7 @@ pub mod replay {
     }
 
     pub fn handle(req: &Value) -> Value {
-        let io = Rec { log: Vec::new(), chromium: req.get("chromium").and_then(|x| x.as_bool()).unwrap_or(true), saved: req.get("saved").and_then(|x| x.as_str()).unwrap_or("none").to_string() };
+        let io = Rec { log: Vec::new(), chromium: req.get("chromium").and_then(|x| x.as_bool()).unwrap_or(true), saved: req.get("saved").and_then(|x| x.as_str()).unwrap_or("none").to_string(), restart: None };
         let has_credentials = req.get("has_credentials").and_then(|x| x.as_bool()).unwrap_or(true);
         let mut d = Driver::new(io, has_credentials);
         let mut trace = Vec::new();
@@ -519,6 +554,7 @@ pub mod replay {
             }
             d.entry_current = e.get("entry_current").and_then(|x| x.as_bool()).unwrap_or(true);
             d.active_same = e.get("active_same").and_then(|x| x.as_bool()).unwrap_or(true);
+            d.io.restart = e.get("restart_error").and_then(|x| x.as_str()).map(|x| x.to_string());
             let mut ret = None;
             match e.get("ev").and_then(|x| x.as_str()).unwrap_or("") {
                 "start" => {

@@ -463,7 +463,10 @@ impl Host {
         o.push(json!(["notify", "KaraFun's player stopped: restarting it and resuming the song.", "warning"]));
         o.push(json!(["service_stop"]));
         if let Some(err) = &w.restart_error {
-            return self.fail(&format!("KaraFun's player could not be restarted: {err}"), w, o);
+            // the real `service.stop()` forgets its web object BEFORE it closes it, so a stop that raised leaves no player to stop in the failure path
+            let mut after_stop = w.clone();
+            after_stop.has_web = false;
+            return self.fail(&format!("KaraFun's player could not be restarted: {err}"), &after_stop, o);
         }
         o.push(json!(["service_start"]));
         self.arm_watchdog(o);

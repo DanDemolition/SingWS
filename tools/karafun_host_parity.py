@@ -69,6 +69,7 @@ def python_trace(sc: dict) -> dict:
         def stop(self):
             log.append(["service_stop"])
             if self.fail:
+                self.web = None          # as the real `KaraFunWebService.stop()`: it forgets its web object before closing it, so a close that raises leaves none
                 raise RuntimeError(self.fail)
         def start(self): log.append(["service_start"])
 
