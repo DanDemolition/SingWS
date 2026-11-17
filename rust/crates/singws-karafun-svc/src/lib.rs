@@ -11,6 +11,7 @@ pub mod matching;
 pub mod top100;
 pub mod host;
 pub mod session;
+pub mod driver;
 
 /// Seconds after the post-login reload during which the old page's statuses are ignored (`RELOAD_SETTLE_S`).
 pub const RELOAD_SETTLE_S: f64 = 8.0;
