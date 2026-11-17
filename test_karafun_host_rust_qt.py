@@ -45,21 +45,29 @@ def _real_question(parent, title, text, buttons, default):
     box.setText(text)
     box.setStandardButtons(buttons)
     box.setDefaultButton(default)
-    QTimer.singleShot(15000, box.reject)
+    safety = QTimer(box)                      # a timer object, not QTimer.singleShot (another test once left that one replaced for the whole process)
+    safety.setSingleShot(True)
+    safety.timeout.connect(box.reject)
+    safety.start(15000)
     return QMessageBox.StandardButton(box.exec())
 
 
 def click_dialog(label_text):
     """Find the open QMessageBox and click the button with this text, like the user."""
+    timer = QTimer(_qapp)
+    timer.setInterval(50)
+
     def go():
         for w in QApplication.topLevelWidgets():
             if isinstance(w, QMessageBox) and w.isVisible():
                 for b in w.buttons():
                     if b.text().replace("&", "") == label_text:
+                        timer.stop()
+                        timer.deleteLater()
                         b.click()
                         return
-        QTimer.singleShot(50, go)
-    QTimer.singleShot(50, go)
+    timer.timeout.connect(go)
+    timer.start()
 
 
 @unittest.skipUnless(BIN.exists(), "build the svc binary first (cargo build -p singws-karafun-svc)")

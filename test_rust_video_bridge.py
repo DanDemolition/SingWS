@@ -100,9 +100,9 @@ class RustVideoBridgeTests(unittest.TestCase):
             self.assertEqual({w[len("_singws_bridge_"):] for w in objc.split() if w.startswith("_singws_bridge_")}, have - rust_only)
 
     def test_silence_scan_finds_lead_and_trail(self):
-        r = run_scenario("R = {'scan': scan(sys.argv[2])}", self.clip)["scan"]
-        ok, lead, trail, duration = r
-        self.assertEqual(ok, 1)
+        res = run_scenario("R = {'scan': scan(sys.argv[2]), 'logs': logs[-8:]}", self.clip)
+        ok, lead, trail, duration = res["scan"]
+        self.assertEqual(ok, 1, f"the scanner said: {res['logs']}")
         self.assertAlmostEqual(duration, 9.0, delta=0.05)
         self.assertAlmostEqual(lead, 2.0, delta=0.05)       # the 2 s of leading silence
         self.assertAlmostEqual(trail, 6.0, delta=0.05)      # tone ends at 6 s, 3 s of silence after it
@@ -162,9 +162,10 @@ class RustVideoBridgeTests(unittest.TestCase):
             h = L.singws_bridge_create(0, 0, sys.argv[2].encode(), None)
             wait(lambda: L.singws_bridge_duration(h) > 0)
             L.singws_bridge_destroy(h)
-            R = {'scan': scan(sys.argv[2])}
-        """, self.clip)["scan"]
-        self.assertEqual(r[0], 1)
+            R = {'scan': scan(sys.argv[2]), 'logs': logs[-8:]}
+        """, self.clip)
+        logs, r = r["logs"], r["scan"]
+        self.assertEqual(r[0], 1, f"the scanner said: {logs}")
         self.assertAlmostEqual(r[1], 2.0, delta=0.05)
 
     def test_failed_create_returns_null(self):

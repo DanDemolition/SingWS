@@ -257,8 +257,12 @@ class ShowScreenVfxTests(unittest.TestCase):
         self.assertTrue(overlay._root.property("active"))
         self.assertEqual(overlay._root.property("singerText"), "Jordan")
         self.assertEqual(int(overlay._root.property("burstSerial") or 0), before + 1)
-        QTest.qWait(2250)
-        self.assertFalse(overlay._root.property("active"))
+        # the sequence takes about 2 s of animation clock; wait for it to clear (up to 6 s) instead of a fixed sleep, which a busy machine misses
+        waited = 0
+        while overlay._root.property("active") and waited < 6000:
+            QTest.qWait(50)
+            waited += 50
+        self.assertFalse(overlay._root.property("active"), "the outro did not clear within 6 s")
         self.assertEqual(int(overlay._root.property("burstSerial") or 0), before + 2)
 
     def test_next_up_countdown_clears_overlay_state_and_restores_qr_layer(self):
