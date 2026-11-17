@@ -29,7 +29,21 @@ ENV = dict(os.environ, CARGO_TARGET_DIR=TARGET, SINGWS_KF_SVC_BIN=BIN, QT_QPA_PL
 MANIFEST = str(WORK / "crate" / "Cargo.toml")
 
 # "<file>|<snippet[:70]>|<old>-><new>" -> "equivalent: why" | "GAP: what is missing"
-NOTES: dict = {}
+NOTES: dict = {
+    'driver.rs|self.returns.unwrap_or(false)|false->true': 'equivalent: the song machine always answers `returns` after StartBranch, so the default is never used',
+    'driver.rs|if t.0 <= now && pos.map_or(true, |p: usize| t.0 < self.timers[p].0) {|<-><=': 'equivalent: two timers due at the same instant (watchdog and hold) give the same app-visible effects in either order',
+    'driver.rs|let ms = arg(1).as_f64().unwrap_or(0.0);|0.0->1.0': 'equivalent: `hold_timer` always carries its milliseconds; the default is for a malformed effect only',
+    'runtime.rs|self.generation += 1;|1->2': 'equivalent: the generation counter is only compared for equality with the number its own reader captured; 1 or 2 per spawn makes no difference',
+    'runtime.rs|self.generation += 1; // its reader\'s "gone" is then not an error|1->2': "equivalent: the generation counter is only compared for equality; any change makes the old reader's `gone` stale",
+    'runtime.rs|let stamp = std::time::SystemTime::now().duration_since(std::time::UNI|0->1': 'equivalent: the clock is never before the Unix epoch, so the 0 default never applies (and the stamp only names a backup folder)',
+    'runtime.rs|d.active_same = v.get("active_same").and_then(|x| x.as_bool()).unwrap_|true->false': 'GAP: `active_same` missing from a `world` op: no process-level scenario shows a difference; the driver replay parity covers active_same when it is given',
+    'runtime.rs|let io = Real { display_path, profile: arg("--profile"), email: arg("-|0->1': "equivalent: the first spawn's generation is 1 either way relative to itself; the initial 0 is only a starting point for the counter",
+    'runtime.rs|let mut d = Driver::new(io, true);|true->false': "GAP: reading the saved login needs a real Keychain entry; the unit tests cover the machine's saved-login path, the real reader is not exercised",
+    'runtime.rs|let wait = d.next_deadline().map(|t| Duration::from_secs_f64((t - now(|0.0->1.0': "equivalent: the clamp's lower bound only matters for a timer already due, and every loop pass runs the due timers before waiting",
+    'runtime.rs|let wait = d.next_deadline().map(|t| Duration::from_secs_f64((t - now(|3600.0->3601.0': 'equivalent: upper clamp 3600 s vs 3601 s: a timer that far out does not exist',
+    'runtime.rs|let wait = d.next_deadline().map(|t| Duration::from_secs_f64((t - now(|3600->3601': 'equivalent: idle wait with no timers 3600 s vs 3601 s: only the interval between idle wake-ups',
+    'runtime.rs|Err(RecvTimeoutError::Disconnected) => return 0,|0->1': 'equivalent: the channel cannot disconnect while the loop holds its own sender; the exit code there is unreachable',
+}
 
 END_MARKERS = ("pub mod replay", "#[cfg(test)]", "#[cfg(target_os")
 

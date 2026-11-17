@@ -452,6 +452,66 @@ mod tests {
     }
 
     #[test]
+    fn a_disabled_song_is_refused_without_starting_anything() {
+        let mut d = driver();
+        let mut r = req();
+        r.enabled = false;
+        assert!(!d.start_song(&r, 0.0), "a disabled KaraFun is not started");
+        assert_eq!(d.io.started, 0, "the display program is not started for a refused song");
+        assert!(d.io.display.is_empty());
+        assert_eq!(d.next_deadline(), None, "no timers for a refused song");
+    }
+
+    #[test]
+    fn the_app_is_told_no_when_nothing_is_open() {
+        let mut d = driver();
+        assert!(!d.toggle_pause(1.0));
+        assert!(!d.seek_to(5.0, 1.0));
+        assert!(!d.on_finish(1.0));
+        assert!(!d.apply_key_tempo(1, 100, 1.0));
+    }
+
+    #[test]
+    fn the_hold_timer_is_the_asked_number_of_milliseconds() {
+        let mut d = driver();
+        d.start_song(&req(), 0.0);
+        d.on_display_message(&status(true, false, 0.0, 0.0), 2.0);
+        // the hold armed at 2.0 s: its due time is 2.0 + whole milliseconds / 1000
+        let due = d.timers.iter().map(|t| t.0).filter(|t| *t > 2.0).fold(f64::MAX, f64::min);
+        let ms = (due - 2.0) * 1000.0;
+        assert!((ms - ms.round()).abs() < 1e-6, "{ms} ms is not a whole number of milliseconds");
+        assert!(ms > 0.0 && ms <= 3500.0, "{ms} ms");
+    }
+
+    #[test]
+    fn two_timers_due_together_fire_in_the_order_they_were_armed() {
+        let build = |order: [Timer; 2]| {
+            let mut d = driver();
+            d.start_song(&req(), 0.0);
+            d.on_display_message(&status(true, false, 0.0, 0.0), 0.5);
+            d.timers.clear();
+            for k in order {
+                d.timers.push((1.0, k));
+            }
+            d.tick(1.0);
+            d.io.app.iter().map(|e| e.to_string()).collect::<Vec<_>>()
+        };
+        let sequential = |order: [Timer; 2]| {
+            let mut d = driver();
+            d.start_song(&req(), 0.0);
+            d.on_display_message(&status(true, false, 0.0, 0.0), 0.5);
+            d.timers.clear();
+            for k in order {
+                d.timers.push((1.0, k));
+                d.tick(1.0);
+            }
+            d.io.app.iter().map(|e| e.to_string()).collect::<Vec<_>>()
+        };
+        assert_eq!(build([Timer::Watchdog, Timer::Hold]), sequential([Timer::Watchdog, Timer::Hold]));
+        assert_eq!(build([Timer::Hold, Timer::Watchdog]), sequential([Timer::Hold, Timer::Watchdog]));
+    }
+
+    #[test]
     fn shutdown_stops_the_player_and_the_timers() {
         let mut d = driver();
         d.start_song(&req(), 0.0);

@@ -4,14 +4,18 @@ import json, os, queue, stat, subprocess, tempfile, threading, time, unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-BIN = Path.home() / ".cache" / "singws-rust-target-karafun-svc" / "debug" / "singws-karafun-svc"
+BIN = Path(os.environ.get("SINGWS_KF_SVC_BIN") or Path.home() / ".cache" / "singws-rust-target-karafun-svc" / "debug" / "singws-karafun-svc")  # the mutation tool points this at the mutated build
 
 FAKE = r'''#!/bin/bash
 # fake display program: `installed` -> exit 0 (or 3 when MISSING is set); otherwise a player that is signed in, logs every command, and "plays" what it is asked
 [ "$1" = "installed" ] && { [ -n "$FAKE_MISSING" ] && exit 3; exit 0; }
 LOG="$FAKE_LOG"
+[ -n "$FAKE_ARGV" ] && echo "$@" > "$FAKE_ARGV"
 echo '{"type":"helper","state":"started"}'
-echo '{"type":"status","signedIn":true,"plan":"Plus","playing":false,"position":0,"duration":0}'
+echo 'not json at all'
+echo '123'
+if [ -n "$FAKE_SIGNEDOUT" ]; then echo '{"type":"status","signedIn":false,"playing":false,"position":0,"duration":0}'; else echo '{"type":"status","signedIn":true,"plan":"Plus","playing":false,"position":0,"duration":0}'; fi
+echo '{"type":"log","message":"second object after a non-object line"}'
 while IFS= read -r line; do
   echo "$line" >> "$LOG"
   case "$line" in
@@ -119,6 +123,141 @@ class DriverProcess(unittest.TestCase):
             except queue.Empty:
                 pass
         self.assertEqual([e for e in seen if e.get("ev") == "effect" and "declined" in json.dumps(e)], [])
+
+    def drain(self, seconds):
+        seen, end = [], time.time() + seconds
+        while time.time() < end:
+            try:
+                seen.append(self.events.get(timeout=0.2))
+            except queue.Empty:
+                pass
+        return seen
+
+    def effect_names(self, events):
+        return [e["effect"][0] for e in events if e.get("ev") == "effect"]
+
+    def test_the_loop_keeps_serving_after_every_op_and_answers_each_one(self):
+        self.start()
+        self.send(**self.SONG)
+        self.wait_for(lambda e: e.get("ev") == "done" and e["seq"] == 1 and e["ok"] is True)
+        self.send(op="world", entry_current=True, active_same=True)
+        self.send(op="finish", seq=2)
+        self.wait_for(lambda e: e.get("ev") == "done" and e["seq"] == 2)
+        self.send(op="no_such_op", seq=3)
+        done = self.wait_for(lambda e: e.get("ev") == "done" and e["seq"] == 3)
+        self.assertIs(done["ok"], False, "an unknown op is answered with ok=false")
+        self.send(op="toggle_pause", seq=4)
+        self.wait_for(lambda e: e.get("ev") == "done" and e["seq"] == 4)
+        self.assertIsNone(self.proc.poll(), "the process is still running after four ops")
+
+    def test_every_display_line_after_a_non_object_line_still_reaches_the_app(self):
+        self.start()
+        self.send(**self.SONG)
+        seen = self.drain(2.0)
+        statuses = [e for e in seen if e.get("ev") == "status"]
+        self.assertGreaterEqual(len(statuses), 1, "the display's status is passed to the app")
+        self.assertTrue(all(e["message"].get("type") == "status" for e in statuses), "only status lines are passed as status events")
+        self.assertTrue(any(e.get("ev") == "effect" and e["effect"][0] == "page_message" and e["effect"][1].get("type") == "log" for e in seen),
+                        "a line that follows a non-object line is still read: " + json.dumps(seen)[:400])
+
+    def test_state_changes_are_announced_once_each(self):
+        self.start()
+        self.send(**self.SONG)
+        seen = self.drain(2.0)
+        states = [(e["service"], tuple(e["host"])) for e in seen if e.get("ev") == "state"]
+        self.assertGreaterEqual(len(states), 2)
+        self.assertEqual(len(states), len(set(states)), f"no state is announced twice in a row: {states}")
+        self.assertTrue(all(a != b for a, b in zip(states, states[1:])))
+
+    def test_shutdown_ends_the_process_with_status_zero(self):
+        self.start()
+        self.send(op="shutdown")
+        self.assertEqual(self.proc.wait(timeout=8), 0)
+
+    def test_closing_the_input_ends_the_process_with_status_zero(self):
+        self.start()
+        self.proc.stdin.close()
+        self.assertEqual(self.proc.wait(timeout=8), 0)
+
+    def test_without_a_display_path_it_refuses_with_status_two(self):
+        p = subprocess.run([str(BIN), "--drive"], capture_output=True, text=True, timeout=10)
+        self.assertEqual(p.returncode, 2)
+
+    def test_the_profile_folder_is_handed_to_the_display_program(self):
+        argv = os.path.join(self.dir, "argv.txt")
+        prof = os.path.join(self.dir, "profile")
+        os.makedirs(prof)
+        e = dict(os.environ, FAKE_LOG=self.log, FAKE_ARGV=argv)
+        self.proc = subprocess.Popen([str(BIN), "--drive", "--display", self.fake, "--profile", prof, "--email", ""], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=e, text=True)
+        threading.Thread(target=lambda: [self.events.put(json.loads(l)) for l in self.proc.stdout if l.startswith("{")], daemon=True).start()
+        self.addCleanup(self.stop)
+        self.send(**self.SONG)
+        self.wait_for(lambda e: e.get("ev") == "done")
+        time.sleep(0.5)
+        self.assertEqual(Path(argv).read_text().split(), ["--profile", prof])
+
+    def test_a_time_stamped_op_sets_the_apps_clock(self):
+        self.start()
+        self.send(t=5000.0, **self.SONG)
+        self.wait_for(lambda e: e.get("ev") == "effect" and e["effect"][0] == "start_frames", timeout=20)
+        seen = self.drain(0.5)
+        walls = [e["effect"] for e in seen if e.get("ev") == "effect" and e["effect"][0] == "entry_set" and "clock_started_at" in e["effect"][1]]
+        times = [w[2] for w in walls]
+        self.assertTrue(times, f"no timed effect seen: {self.effect_names(seen)}")
+        self.assertTrue(any(4990 <= x <= 5100 for x in times), f"entry times are in the app's clock (about 5000): {walls}")
+
+    def test_missing_key_and_tempo_default_to_zero_and_one_hundred(self):
+        self.start()
+        self.send(**self.SONG)
+        self.wait_for(lambda e: e.get("ev") == "effect" and e["effect"][0] == "start_frames", timeout=20)
+        self.send(op="key_tempo", seq=7)
+        self.wait_for(lambda e: e.get("ev") == "done" and e["seq"] == 7)
+        time.sleep(0.4)
+        log = self.display_log()
+        keys = [c["semitones"] for c in log if c.get("cmd") == "key"]
+        tempos = [c["percent"] for c in log if c.get("cmd") == "tempo"]
+        self.assertEqual((keys[-1:], tempos[-1:]), ([0], [100]), log)
+
+    def test_world_defaults_match_saying_true_and_differ_from_saying_false(self):
+        def run(**world):
+            self.setUp()
+            self.start()
+            self.send(**self.SONG)
+            self.wait_for(lambda e: e.get("ev") == "effect" and e["effect"][0] == "start_frames", timeout=20)
+            self.send(op="world", **world)
+            self.send(op="display", command={"cmd": "quit"})
+            seen = self.drain(4.0)
+            self.stop()
+            return [e["effect"][0] for e in seen if e.get("ev") == "effect"]
+        default = run()
+        explicit_true = run(entry_current=True, active_same=True)
+        self.assertEqual(default, explicit_true)
+        self.assertNotEqual(default, run(entry_current=False, active_same=False), "the test must be able to tell false from true")
+
+    def test_the_apps_clock_offset_does_not_drift_with_the_time_the_process_has_run(self):
+        self.start()
+        time.sleep(2.0)                                   # the process has run for a while before the first timed op
+        self.send(t=5000.0, **self.SONG)
+        self.wait_for(lambda e: e.get("ev") == "effect" and e["effect"][0] == "start_frames", timeout=20)
+        seen = self.drain(0.3)
+        stamps = [e["effect"][2] for e in seen if e.get("ev") == "effect" and e["effect"][0] == "entry_set" and "clock_started_at" in e["effect"][1]]
+        self.assertTrue(stamps)
+        self.assertTrue(all(5002.5 <= x <= 5005.5 for x in stamps), f"the entry time is the app's t (5000) plus the ~3.5 s hold, not drifted by the 2 s the process had run: {stamps}")
+
+    def test_a_display_program_that_cannot_run_is_reported_as_missing_not_as_a_crash(self):
+        e = dict(os.environ, FAKE_LOG=self.log)
+        self.proc = subprocess.Popen([str(BIN), "--drive", "--display", os.path.join(self.dir, "no_such_program")], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=e, text=True)
+        threading.Thread(target=lambda: [self.events.put(json.loads(l)) for l in self.proc.stdout if l.startswith("{")], daemon=True).start()
+        self.addCleanup(self.stop)
+        self.send(**self.SONG)
+        self.wait_for(lambda e: e.get("ev") == "state" and e["service"] == "needs_browser")
+
+    def test_a_song_without_an_enabled_field_is_accepted(self):
+        self.start()
+        song = {k: v for k, v in self.SONG.items() if k != "enabled"}
+        self.send(**song)
+        done = self.wait_for(lambda e: e.get("ev") == "done" and e["seq"] == 1)
+        self.assertIs(done["ok"], True)
 
 
 if __name__ == "__main__":
