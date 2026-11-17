@@ -308,7 +308,8 @@ class KaraFunWebHostRust(KaraFunWebHost):
                 self._retry_service()
             except Exception as error:
                 self._browser_asked = False
-                self.app._run_on_ui_thread(lambda: self._fail_local(f"Chromium could not be downloaded: {error}"))
+                why = f"Chromium could not be downloaded: {error}"       # `error` is gone once this block ends, before the UI thread runs the lambda
+                self.app._run_on_ui_thread(lambda: self._fail_local(why))
         threading.Thread(target=work, name="karafun-chromium-download", daemon=True).start()
 
     def _fail_local(self, why: str) -> None:
