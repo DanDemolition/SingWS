@@ -521,6 +521,89 @@ mod tests {
         assert_eq!(d.io.stopped, 1);
         assert_eq!(d.service_state(), "idle");
     }
+
+    fn signins(d: &Driver<Fake>) -> usize {
+        d.io.display.iter().filter(|c| c["cmd"] == "signin").count()
+    }
+
+    #[test]
+    fn with_no_saved_login_the_sign_in_page_opens_at_exactly_the_sixtieth_signed_out_status() {
+        let mut d = driver();
+        d.start_song(&req(), 0.0);
+        let signed_out = status(false, false, 0.0, 0.0);
+        for n in 1..=59u32 {
+            d.on_display_message(&signed_out, 0.5 * n as f64);
+            assert_eq!(signins(&d), 0, "status {n}: too early");
+        }
+        d.on_display_message(&signed_out, 30.0);
+        assert_eq!(signins(&d), 1, "the 60th signed-out status opens KaraFun's own sign-in");
+        d.on_display_message(&signed_out, 30.5);
+        assert_eq!(signins(&d), 1, "once");
+    }
+
+    #[test]
+    fn a_saved_login_is_used_again_after_the_reload_at_the_sixteenth_status_and_the_browser_opens_at_the_480th() {
+        let mut d = driver();
+        d.io.saved = Some(SavedLogin::Found);
+        d.start_song(&req(), 0.0);
+        let signed_out = status(false, false, 0.0, 0.0);
+        for n in 1..=16u32 {
+            d.on_display_message(&signed_out, 0.5 * n as f64);
+        }
+        assert_eq!(d.io.logins, 1, "the first login at the 16th status");
+        // it signs in, so the page is reloaded once
+        d.on_display_message(&status(true, false, 0.0, 0.0), 10.0);
+        assert_eq!(d.io.display.iter().filter(|c| c["cmd"] == "reload").count(), 1);
+        // the reloaded page is signed out again; statuses inside the settle time say nothing
+        let t0 = 10.0 + crate::RELOAD_SETTLE_S;
+        for n in 1..=15u32 {
+            d.on_display_message(&signed_out, t0 + 0.5 * n as f64);
+            assert_eq!(d.io.logins, 1, "status {n} after the reload: too early");
+        }
+        d.on_display_message(&signed_out, t0 + 8.0);
+        assert_eq!(d.io.logins, 2, "the 16th status after the reload logs in once more");
+        d.on_display_message(&signed_out, t0 + 8.5);
+        assert_eq!(d.io.logins, 2, "only once");
+        // 17 so far; the browser page opens at the 480th
+        for n in 18..=479u32 {
+            d.on_display_message(&signed_out, t0 + 0.5 * n as f64);
+            assert_eq!(signins(&d), 0, "status {n}: too early for the browser");
+        }
+        d.on_display_message(&signed_out, t0 + 240.0);
+        assert_eq!(signins(&d), 1, "the 480th signed-out status opens the browser sign-in");
+    }
+
+    fn finishes(d: &Driver<Fake>) -> usize {
+        names(&d.io.app).iter().filter(|n| *n == "finish_complete").count()
+    }
+
+    fn playing_song(duration: f64) -> Driver<Fake> {
+        let mut d = driver();
+        d.start_song(&req(), 0.0);
+        d.on_display_message(&status(true, false, 0.0, 0.0), 0.5);
+        d.tick(5.0);
+        d.on_display_message(&status(true, true, 1.0, duration), 5.5);
+        d
+    }
+
+    #[test]
+    fn a_song_that_keeps_playing_is_completed_only_after_sitting_in_the_last_second_and_a_half_for_more_than_two_and_a_half_seconds() {
+        // 1.6 s before the end is NOT "at the end" however long it stays there
+        let mut d = playing_song(100.0);
+        for (i, t) in [10.0, 13.0, 16.0, 19.0].iter().enumerate() {
+            d.on_display_message(&status(true, true, 98.4, 100.0), *t);
+            assert_eq!(finishes(&d), 0, "pass {i}: 1.6 s before the end is not the end");
+        }
+        // 1.4 s before the end is: the clock starts at the first such status and the song completes only once MORE than 2.5 s have passed
+        let mut d = playing_song(100.0);
+        d.on_display_message(&status(true, true, 98.6, 100.0), 10.0);
+        d.on_display_message(&status(true, true, 99.0, 100.0), 12.4);
+        assert_eq!(finishes(&d), 0, "2.4 s at the end is not enough");
+        d.on_display_message(&status(true, true, 99.4, 100.0), 12.5);
+        assert_eq!(finishes(&d), 0, "exactly 2.5 s is not more than 2.5 s");
+        d.on_display_message(&status(true, true, 99.5, 100.0), 12.6);
+        assert_eq!(finishes(&d), 1, "2.6 s at the end completes the song");
+    }
 }
 
 /// Replay of a whole session for the parity tool (`{"kind":"driver", ...}`): a scripted clock, a fake display program and a fake saved login. Events (each with `t`):
@@ -649,4 +732,5 @@ pub mod replay {
         }
         json!({"trace": trace, "service": d.service_state()})
     }
+
 }
