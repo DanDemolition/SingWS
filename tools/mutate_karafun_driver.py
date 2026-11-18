@@ -24,7 +24,7 @@ import mutate_karafun_svc as ms  # noqa: E402  (generate: the same mutant genera
 CRATE = ROOT / "rust/crates/singws-karafun-svc"
 WORK = Path(os.path.expanduser("~/.cache/singws-karafun-driver-mut"))
 TARGET = os.path.expanduser("~/.cache/singws-rust-target-kfdrv-mut")
-BIN = os.path.join(TARGET, "release", "singws-karafun-svc")
+BIN = os.path.join(TARGET, "debug", "singws-karafun-svc")   # a debug build: the process tests that run the real Keychain reader need its SINGWS_SECURITY_BIN stand-in
 ENV = dict(os.environ, CARGO_TARGET_DIR=TARGET, SINGWS_KF_SVC_BIN=BIN, QT_QPA_PLATFORM="offscreen", PYTHONPATH=os.path.expanduser("~/.cache/singws-pytest"), PATH=os.path.expanduser("~/.cargo/bin") + ":" + os.environ["PATH"])
 MANIFEST = str(WORK / "crate" / "Cargo.toml")
 
@@ -52,6 +52,28 @@ def generate(name, text):
     return ms.generate(name, "\n".join(lines[:stop]))
 
 
+_CONST = re.compile(r"^(\s*pub const [A-Z_0-9]+: (?:f64|u64|i64|usize|u32|i32) = )(-?[0-9][0-9_]*(?:\.[0-9]+)?)(;.*)$")
+
+
+def const_mutants(name, text):
+    """`--consts`: the numeric `pub const` values (timer lengths, status counts), which `generate` skips: floats doubled and halved, integers +1 and -1."""
+    out = []
+    for i, line in enumerate(text.split("\n"), 1):
+        m = _CONST.match(line)
+        if not m:
+            continue
+        s, e = m.start(2), m.end(2)
+        raw = m.group(2).replace("_", "")
+        if "." in raw:
+            v = float(raw)
+            news = [f"{v * 2:.1f}", f"{v / 2:.2f}".rstrip("0").rstrip(".") + (".0" if float(f"{v / 2:.2f}") == int(v / 2) else "")]
+        else:
+            v = int(raw)
+            news = [str(v + 1)] + ([str(v - 1)] if v > 0 else [])
+        out += [(name, i, s, e, n, line.strip()) for n in news]
+    return out
+
+
 def sh(cmd, timeout=240, **kw):
     """A mutant that makes the program spin forever is caught by the timeout (returncode 124)."""
     try:
@@ -61,11 +83,11 @@ def sh(cmd, timeout=240, **kw):
 
 
 def build():
-    return sh(["cargo", "build", "--release", "--offline", "--quiet", "--manifest-path", MANIFEST]).returncode == 0
+    return sh(["cargo", "build", "--offline", "--quiet", "--manifest-path", MANIFEST]).returncode == 0
 
 
 def verdict(cases, process_tests):
-    if sh(["cargo", "test", "--release", "--offline", "--quiet", "--manifest-path", MANIFEST]).returncode != 0:
+    if sh(["cargo", "test", "--offline", "--quiet", "--manifest-path", MANIFEST]).returncode != 0:
         return "the crate tests"
     if sh([sys.executable, "tools/karafun_driver_parity.py", "--cases", str(cases)]).returncode != 0:
         return "the driver parity"
@@ -78,6 +100,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--file", default="")
     ap.add_argument("--only")
+    ap.add_argument("--consts", action="store_true", help="mutate the numeric `pub const` values of lib.rs and host.rs instead of the operators")
     ap.add_argument("--cases", type=int, default=1500)
     a = ap.parse_args()
     if WORK.exists():
@@ -86,9 +109,9 @@ def main():
     (WORK / "crate" / "Cargo.toml").write_text((CRATE / "Cargo.toml").read_text() + "\n[workspace]\n")
     shutil.copy(ROOT / "rust/Cargo.lock", WORK / "crate" / "Cargo.lock")
     assert build() and verdict(a.cases, True) == "", "the unmutated crate must pass every check first"
-    files = [a.file] if a.file else ["driver.rs", "runtime.rs"]
+    files = [a.file] if a.file else (["lib.rs", "host.rs"] if a.consts else ["driver.rs", "runtime.rs"])
     orig = {f: (CRATE / "src" / f).read_text() for f in files}
-    muts = [m for f in files for m in generate(f, orig[f])]
+    muts = [m for f in files for m in (const_mutants(f, orig[f]) if a.consts else generate(f, orig[f]))]
     print(f"mutants: {len(muts)}", flush=True)
     only = {int(x) for x in a.only.split(",")} if a.only else None
     killed = documented = 0
