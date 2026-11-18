@@ -343,10 +343,10 @@ class Wiring(unittest.TestCase):
             self.assertIn('"phrase_shadow.py"', text, spec)
             self.assertIn("'phrase_shadow'", text, spec)
 
-    def test_the_app_configures_the_shadow_from_the_setting_and_it_defaults_to_shadow(self):
+    def test_the_app_configures_the_shadow_from_the_setting_and_it_defaults_to_rust(self):
         src = Path("0.2.18.1.py").read_text(encoding="utf-8")
-        self.assertIn('"karafun_web_engine": "shadow",', src)
-        self.assertIn('karafun_web_shadow.configure(self.settings.get("karafun_web_engine", "shadow"), _diag)', src)
+        self.assertIn('"karafun_web_engine": "rust",', src)
+        self.assertIn('karafun_web_shadow.configure(self.settings.get("karafun_web_engine", "rust"), _diag)', src)
 
     def test_the_host_taps_every_event_the_rust_machine_models(self):
         src = Path("karafun_web_host.py").read_text(encoding="utf-8")

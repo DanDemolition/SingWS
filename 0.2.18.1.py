@@ -4171,6 +4171,12 @@ def _migrate_rust_evidence_defaults(settings) -> bool:
         settings["waitlist_snapshot"] = True
         settings["waitlist_snapshot_default_on_migrated"] = True
         changed = True
+    # One time (2026-11-17): the Rust driver became the default KaraFun player engine; saved profiles persisted "shadow". "python" (off) is never changed.
+    if not bool(settings.get("karafun_web_engine_rust_default_migrated", False)):
+        if str(settings.get("karafun_web_engine", "shadow") or "shadow").strip().lower() == "shadow":
+            settings["karafun_web_engine"] = "rust"
+        settings["karafun_web_engine_rust_default_migrated"] = True
+        changed = True
     return changed
 
 
@@ -4239,8 +4245,10 @@ DEFAULTS = {
     "phrase_shadow": True,
     # KaraFun web player twin (2026-11-15): the Rust port of the player's sign-in service and song lifecycle hears the same events as karafun_web.py / karafun_web_host.py
     # and its answers are compared and LOGGED ([KFWEB-SHADOW]); Python always acts. "shadow" (default) compares, "python" switches it off, "rust" is reserved for the day Rust
-    # drives the player (not built: it behaves like "shadow"). Read once at launch. NOT in _RUST_EVIDENCE_FLAGS (a string, and the Rust settings migration mirrors that list).
-    "karafun_web_engine": "shadow",
+    # drives the player (the default since 2026-11-17: the Python host is the fallback when the Rust program is not bundled or cannot start; it also hears the same events as "shadow").
+    # Read once at launch. NOT in _RUST_EVIDENCE_FLAGS (a string, and the Rust settings migration mirrors that list). Saved profiles are moved from "shadow" to "rust" once
+    # (karafun_web_engine_rust_default_migrated); "python" is never touched and a profile can set "shadow" again afterwards.
+    "karafun_web_engine": "rust",
     # Stage C shadow: compare the background-music window / crossfade-length decisions (transition_analysis) with the Rust
     # singws-plan rules and LOG disagreements only; the app's own answer is always used. Default off until its two-architecture
     # package gate passes. The karaoke effective-end rule runs only in the offline analysis worker and is covered by
@@ -4290,6 +4298,7 @@ DEFAULTS = {
     # Read-only waitlist snapshot for the Rust shell: whenever the waiting-for-add view would refresh, write waitlist_snapshot.json (the waiting, pending and
     # removed-tonight requests plus the app's own "already in the queue" and "first turn tonight" answers). The app never reads it back. Default on.
     "waitlist_snapshot_default_on_migrated": False,  # one-time: the saved `waitlist_snapshot` False (the old default) was switched on once
+    "karafun_web_engine_rust_default_migrated": False,  # one-time: a saved karafun_web_engine "shadow" (the old default) was switched to "rust" once
     "waitlist_snapshot": True,
     # Read-only status snapshot for the Rust shell's Status and Diagnostics pages: whenever the header or the ETA line refreshes, write status_snapshot.json (the
     # header's connection / diagnostics words, the queue summary inputs and the pre-show check facts). The app never reads it back. Default on.
@@ -23143,7 +23152,7 @@ class KaraokeApp(QWidget):
             pass
         try:
             import karafun_web_shadow
-            karafun_web_shadow.configure(self.settings.get("karafun_web_engine", "shadow"), _diag)
+            karafun_web_shadow.configure(self.settings.get("karafun_web_engine", "rust"), _diag)
         except Exception:
             pass
         if _migrate_rust_evidence_defaults(self.settings) or getattr(self, "_rust_defaults_just_migrated", False):
@@ -57254,7 +57263,7 @@ class KaraokeApp(QWidget):
         """The KaraFun web-player host (karafun_web_host.py), made on first use."""
         host = getattr(self, "_karafun_web", None)
         if host is None:
-            if str(self.settings.get("karafun_web_engine", "shadow") or "shadow") == "rust":
+            if str(self.settings.get("karafun_web_engine", "rust") or "rust") == "rust":
                 # the song logic runs in Rust (singws-karafun-svc --drive); the Python host below stays the fallback when the program is not here
                 try:
                     import karafun_web_host_rust

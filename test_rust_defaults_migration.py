@@ -34,6 +34,25 @@ class RustEvidenceDefaultsTests(unittest.TestCase):
         self.assertEqual(saved["shell_commands"], "dry_run")
         self.assertIs(saved["rust_evidence_defaults_migrated"], True)
 
+    def test_the_rust_karafun_engine_is_the_default_and_a_saved_shadow_moves_once(self):
+        self.assertEqual(self.mod.DEFAULTS["karafun_web_engine"], "rust")
+        self.assertIs(self.mod.DEFAULTS["karafun_web_engine_rust_default_migrated"], False)
+        saved = {"karafun_web_engine": "shadow"}
+        self.mod._migrate_rust_evidence_defaults(saved)
+        self.assertEqual(saved["karafun_web_engine"], "rust")
+        self.assertIs(saved["karafun_web_engine_rust_default_migrated"], True)
+        saved["karafun_web_engine"] = "shadow"  # chosen again afterwards: kept
+        self.mod._migrate_rust_evidence_defaults(saved)
+        self.assertEqual(saved["karafun_web_engine"], "shadow")
+
+    def test_a_python_choice_and_a_missing_value_through_the_engine_migration(self):
+        off = {"karafun_web_engine": "python"}
+        self.mod._migrate_rust_evidence_defaults(off)
+        self.assertEqual(off["karafun_web_engine"], "python")
+        fresh = {}
+        self.mod._migrate_rust_evidence_defaults(fresh)
+        self.assertEqual(fresh.get("karafun_web_engine"), "rust")
+
     def test_a_profile_without_shell_commands_gets_dry_run(self):
         saved = {}
         self.assertTrue(self.mod._migrate_rust_evidence_defaults(saved))
@@ -41,14 +60,16 @@ class RustEvidenceDefaultsTests(unittest.TestCase):
 
     def test_after_the_marker_the_operator_choices_are_respected(self):
         saved = {k: False for k in self.mod._RUST_EVIDENCE_FLAGS}
-        saved.update({"shell_commands": "off", "rust_evidence_defaults_migrated": True, "waitlist_snapshot_default_on_migrated": True})
+        saved.update({"shell_commands": "off", "rust_evidence_defaults_migrated": True, "waitlist_snapshot_default_on_migrated": True,
+                      "karafun_web_engine_rust_default_migrated": True})
         before = dict(saved)
         self.assertFalse(self.mod._migrate_rust_evidence_defaults(saved))
         self.assertEqual(saved, before)
 
     def test_the_waitlist_snapshot_migration_leaves_the_evidence_choices_alone(self):
         saved = {k: False for k in self.mod._RUST_EVIDENCE_FLAGS}
-        saved.update({"shell_commands": "off", "rust_evidence_defaults_migrated": True, "waitlist_snapshot": False})
+        saved.update({"shell_commands": "off", "rust_evidence_defaults_migrated": True, "waitlist_snapshot": False,
+                      "karafun_web_engine_rust_default_migrated": True})
         self.assertTrue(self.mod._migrate_rust_evidence_defaults(saved))      # only the one new one-time step runs
         self.assertIs(saved["waitlist_snapshot"], True)
         self.assertTrue(all(saved[k] is False for k in self.mod._RUST_EVIDENCE_FLAGS), "the operator's evidence choices stay as they were")
