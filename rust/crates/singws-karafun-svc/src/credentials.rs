@@ -101,8 +101,17 @@ pub mod tool {
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
 
+    /// `/usr/bin/security`. A debug build (the tests) can point `SINGWS_SECURITY_BIN` at a stand-in so the real reader runs without the real Keychain; a release build never reads it.
+    fn security_path() -> String {
+        #[cfg(debug_assertions)]
+        if let Ok(p) = std::env::var("SINGWS_SECURITY_BIN") {
+            return p;
+        }
+        "/usr/bin/security".to_string()
+    }
+
     fn run(args: &[&str], stdin: Option<&str>, timeout: Duration) -> Option<(i32, Vec<u8>)> {
-        let mut child = Command::new("/usr/bin/security").args(args).stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() }).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
+        let mut child = Command::new(security_path()).args(args).stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() }).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
         if let (Some(text), Some(mut pipe)) = (stdin, child.stdin.take()) {
             let _ = pipe.write_all(text.as_bytes());
         }

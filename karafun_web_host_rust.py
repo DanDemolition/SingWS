@@ -103,6 +103,7 @@ class KaraFunWebHostRust(KaraFunWebHost):
         self._world_sent = None
         self._browser_asked = False
         self._exited = False
+        self._starting = False               # start() is waiting for its answer: it deals with a driver that dies in the middle of it itself
 
     # ---- the process
     def _profile_dir(self) -> Path:
@@ -266,6 +267,10 @@ class KaraFunWebHostRust(KaraFunWebHost):
             elif kind == "exited":
                 self.service.state = "error"
                 self._log("the Rust driver stopped")
+                if self.asked is not None and not self._starting:
+                    # a song was on when the driver died (its display program goes with it): fail it the way the song machine fails a song, so the app can move on;
+                    # the next request starts a fresh driver (_ensure_proc), which signs in again from the saved login
+                    self._fail_local("the KaraFun player stopped unexpectedly", finish=False)
         except Exception as error:      # a fault in one effect must not lose the rest
             self._log(f"effect failed ({kind}): {error!r}")
 
@@ -312,11 +317,13 @@ class KaraFunWebHostRust(KaraFunWebHost):
                 self.app._run_on_ui_thread(lambda: self._fail_local(why))
         threading.Thread(target=work, name="karafun-chromium-download", daemon=True).start()
 
-    def _fail_local(self, why: str) -> None:
-        """A failure only the app side knows about (Chromium declined / not downloadable): the same marks the song machine sets when a song fails."""
+    def _fail_local(self, why: str, finish: bool = True) -> None:
+        """A failure only the app side knows about (Chromium declined / not downloadable, the driver died): the same marks the song machine sets when a song fails.
+        `finish=False` when the driver is gone: asking it to finish would only start a new one."""
         asked, self.asked = self.asked, None
         entry = self._entry
-        self._call("finish")
+        if finish:
+            self._call("finish")
         if asked is None or entry is None:
             return
         self._log(f"giving up on the song: {why[:120]}")
@@ -465,8 +472,12 @@ class KaraFunWebHostRust(KaraFunWebHost):
                       "at": time.monotonic(), "heard": False, "sent": False, "active": getattr(app, "_active_external_karafun", None)}
         self._sat_at_end_since = None
         self._world_sent = None
-        ok = self._call("start_song", song_id=song_id, enabled=True, key=int(key or 0), tempo=tempo, title=title,
+        self._starting = True
+        try:
+            ok = self._call("start_song", song_id=song_id, enabled=True, key=int(key or 0), tempo=tempo, title=title,
                         play={"query": query, "queries": ladder, "artist": artist, "title": title})
+        finally:
+            self._starting = False
         if not ok:
             self.asked = None
         return ok

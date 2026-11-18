@@ -77,6 +77,36 @@ class RustHostTests(unittest.TestCase):
         self.assertEqual(self.app.finished[0][0], "complete")
         self.assertIsNone(self.host.asked)
 
+    def test_a_driver_that_dies_mid_song_fails_the_song_and_the_next_song_starts_a_new_driver(self):
+        self.assertTrue(self.host.start(self.entry, 0, 100))
+        self.wait(lambda: self.entry.get("karafun_status") == "playing")
+        first = self.host._proc
+        first.kill()
+        self.wait(lambda: self.entry.get("karafun_submission_state") == "karafun_failed")
+        self.assertIsNone(self.host.asked)
+        self.assertEqual(self.host.service.state, "error")
+        self.assertIn("stopped unexpectedly", self.entry["karafun_submission_error"])
+        self.assertTrue(any(level == "error" and "stopped unexpectedly" in text for level, text in self.app.notes), self.app.notes)
+        self.assertEqual(self.host._proc, first, "nothing restarts the driver just to tell it the song is over")
+        # the next song: a fresh driver process, which plays it
+        nxt = {"artist": "NOFX", "title": "Linoleum", "provider_track_id": "kf_3241559", "duration": 240, "duration_estimated": True}
+        self.app.entry = nxt
+        self.app._active_external_karafun = {"entry": nxt}
+        self.assertTrue(self.host.start(nxt, 0, 100))
+        self.assertIsNot(self.host._proc, first)
+        self.assertIsNone(self.host._proc.poll())
+        self.wait(lambda: nxt.get("karafun_status") == "playing")
+
+    def test_a_driver_that_dies_between_songs_is_just_replaced(self):
+        self.host.ensure_service()
+        first = self.host._proc
+        first.kill()
+        self.wait(lambda: self.host.service.state == "error")
+        self.assertEqual(self.app.notes, [])
+        self.assertTrue(self.host.start(self.entry, 0, 100))
+        self.assertIsNot(self.host._proc, first)
+        self.wait(lambda: self.entry.get("karafun_status") == "playing")
+
     def test_on_finish_stops_the_player(self):
         self.host.start(self.entry, 0, 100)
         self.wait(lambda: self.entry.get("karafun_status") == "playing")
