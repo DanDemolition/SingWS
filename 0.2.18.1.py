@@ -22942,10 +22942,10 @@ class KaraokeApp(QWidget):
         # --- Settings for background image ---
         self.settings = self.load_settings()
         _install_wire_shadow(self.settings)
-        _configure_show_transitions(self.settings)
         # The background player was built above, before these settings existed, so its EQ / master-chain / counter attach saw nothing.
         # Redo it once the window has finished initialising (the event loop's first turn), so the chain is live from launch.
         QTimer.singleShot(0, self._attach_bgm_chain_after_init)
+        _configure_show_transitions(self.settings)          # read once here: the Quick transition views are created below
         # Must land before VideoWindow is built: the ticker and show-VFX
         # backends are chosen once, at construction. Like the playback engine,
         # a change here takes effect on the next launch, never mid-show.
