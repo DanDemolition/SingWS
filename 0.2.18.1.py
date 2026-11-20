@@ -22,7 +22,7 @@ from pathlib import Path
 sys.setswitchinterval(0.001)
 
 _GST_RUNTIME_DEBUG = {}
-APP_VERSION = "1.0.3.9"
+APP_VERSION = "1.0.4.0"
 PROCESS_STARTUP_UTC = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
 PROCESS_SESSION_UUID = str(uuid.uuid4())
 PROCESSING_NOTIFICATION_TIMEOUT_MS = 15000
@@ -22941,8 +22941,8 @@ class KaraokeApp(QWidget):
         # Make the flag visible to the BG player check via parent attribute
         # --- Settings for background image ---
         self.settings = self.load_settings()
-        _configure_show_transitions(self.settings)
         _install_wire_shadow(self.settings)
+        _configure_show_transitions(self.settings)
         # The background player was built above, before these settings existed, so its EQ / master-chain / counter attach saw nothing.
         # Redo it once the window has finished initialising (the event loop's first turn), so the chain is live from launch.
         QTimer.singleShot(0, self._attach_bgm_chain_after_init)
