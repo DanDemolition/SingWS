@@ -4232,6 +4232,12 @@ DEFAULTS = {
     # Seconds the start of a native (CDG / MP3 / MP4) song is held while the singer-start animation plays, so the animation FINISHES before the audio starts (1.0.4.0;
     # the animation is about 3.0 s). 0 = start at once, the animation then plays over the first seconds as before. KaraFun songs have their own hold.
     "show_start_animation_hold_s": 3.1,
+    # End-of-song cue (1.0.4.0): a CDG song whose lyrics have finished is handed over a few seconds after the LAST visible change of its graphics (the last lyric wipe)
+    # instead of waiting for the instrumental tail or the static final card to run out. Only when the cue is trustworthy (after 30 s and past 60% of the graphics) and at
+    # least `min_remaining` seconds of the song are left. delay = seconds after the last wipe; off = the old end rules alone.
+    "karaoke_end_on_lyric_cue": True,
+    "karaoke_lyric_cue_delay_sec": 3.0,
+    "karaoke_lyric_cue_min_remaining_sec": 4.0,
     "performance_debug_enabled": False, # opt-in runtime diagnostics; keep normal launches quiet
     # Adds last_event= to [STALL] lines by installing an APPLICATION-WIDE Qt
     # event filter written in Python. Every Paint/Timer/UpdateRequest in the app
@@ -43062,6 +43068,7 @@ class KaraokeApp(QWidget):
         self._karaoke_audio_end_s = None
         self._karaoke_audio_end_path = ""
         self._karaoke_visual_end_s = None
+        self._karaoke_lyric_cue_s = None
         self._karaoke_visual_end_path = ""
         self._karaoke_visual_end_confidence = 0.0
         self._karaoke_visual_end_reason = "analysis_unavailable"
@@ -43239,6 +43246,7 @@ class KaraokeApp(QWidget):
     def _arm_visual_end_floor(self, visual_path: str, mode: str):
         """Use validated visual metadata; uncertain formats fall back to EOS."""
         self._karaoke_visual_end_s = None
+        self._karaoke_lyric_cue_s = None
         self._karaoke_visual_end_path = str(visual_path or "")
         self._karaoke_visual_end_confidence = 0.0
         self._karaoke_visual_end_reason = "analysis_unavailable"
@@ -43254,6 +43262,8 @@ class KaraokeApp(QWidget):
         # intentionally never started from the live playback path.
         cached = transition_analysis_cached(str(visual_path))
         if cached is not None:
+            if mode == "cdg":
+                self._set_lyric_cue(str(visual_path), getattr(cached, "last_change", None), getattr(cached, "duration", 0.0))
             cached_end = getattr(cached, "visual_end", None)
             cached_confidence = float(getattr(cached, "visual_confidence", 0.0) or 0.0)
             if cached_end is not None and cached_confidence >= 0.85:
@@ -43290,7 +43300,37 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
 
+    def _set_lyric_cue(self, scan_path: str, last_change, duration):
+        """The time of the last visible change of the song's graphics: the last lyric wipe (see _lyric_end_cue_ready)."""
+        if str(scan_path) != str(getattr(self, "_karaoke_visual_end_path", "")):
+            return
+        try:
+            cue, total = float(last_change), float(duration or 0.0)
+        except (TypeError, ValueError):
+            self._karaoke_lyric_cue_s = None
+            return
+        trusted = cue >= 30.0 and total > 0.0 and cue >= 0.6 * total
+        self._karaoke_lyric_cue_s = cue if trusted else None
+        _diag(f"[END-CUE] last lyric change at {cue:.1f}s of {total:.1f}s of graphics: {'cue armed' if trusted else 'not trusted, normal end rules only'} file={os.path.basename(scan_path)}")
+
+    def _lyric_end_cue_ready(self, elapsed: float, remain: float) -> bool:
+        """True once a CDG song is past its last lyric wipe by the configured delay with at least min_remaining seconds still to play."""
+        if not bool(self.settings.get("karaoke_end_on_lyric_cue", True)):
+            return False
+        if getattr(self, "_end_silence_mode", "") != "cdg":
+            return False
+        cue = getattr(self, "_karaoke_lyric_cue_s", None)
+        if cue is None:
+            return False
+        try:
+            delay = max(0.0, float(self.settings.get("karaoke_lyric_cue_delay_sec", 3.0)))
+            need = max(0.0, float(self.settings.get("karaoke_lyric_cue_min_remaining_sec", 4.0)))
+        except (TypeError, ValueError):
+            delay, need = 3.0, 4.0
+        return elapsed >= float(cue) + delay and remain >= need
+
     def _apply_visual_end_floor(self, scan_path: str, result):
+        self._set_lyric_cue(scan_path, getattr(result, "last_change", None), getattr(result, "duration", 0.0))
         if str(scan_path) != str(getattr(self, "_karaoke_visual_end_path", "")):
             return
         safe = bool(getattr(result, "safe_for_early_completion", False))
@@ -43509,6 +43549,23 @@ class KaraokeApp(QWidget):
             _diag(f"[CROSSFADE] verified-audio-tail BG fade failed: {exc}")
             return False
 
+    def _try_lyric_end_cue(self, elapsed: float, remain: float) -> bool:
+        """Hand a CDG song over a few seconds after its last lyric wipe (see _lyric_end_cue_ready). True when the handoff was started."""
+        if not self._lyric_end_cue_ready(elapsed, remain):
+            return False
+        # the lyrics finished (their last wipe) a few seconds ago: hand over now instead of sitting through the instrumental tail / the static final card
+        self._end_silence_tail_handoff_started = True
+        self._end_silence_triggered = True
+        self._end_silence_last_reason = "lyric_end_cue"
+        self._end_silence_auto_advance_next = bool(self.settings.get("karaoke_auto_advance", False))
+        try:
+            self._prefire_bgm_at_verified_audio_end()
+        except Exception:
+            pass
+        _diag(f"[END-CUE] handing over at {elapsed:.2f}s: last lyric change at {float(self._karaoke_lyric_cue_s):.1f}s, {remain:.1f}s of the song left")
+        QTimer.singleShot(0, lambda: self._handle_media_end_safe("lyric_end_cue"))
+        return True
+
     def _maybe_trim_end_silence(self, dur_ns: int, pos_ns: int) -> bool:
         """End karaoke once the scanned audio and visible lyrics are finished."""
         if not self._karaoke_early_silence_trim_enabled():
@@ -43526,6 +43583,9 @@ class KaraokeApp(QWidget):
             self._end_silence_accum_s = 0.0
             self._end_silence_last_tick = time.monotonic()
             return False
+        _cue = getattr(self, "_try_lyric_end_cue", None)
+        if callable(_cue) and _cue(elapsed, remain):
+            return True
 
         # Prefer real-time bus meter data; fallback to polling last-message.
         db = None
