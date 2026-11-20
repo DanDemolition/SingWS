@@ -604,6 +604,85 @@ mod tests {
         d.on_display_message(&status(true, true, 99.5, 100.0), 12.6);
         assert_eq!(finishes(&d), 1, "2.6 s at the end completes the song");
     }
+
+    fn started_at(d: &Driver<Fake>) -> Option<f64> {
+        d.io.app.iter().rev().find(|e| e[0] == "entry_set" && e[1] == "karafun_display_started_at").and_then(|e| e[2].as_f64())
+    }
+
+    #[test]
+    fn a_position_in_the_status_is_read_like_python_float_of_the_value_or_zero() {
+        let cases: [(Value, f64); 7] = [(json!(7.5), 7.5), (Value::Null, 0.0), (json!(true), 1.0), (json!(false), 0.0), (json!(""), 0.0), (json!([]), 0.0), (json!({}), 0.0)];
+        for (position, expected) in cases {
+            let mut d = playing_song(100.0);
+            d.io.app.clear();
+            let m = json!({"type": "status", "signedIn": true, "playing": true, "state": "playing", "position": position, "duration": 100.0, "song": {"id": 58970}});
+            d.on_display_message(&m, 20.0);
+            assert_eq!(started_at(&d), Some(20.0 - expected), "position {position}");
+        }
+    }
+
+    #[test]
+    fn a_status_without_a_playing_field_means_not_playing() {
+        // a pause asked for while the status says nothing about playing resumes (it does not pause)
+        let mut d = playing_song(100.0);
+        d.on_display_message(&json!({"type": "status", "signedIn": true, "position": 3.0, "duration": 100.0, "song": {"id": 58970}}), 6.0);
+        assert!(d.toggle_pause(6.5));
+        assert_eq!(d.io.display.last().map(|c| c["cmd"].clone()), Some(json!("resume")), "{:?}", d.io.display);
+        // and with no song open, such a status never makes the driver stop a "stray" song
+        let mut d = driver();
+        d.ensure_service(0.0);
+        d.on_display_message(&json!({"type": "status", "signedIn": true, "plan": "Plus"}), 1.0);
+        assert!(d.io.display.iter().all(|c| c["cmd"] != "stop"), "{:?}", d.io.display);
+    }
+
+    #[test]
+    fn a_seek_needs_a_positive_duration_and_a_numeric_one() {
+        for (duration, answer) in [(json!(0.0), false), (json!(0.5), true), (json!([1]), false)] {
+            let mut d = playing_song(100.0);
+            let m = json!({"type": "status", "signedIn": true, "playing": true, "state": "playing", "position": 1.0, "duration": duration, "song": {"id": 58970}});
+            d.on_display_message(&m, 6.0);
+            assert_eq!(d.seek_to(50.0, 6.5), answer, "duration {duration}");
+        }
+    }
+
+    #[test]
+    fn the_players_error_text_is_logged_as_given_and_empty_when_missing() {
+        let logged = |message: Option<Value>| {
+            let mut d = playing_song(100.0);
+            d.io.app.clear();
+            let mut m = json!({"type": "error"});
+            if let Some(v) = message {
+                m["message"] = v;
+            }
+            d.on_display_message(&m, 7.0);
+            d.io.app.iter().filter_map(|e| if e[0] == "log" { e[1].as_str().map(|t| t.to_string()) } else { None }).find(|t| t.starts_with("page error: "))
+        };
+        assert_eq!(logged(None).as_deref(), Some("page error: "));
+        assert_eq!(logged(Some(Value::Null)).as_deref(), Some("page error: "));
+        assert_eq!(logged(Some(json!("Play failed: x"))).as_deref(), Some("page error: Play failed: x"));
+    }
+
+    #[test]
+    fn the_hold_timer_fires_twenty_five_milliseconds_after_the_hold_ends() {
+        let mut d = driver();
+        d.start_song(&req(), 0.0);
+        d.on_display_message(&status(true, false, 0.0, 0.0), 0.5);
+        // ready at 0.5 with the hold ending at 3.5: 3.0 s left, so 3025 ms
+        assert!(d.timers.iter().any(|t| (t.0 - 3.525).abs() < 1e-9), "{:?}", d.timers.iter().map(|t| t.0).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn a_player_that_is_ready_again_after_the_play_was_sent_does_not_hold_it_again() {
+        let mut d = playing_song(100.0);
+        let holds_before = d.io.app.iter().filter(|e| e[0] == "log" && e[1].as_str().is_some_and(|t| t.starts_with("holding the play"))).count();
+        let signed_out = status(false, false, 0.0, 0.0);
+        for n in 1..=6u32 {
+            d.on_display_message(&signed_out, 8.0 + 0.5 * n as f64);
+        }
+        d.on_display_message(&status(true, true, 5.0, 100.0), 12.0);
+        let holds_after = d.io.app.iter().filter(|e| e[0] == "log" && e[1].as_str().is_some_and(|t| t.starts_with("holding the play"))).count();
+        assert_eq!(holds_after, holds_before, "the play was sent long ago: nothing is held again");
+    }
 }
 
 /// Replay of a whole session for the parity tool (`{"kind":"driver", ...}`): a scripted clock, a fake display program and a fake saved login. Events (each with `t`):

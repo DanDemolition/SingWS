@@ -41,6 +41,24 @@ NOTES: dict = {
     'runtime.rs|let wait = d.next_deadline().map(|t| Duration::from_secs_f64((t - now(|3600.0->3601.0': 'equivalent: upper clamp 3600 s vs 3601 s: a timer that far out does not exist',
     'runtime.rs|let wait = d.next_deadline().map(|t| Duration::from_secs_f64((t - now(|3600->3601': 'equivalent: idle wait with no timers 3600 s vs 3601 s: only the interval between idle wake-ups',
     'runtime.rs|Err(RecvTimeoutError::Disconnected) => return 0,|0->1': 'equivalent: the channel cannot disconnect while the loop holds its own sender; the exit code there is unreachable',
+    # host.rs survivors of the 2026-11-18 run (mutants 1-144 of 240; 145-240 were not run):
+    'host.rs|Some(Value::Number(n)) => Ok(n.as_f64().unwrap_or(0.0)),|0.0->1.0': "equivalent: serde_json's `as_f64` on a Number is always Some (no arbitrary-precision feature), so the 0.0 default is unreachable",
+    'host.rs|gens: 0,|0->1': 'equivalent: generation numbers are only compared with each other for equality; the starting value of the counter makes no difference',
+    'host.rs|self.gens += 1;|1->2': 'equivalent: generation numbers are only compared with each other for equality; stepping by 2 instead of 1 makes no difference',
+    'host.rs|let key_i = key.unwrap_or(0);|0->1': 'equivalent: the asked key is only read when no key was shown yet, and a start always sets the shown key first (key_current = 0)',
+    'host.rs|self.key_current = Some(0);|0->1': 'GAP: the key a restarted player plays with is the shown key (0 after a start); no scenario restarts the player after a start with a non-zero asked key',
+    'host.rs|self.tempo_current = Some(100);|100->101': 'GAP: the tempo a restarted player plays with is the shown tempo (100 after a start); no scenario restarts the player after a start with a non-100 asked tempo',
+    'host.rs|o.push(json!(["returns", true]));|true->false': 'GAP: `start` answers true when the song already failed during the set-up; the driver tests have no scenario in which the set-up itself fails the song',
+    'host.rs|let playing = m.get("playing").map(truthy).unwrap_or(false) || m.get("|false->true': 'GAP: a status without `playing` or `moving` must not look like a playing stray song; the driver routes statuses through the sign-in machine first and the tests have no no-song, no-`playing` scenario that reaches the host',
+    'host.rs|Value::Bool(false) => String::new(),|false->true': "equivalent: the driver always hands the host the error TEXT as a string (non-strings are stringified first), so the host's non-string arms are reached only by the replay parity",
+    'host.rs|Value::Number(n) if n.as_f64() == Some(0.0) => String::new(),|==->!=': "equivalent: the driver always hands the host the error TEXT as a string (non-strings are stringified first), so the host's non-string arms are reached only by the replay parity",
+    'host.rs|Value::Number(n) if n.as_f64() == Some(0.0) => String::new(),|0.0->1.0': "equivalent: the driver always hands the host the error TEXT as a string (non-strings are stringified first), so the host's non-string arms are reached only by the replay parity",
+    'host.rs|a.hold_armed = false;|false->true': 'equivalent: the hold timer fires 25 ms after the hold ends, so by then the play is sent at once and the arm flag is not consulted again for that song',
+    'host.rs|let ok = self.active(w) && self.asked.as_ref().map(|a| a.heard).unwrap|false->true': 'equivalent: `active` already requires an open song, so the `unwrap_or(false)` for no song is never evaluated',
+    'host.rs|let ok = self.active(w) && self.asked.as_ref().map(|a| a.heard).unwrap|false->true': 'equivalent: `active` already requires an open song, so the `unwrap_or(false)` for no song is never evaluated',
+    'host.rs|Some(p) if p != 0.0 => p,|0.0->1.0': "equivalent: the pause time is 0.0 only if the clock reads exactly 0.0, which the app's monotonic clock never does",
+    'host.rs|_ => 0.0,|0.0->1.0': 'GAP: the hold left for a song whose play was already sent; no scenario makes the player ready again after the play went out while the song still counts as unsent',
+    'host.rs|if left <= 0.02 {|<=-><': 'equivalent: the hold left equals exactly 0.02 s only by float coincidence; a timer 25 ms later always follows',
 }
 
 END_MARKERS = ("pub mod replay", "#[cfg(test)]", "#[cfg(target_os")
