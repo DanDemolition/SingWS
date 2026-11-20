@@ -3439,6 +3439,28 @@ def _install_wire_shadow(settings):
 
 _STORE_SHADOW = None
 _STORE_SHADOW_ON = False
+_SHOW_TRANSITION_FPS_CAP = 30            # show_transition_fps_cap: 0 = no cap (the display's own rate)
+_SHOW_TRANSITION_RENDER_LINES = 0        # show_transition_render_lines: 0 = off
+
+
+def _configure_show_transitions(settings) -> None:
+    """Read the transition frame cap and the optional offscreen render height once at launch (Quick views are created later and read them)."""
+    global _SHOW_TRANSITION_FPS_CAP, _SHOW_TRANSITION_RENDER_LINES
+
+    def _int(key, default, low, high):
+        try:
+            return max(low, min(high, int(float((settings or {}).get(key, default)))))
+        except (TypeError, ValueError):
+            return default
+    _SHOW_TRANSITION_FPS_CAP = _int("show_transition_fps_cap", 30, 0, 240)
+    _SHOW_TRANSITION_RENDER_LINES = _int("show_transition_render_lines", 0, 0, 2160)
+
+
+def _transition_swap_interval(refresh_hz: float, fps_cap: int) -> int:
+    """Present every Nth vertical blank so the transitions run at about `fps_cap` frames per second (0 = every blank). 60 Hz and a cap of 30 gives 2."""
+    if fps_cap <= 0 or refresh_hz <= 0:
+        return 1
+    return max(1, int(round(refresh_hz / float(fps_cap))))
 
 
 def _store_shadow_submit(name, payload):
@@ -4203,6 +4225,10 @@ DEFAULTS = {
     # Quick ticker and show VFX there; "off" forces the painter fallback
     # everywhere. Applied at launch, before the video window is built.
     "quick_gpu_surfaces": "auto",
+    # Show-screen transition animations (1.0.4.0): frames per second (30 = present every second vblank on a 60 Hz display; 0 = no cap) and, optionally, the height of the
+    # offscreen picture they are drawn into before being scaled up (0 = off, draw directly; 720 was the 2026-11-16 setting). Read once at launch.
+    "show_transition_fps_cap": 30,
+    "show_transition_render_lines": 0,
     "performance_debug_enabled": False, # opt-in runtime diagnostics; keep normal launches quiet
     # Adds last_event= to [STALL] lines by installing an APPLICATION-WIDE Qt
     # event filter written in Python. Every Paint/Timer/UpdateRequest in the app
@@ -6953,14 +6979,16 @@ def _apply_double_buffered_quick_format(view) -> None:
     try:
         fmt = view.format()
         fmt.setSwapBehavior(QSurfaceFormat.SwapBehavior.DoubleBuffer)
-        # Transitions are capped at 60 fps: on a display faster than 90 Hz
-        # (ProMotion) present every second vblank. A 60 Hz panel keeps 1.
+        # Transitions are capped (setting show_transition_fps_cap, 30 by default since 1.0.4.0; it was 60 on displays over 90 Hz and uncapped below): present every Nth
+        # vertical blank. Whether Qt's Metal path honours the interval is checked from the log line below on the real machine.
         try:
             screen = QApplication.primaryScreen()
             hz = float(screen.refreshRate()) if screen is not None else 60.0
         except Exception:
             hz = 60.0
-        fmt.setSwapInterval(max(1, int(round(hz / 60.0))) if hz > 90.0 else 1)
+        interval = _transition_swap_interval(hz, _SHOW_TRANSITION_FPS_CAP)
+        fmt.setSwapInterval(interval)
+        _diag(f"[SURFACE] transition swap interval={interval} (display {hz:.0f} Hz, cap {_SHOW_TRANSITION_FPS_CAP} fps)")
         view.setFormat(fmt)
     except Exception as exc:
         _diag(f"[SURFACE] Quick view kept default swap behaviour: {exc}")
@@ -7220,10 +7248,11 @@ Rectangle {
     clip: true
     property bool effectsEnabled: true
     property bool active: false
-    // The transition animations are drawn into an offscreen picture of at most 720 lines and scaled up to the window while they run
-    // (2026-11-16, the operator: choppy on the Intel Mac; a Retina window is about 7 million pixels per frame, a 1080p TV 2 million, 720p 0.9 million).
-    // Idle windows and the small host preview (already under 720 lines) are untouched.
-    readonly property real renderScale: height > 720 ? 720 / height : 1.0
+    // OPT-IN (setting show_transition_render_lines; 0 = off, the default since 1.0.4.0): draw the transition animations into an offscreen picture of at most that many
+    // lines and scale it up while they run. It was always 720 from 2026-11-16 (choppy on the Intel Mac), but the extra offscreen pass and the scale-up cost frames
+    // of their own and the operator found the transitions SLOWER with it (2026-11-19 show), so the default is the direct, full-size draw at a 30 fps cap.
+    property int renderLines: 0
+    readonly property real renderScale: (renderLines > 0 && height > renderLines) ? renderLines / height : 1.0
     layer.enabled: active && renderScale < 1.0
     layer.smooth: true
     layer.textureSize: Qt.size(Math.max(1, Math.round(width * renderScale)), Math.max(1, Math.round(height * renderScale)))
@@ -8156,6 +8185,10 @@ class RenderThreadShowScreenVfx(QFrame):
         self._root = self._view.rootObject()
         if self._root is None:
             raise RuntimeError("QML show-screen VFX has no root object")
+        try:
+            self._root.setProperty("renderLines", int(_SHOW_TRANSITION_RENDER_LINES))
+        except Exception:
+            pass
         try:
             self._root.nextUpCountdownFinished.connect(self._on_next_up_countdown_finished)
         except Exception:
@@ -22899,6 +22932,7 @@ class KaraokeApp(QWidget):
         # Make the flag visible to the BG player check via parent attribute
         # --- Settings for background image ---
         self.settings = self.load_settings()
+        _configure_show_transitions(self.settings)
         _install_wire_shadow(self.settings)
         # The background player was built above, before these settings existed, so its EQ / master-chain / counter attach saw nothing.
         # Redo it once the window has finished initialising (the event loop's first turn), so the chain is live from launch.
