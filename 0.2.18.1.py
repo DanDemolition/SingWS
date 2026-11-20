@@ -4229,6 +4229,9 @@ DEFAULTS = {
     # offscreen picture they are drawn into before being scaled up (0 = off, draw directly; 720 was the 2026-11-16 setting). Read once at launch.
     "show_transition_fps_cap": 30,
     "show_transition_render_lines": 0,
+    # Seconds the start of a native (CDG / MP3 / MP4) song is held while the singer-start animation plays, so the animation FINISHES before the audio starts (1.0.4.0;
+    # the animation is about 3.0 s). 0 = start at once, the animation then plays over the first seconds as before. KaraFun songs have their own hold.
+    "show_start_animation_hold_s": 3.1,
     "performance_debug_enabled": False, # opt-in runtime diagnostics; keep normal launches quiet
     # Adds last_event= to [STALL] lines by installing an APPLICATION-WIDE Qt
     # event filter written in Python. Every Paint/Timer/UpdateRequest in the app
@@ -44201,6 +44204,9 @@ class KaraokeApp(QWidget):
         *,
         generation=None,
     ):
+        if generation is not None and object.__getattribute__(self, "__dict__").pop("_singer_start_vfx_preshown", False):
+            _diag(f"[SHOW-VFX] singer-start already shown before the audio generation={int(generation)}")
+            return False
         if generation is not None:
             current = int(getattr(self, "_confirmed_singer_start_generation", 0) or 0)
             if int(generation) != current:
@@ -57634,6 +57640,79 @@ class KaraokeApp(QWidget):
         _diag(f"[KARAFUN] song ended singer={singer_name!r} action={action!r}")
         _diag(f"[KARAFUN] rotation advanced after completion singer={singer_name!r} queue_len={len(self.queue) if isinstance(self.queue, list) else -1}")
 
+    def _start_hold_seconds(self) -> float:
+        try:
+            return max(0.0, min(8.0, float(self.settings.get("show_start_animation_hold_s", 3.1) or 0.0)))
+        except Exception:
+            return 0.0
+
+    def _start_hold_gate(self, skip_confirmation, command_source) -> bool:
+        """At the top of play_next_file: when nothing is playing and the next song is a native one, show the singer-start animation FIRST and run the real start
+        after it (returns True: this call is deferred). The call that comes back after the hold is let through once. Anything unusual starts at once, as before."""
+        state = object.__getattribute__(self, "__dict__")
+        token = state.get("_start_hold_token", 0)
+        if state.get("_start_hold_released") == token and token:
+            state["_start_hold_released"] = 0          # the deferred call itself: run it
+            return False
+        hold = self._start_hold_seconds()
+        if hold <= 0.0:
+            return False
+        if state.get("_start_hold_pending"):
+            _diag("[START-HOLD] ignored: a start is already waiting for its animation")
+            return True
+        try:
+            if (state.get("karaoke_transport") is not None or state.get("_next_in_progress") or state.get("_pending_play_start_token") is not None
+                    or state.get("_stop_in_progress") or state.get("_intro_loop_active") or not getattr(self, "queue", None)):
+                return False
+            singer, entry = self._next_up_queue_target()
+            if not isinstance(singer, dict) or entry is None or self._is_external_karafun_entry(entry):
+                return False
+            payload = self._next_up_transition_payload_for(singer, entry)
+            name = str((payload or {}).get("singer", "") or "").strip()
+            if not name:
+                return False
+            shown = bool(self._trigger_show_screen_singer_start_vfx(name, str(payload.get("artist", "") or ""), str(payload.get("title", "") or "")))
+        except Exception as exc:
+            _diag(f"[START-HOLD] not used: {exc}")
+            return False
+        if not shown:
+            return False
+        token += 1
+        state["_start_hold_token"] = token
+        state["_start_hold_pending"] = True
+        state["_singer_start_vfx_preshown"] = True
+        self._set_play_control_starting(True)
+        _diag(f"[START-HOLD] singer-start animation first: audio starts in {hold:.1f}s singer={name!r}")
+
+        def _go(tok=token):
+            st = object.__getattribute__(self, "__dict__")
+            if st.get("_start_hold_token") != tok or not st.get("_start_hold_pending"):
+                return                                     # cancelled (Stop, or a newer hold)
+            st["_start_hold_pending"] = False
+            st["_start_hold_released"] = tok
+            try:
+                self.play_next_file(skip_confirmation, command_source=command_source)
+            finally:
+                st["_start_hold_released"] = 0
+                # the confirmed start consumes the flag; if the start failed instead, the next song must still get its animation
+                QTimer.singleShot(15000, lambda tok=tok: object.__getattribute__(self, "__dict__").update(_singer_start_vfx_preshown=False)
+                                  if object.__getattribute__(self, "__dict__").get("_start_hold_token") == tok else None)
+        QTimer.singleShot(int(hold * 1000), _go)
+        return True
+
+    def _cancel_start_hold(self, reason: str):
+        """Stop pressed (or anything that must not start) while the animation is playing: the deferred start never happens."""
+        state = object.__getattribute__(self, "__dict__")
+        if state.get("_start_hold_pending"):
+            state["_start_hold_pending"] = False
+            state["_start_hold_token"] = state.get("_start_hold_token", 0) + 1
+            state["_singer_start_vfx_preshown"] = False
+            try:
+                self._set_play_control_starting(False)
+            except Exception:
+                pass
+            _diag(f"[START-HOLD] cancelled reason={reason}")
+
     def _set_play_control_starting(self, starting: bool):
         """Mark Play locked while still allowing a repeat press to ask first."""
         self._play_control_starting = bool(starting)
@@ -57849,6 +57928,8 @@ class KaraokeApp(QWidget):
         # advance. (Not during the media-end auto-advance, which sets _pending.)
         if getattr(self, "_intro_loop_active", False) and not getattr(self, "_pending_intro_loop", False):
             self._release_intro_loop()
+            return
+        if self._start_hold_gate(skip_confirmation, command_source):
             return
         try:
             self._flush_deferred_remote_adds("before_play_next")
@@ -58556,6 +58637,7 @@ class KaraokeApp(QWidget):
             self._discard_pending_performance(reason="stop_playback")
         except Exception:
             pass
+        self._cancel_start_hold("stop_playback")
         pending_rollback = getattr(self, "_pending_play_start_rollback", None)
         if callable(pending_rollback):
             try:
