@@ -76,9 +76,18 @@ def const_mutants(name, text):
 
 def sh(cmd, timeout=240, **kw):
     """A mutant that makes the program spin forever is caught by the timeout (returncode 124)."""
+    # its own process group, so a timeout kills the whole tree: a mutant that spins forever lives in a CHILD of the check (the parity script starts the driver),
+    # and killing only the direct child leaves that grandchild running with the output pipes open (the run then hangs in communicate() for hours)
+    proc = subprocess.Popen(cmd, env=ENV, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=ROOT, start_new_session=True, **kw)
     try:
-        return subprocess.run(cmd, env=ENV, capture_output=True, text=True, cwd=ROOT, timeout=timeout, **kw)
+        out, err = proc.communicate(timeout=timeout)
+        return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
     except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, 9)
+        except OSError:
+            pass
+        proc.communicate()
         return subprocess.CompletedProcess(cmd, 124, "", "timeout")
 
 
