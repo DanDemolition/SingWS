@@ -645,8 +645,8 @@ def _fuzzy_threshold(word: str) -> int:
     n = len(word)
     if n < 3:
         return 0
-    if n < 6:
-        return 1
+    if n < 9:
+        return 1          # one typo; two only for long words ("vandals" is not two edits from anything but a near-spelling)
     return 2
 
 
@@ -656,6 +656,8 @@ def _word_matches_tokens(word: str, tokens: Sequence[str], maxd: int) -> bool:
     for t in tokens:
         if abs(len(t) - len(word)) > maxd:
             continue
+        if t[:1] != word[:1]:
+            continue      # a typo almost never changes the first letter; "vandals" is not "sandals"
         if _bounded_levenshtein(word, t, maxd) <= maxd:
             return True
     return False

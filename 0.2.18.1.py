@@ -54401,6 +54401,8 @@ class KaraokeApp(QWidget):
     def search_tracks(self):
         # DB-backed search (runs in background so the ticker/UI never freezes)
         query = (self.search_input.text() or "").strip()
+        # a result list that is still being filled in batches belongs to an OLDER query: stop it before the list is cleared, or its next batch lands under the new query
+        self._search_render_gen = getattr(self, "_search_render_gen", 0) + 1
         try:
             self.results_list.clear()
         except Exception:
@@ -54496,6 +54498,7 @@ class KaraokeApp(QWidget):
             # from a previous query can't repopulate the list after the box is
             # cleared (the "stale result randomly pops up" bug).
             self._search_job_id = getattr(self, "_search_job_id", 0) + 1
+            self._search_render_gen = getattr(self, "_search_render_gen", 0) + 1
             self._pending_search_query = None
             self._pending_search_job_id = None
             try:
@@ -54715,6 +54718,8 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
 
+        self._search_render_gen = getattr(self, "_search_render_gen", 0) + 1
+        render_gen = self._search_render_gen
         try:
             self.results_list.clear()
         except Exception:
@@ -54732,6 +54737,9 @@ class KaraokeApp(QWidget):
         dropped = [0]
         
         def add_next_batch():
+            # a newer search (or a second delivery of this one) has cleared the list: this chain's rows are for an older query and must not be added
+            if render_gen != getattr(self, "_search_render_gen", 0) or job_id != getattr(self, "_search_job_id", 0):
+                return
             _batch_started = time.perf_counter()
             start = batch_idx[0] * BATCH_SIZE
             end = min(start + BATCH_SIZE, len(rows))
