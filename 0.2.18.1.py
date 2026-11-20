@@ -4171,6 +4171,13 @@ def _migrate_rust_evidence_defaults(settings) -> bool:
         settings["waitlist_snapshot"] = True
         settings["waitlist_snapshot_default_on_migrated"] = True
         changed = True
+    # One time (2026-11-20): the host commands (move a singer, skip, remove, change key...) were validated and logged only ("dry_run": the DAW page said "Dry run: nothing
+    # changed"); they now do what they say. A profile saved at "dry_run" moves to "apply" once; "off" and "apply" are never touched, and "dry_run" chosen again afterwards stays.
+    if not bool(settings.get("shell_commands_apply_default_migrated", False)):
+        if str(settings.get("shell_commands", "dry_run") or "dry_run").strip().lower() == "dry_run":
+            settings["shell_commands"] = "apply"
+        settings["shell_commands_apply_default_migrated"] = True
+        changed = True
     # One time (2026-11-17): the Rust driver became the default KaraFun player engine; saved profiles persisted "shadow". "python" (off) is never changed.
     if not bool(settings.get("karafun_web_engine_rust_default_migrated", False)):
         if str(settings.get("karafun_web_engine", "shadow") or "shadow").strip().lower() == "shadow":
@@ -4230,7 +4237,7 @@ DEFAULTS = {
     "transport_drive": True,
     # A2 for the native media-end decision. Same contract as transport_drive: Rust answers only when it agrees with the
     # retained Python oracle; Python wins every disagreement. Default off until its own local and package gates pass.
-    "shell_commands": "dry_run",  # queue.* commands from the Rust shell: "off" | "dry_run" (validate and log only) | "apply"
+    "shell_commands": "apply",  # queue.* commands from the Rust shell and the phone's DAW page: "off" | "dry_run" (validate and log only) | "apply" (the default since 1.0.4.0)
     "publish_live_state": True,  # write live_state.json (who is on stage) for the read-only Rust shell; best effort, never affects the show
     "transport_drive_media_end": True,
     # A2 for the KaraFun duration-watchdog decision ("end unverified: tell the operator to press Complete"). Same
@@ -4298,6 +4305,7 @@ DEFAULTS = {
     # Read-only waitlist snapshot for the Rust shell: whenever the waiting-for-add view would refresh, write waitlist_snapshot.json (the waiting, pending and
     # removed-tonight requests plus the app's own "already in the queue" and "first turn tonight" answers). The app never reads it back. Default on.
     "waitlist_snapshot_default_on_migrated": False,  # one-time: the saved `waitlist_snapshot` False (the old default) was switched on once
+    "shell_commands_apply_default_migrated": False,  # one-time: a saved shell_commands "dry_run" (the old default) was switched to "apply" once
     "karafun_web_engine_rust_default_migrated": False,  # one-time: a saved karafun_web_engine "shadow" (the old default) was switched to "rust" once
     "waitlist_snapshot": True,
     # Read-only status snapshot for the Rust shell's Status and Diagnostics pages: whenever the header or the ETA line refreshes, write status_snapshot.json (the

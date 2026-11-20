@@ -32,7 +32,7 @@ KEYS = (
     "performance_mode", "safe_mode", "mp4_max_height",
     "transport_shadow", "transport_shadow_default_on_migrated",
     "rust_evidence_defaults_migrated", "waitlist_snapshot_default_on_migrated", "waitlist_snapshot",
-    "karafun_web_engine", "karafun_web_engine_rust_default_migrated",
+    "karafun_web_engine", "karafun_web_engine_rust_default_migrated", "shell_commands_apply_default_migrated",
     "queue_shadow", "plan_shadow", "settings_shadow", "store_shadow", "wire_shadow", "publish_live_state",
     "transport_drive_media_end", "transport_drive_watchdog", "start_shadow", "plan_shadow_live", "shell_commands",
     "performance_debug_enabled", "performance_debug_default_migrated",

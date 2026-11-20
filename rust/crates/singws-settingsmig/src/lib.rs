@@ -147,6 +147,20 @@ fn migrate_rust_evidence_defaults(s: &mut Settings) -> bool {
         s.insert("waitlist_snapshot_default_on_migrated".into(), Value::Bool(true));
         changed = true;
     }
+    // one time (2026-11-20): host commands moved from "dry_run" (validate and log only) to "apply"; "off" and "apply" are never touched
+    if !flag(s, "shell_commands_apply_default_migrated") {
+        let is_dry = match s.get("shell_commands") {
+            None => true,
+            Some(v) if !truthy(v) => true,
+            Some(Value::String(t)) => t.trim_matches(is_py_space).eq_ignore_ascii_case("dry_run"),
+            Some(_) => false,
+        };
+        if is_dry {
+            s.insert("shell_commands".into(), Value::String("apply".into()));
+        }
+        s.insert("shell_commands_apply_default_migrated".into(), Value::Bool(true));
+        changed = true;
+    }
     // one time (2026-11-17): the Rust driver became the default KaraFun player engine; a saved "shadow" (the old default) moves to "rust", "python" is never touched
     if !flag(s, "karafun_web_engine_rust_default_migrated") {
         let is_shadow = match s.get("karafun_web_engine") {
@@ -282,7 +296,7 @@ mod tests {
         let (v, changed) = run(json!({}));
         assert!(changed);
         assert_eq!(v["transport_shadow"], json!(true));
-        assert_eq!(v["shell_commands"], json!("dry_run"));
+        assert_eq!(v["shell_commands"], json!("apply"));
         assert_eq!(v["cdg_timing_offset_ms"], json!(0));
         assert_eq!(v["stall_stack_capture"], json!(false));
         assert!(v["end_silence_threshold_2_5_migrated"].as_bool().unwrap());
@@ -318,7 +332,7 @@ mod tests {
     #[test]
     fn a_marked_profile_is_left_alone() {
         let all = json!({
-            "transport_shadow_default_on_migrated": true, "rust_evidence_defaults_migrated": true, "waitlist_snapshot_default_on_migrated": true, "karafun_web_engine_rust_default_migrated": true,
+            "transport_shadow_default_on_migrated": true, "rust_evidence_defaults_migrated": true, "waitlist_snapshot_default_on_migrated": true, "karafun_web_engine_rust_default_migrated": true, "shell_commands_apply_default_migrated": true,
             "performance_debug_default_migrated": true, "show_safe_stall_diagnostics_migrated": true, "stall_stack_capture_off_migrated": true,
             "ffmpeg_cdg_timing_migrated": true, "ffmpeg_cdg_750_baseline_migrated": true, "cdg_timing_engine_split_migrated": true,
             "mpv_cdg_minus_50_baseline_migrated": true, "mpv_mp4_100_baseline_migrated": true, "mpv_mp4_zero_baseline_migrated": true,
@@ -340,6 +354,22 @@ mod tests {
         assert_eq!(run(json!({"karafun_web_engine": ""})).0["karafun_web_engine"], json!("rust"));
         // chosen again after the one-time move: kept
         assert_eq!(run(json!({"karafun_web_engine": "shadow", "karafun_web_engine_rust_default_migrated": true})).0["karafun_web_engine"], json!("shadow"));
+    }
+
+    #[test]
+    fn host_commands_move_from_dry_run_to_apply_once_and_off_and_apply_stay() {
+        let go = |sc: Value, marked: bool| {
+            let mut s = json!({"rust_evidence_defaults_migrated": true, "shell_commands": sc});
+            if marked {
+                s["shell_commands_apply_default_migrated"] = json!(true);
+            }
+            run(s).0["shell_commands"].clone()
+        };
+        assert_eq!(go(json!("dry_run"), false), json!("apply"));
+        assert_eq!(go(json!(" Dry_Run "), false), json!("apply"));
+        assert_eq!(go(json!("off"), false), json!("off"));
+        assert_eq!(go(json!("apply"), false), json!("apply"));
+        assert_eq!(go(json!("dry_run"), true), json!("dry_run"), "chosen again after the one-time move: kept");
     }
 
     #[test]
