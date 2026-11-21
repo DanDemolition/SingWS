@@ -22734,6 +22734,25 @@ def _queue_state_shadowed(fn):
     return wrapper
 
 
+
+class _Mp3PairRelay(QObject):
+    """Finds the .mp3 beside a .cdg on a worker thread and answers on the GUI thread through a signal."""
+    found = pyqtSignal(str)
+
+    def run(self, cdg_path):
+        import threading
+
+        def work():
+            try:
+                result = KaraokeApp._find_mp3_pair_for_cdg_uncached(cdg_path)
+            except Exception:
+                result = ""
+            try:
+                self.found.emit(result)
+            except RuntimeError:
+                pass   # the dialog closed first
+        threading.Thread(target=work, name="mp3-pair", daemon=True).start()
+
 class KaraokeApp(QWidget):
     # Session undo implementation is shared as a small command mixin.  Keeping
     # aliases here makes the API explicit on the main app without changing its
@@ -51869,6 +51888,13 @@ class KaraokeApp(QWidget):
             return ""
 
     def _find_mp3_pair_for_cdg(self, cdg_path: str) -> str:
+        cache = self.__dict__.get("_mp3_pair_cache") if hasattr(self, "__dict__") else None
+        if cache and str(cdg_path or "") in cache:
+            return cache.pop(str(cdg_path or ""))
+        return KaraokeApp._find_mp3_pair_for_cdg_uncached(str(cdg_path or ""))
+
+    @staticmethod
+    def _find_mp3_pair_for_cdg_uncached(cdg_path: str) -> str:
         base, _ = os.path.splitext(str(cdg_path or ""))
         for cand in (base + ".mp3", base + ".MP3"):
             if os.path.exists(cand):
@@ -52316,6 +52342,25 @@ class KaraokeApp(QWidget):
                     availability = str(track.get("availability_status") or "").strip().lower()
                     if not track_id or availability in {"unavailable", "invalid", "removed"}:
                         raise ValueError("This KaraFun result is unavailable or no longer has a valid track ID.")
+                path = str(track.get("path", "") or "").strip()
+                if path.lower().endswith(".cdg") and not search_state.get("pairing"):
+                    # Looking for the .mp3 beside a .cdg touches the library volume (1 to 3 s on the Intel show Mac's external drive): do it off the GUI thread.
+                    search_state["pairing"] = True
+                    replace_btn.setEnabled(False)
+                    confirm.setText("Checking the matching MP3...")
+                    relay = _Mp3PairRelay(dlg)
+
+                    def done(found, _path=path):
+                        search_state["pairing"] = False
+                        replace_btn.setEnabled(True)
+                        self.__dict__.setdefault("_mp3_pair_cache", {})[_path] = found
+                        try:
+                            apply_choice()
+                        finally:
+                            self.__dict__.get("_mp3_pair_cache", {}).pop(_path, None)
+                    relay.found.connect(done)
+                    relay.run(path)
+                    return
                 if self._replace_queue_song_with_track(singer_idx, song_idx, track, source="replace_track_dialog"):
                     dlg.accept()
             except Exception as e:
