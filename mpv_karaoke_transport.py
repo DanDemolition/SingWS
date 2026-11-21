@@ -173,12 +173,28 @@ class MpvKaraokeTransport(QObject):
         self._drop_voice(f"could not open {path!r}: {failure}")
         return False
 
+    def _load_zones_later(self, path):
+        import threading
+
+        def work():
+            zones = cdg_seek_guard.load_gap(path)
+            if self.video_path == path:
+                self._cdg_zones = zones
+        threading.Thread(target=work, name="cdg-seek-guard", daemon=True).start()
+
     def start(self, start_seconds: float = 0.0):
         source = self.video_path if self.mode in {"cdg", "mp4"} else self.audio_path
         audio = self.audio_path if self.mode == "cdg" else None
         if not source:
             raise RuntimeError("mpv source path is empty")
-        self._cdg_zones = cdg_seek_guard.load_gap(self.video_path) if self.mode == "cdg" else None
+        self._cdg_zones = None
+        if self.mode == "cdg":
+            if float(start_seconds or 0.0) > 0.0:
+                self._cdg_zones = cdg_seek_guard.load_gap(self.video_path)
+            else:
+                # A song that starts at 0 has nothing to clamp; reading the whole .cdg here froze the screen for ~0.7 s on a slow library volume
+                # (Intel show logs, 1.0.3.9). Load the dead zones in the background; a seek only needs them seconds later.
+                self._load_zones_later(self.video_path)
         asked = float(start_seconds or 0.0)
         start_seconds, zone = cdg_seek_guard.clamp_seek_zone(self._cdg_zones, asked)
         self._log_seek_guard("start", asked, start_seconds, zone)

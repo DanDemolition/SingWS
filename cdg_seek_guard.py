@@ -15,16 +15,26 @@ _TILE_BLOCK = 6
 _TILE_XOR = 38
 
 
+_COMMAND_FIRST = bytes(1 if (b & _MASK) == _COMMAND else 0 for b in range(256))
+
+
 def frame_times(data: bytes):
-    """Seconds of every packet that makes a frame: any CDG command, except a tile placed outside the picture (FFmpeg drops that frame)."""
+    """Seconds of every packet that makes a frame: any CDG command, except a tile placed outside the picture (FFmpeg drops that frame).
+
+    Runs on the GUI thread when a song starts, so it never looks at the packets that are not commands: a mask of every packet's first byte is searched
+    for the command markers (the old per-packet loop took ~0.7 s on a 4-minute song on the Intel Mac)."""
     out = []
-    for i in range(len(data) // PACKET_BYTES):
-        p = data[i * PACKET_BYTES:(i + 1) * PACKET_BYTES]
-        if (p[0] & _MASK) != _COMMAND:
-            continue
-        if (p[1] & _MASK) in (_TILE_BLOCK, _TILE_XOR) and ((p[6] & 0x1F) * 12 > 204 or (p[7] & 0x3F) * 6 > 294):
-            continue
-        out.append(i / PACKETS_PER_SECOND)
+    n = len(data) // PACKET_BYTES
+    marks = data[0:n * PACKET_BYTES:PACKET_BYTES].translate(_COMMAND_FIRST)
+    find = marks.find
+    i = find(1)
+    while i != -1:
+        base = i * PACKET_BYTES
+        if (data[base + 1] & _MASK) in (_TILE_BLOCK, _TILE_XOR) and ((data[base + 6] & 0x1F) * 12 > 204 or (data[base + 7] & 0x3F) * 6 > 294):
+            pass
+        else:
+            out.append(i / PACKETS_PER_SECOND)
+        i = find(1, i + 1)
     return out
 
 

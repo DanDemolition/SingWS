@@ -164,3 +164,48 @@ class TransportSeekTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FrameTimesAndStart(unittest.TestCase):
+    """The scan runs when a song starts: it must stay exact, and a song starting at 0 must not wait for it."""
+
+    def test_frame_times_matches_the_per_packet_rules(self):
+        import random
+        rng = random.Random(7)
+        data = bytes(rng.choice([9, 0, 1, 73]) if k % 24 == 0 else rng.getrandbits(8) for k in range(24 * 3000 + 5))
+        want = []
+        for i in range(len(data) // 24):
+            p = data[i * 24:(i + 1) * 24]
+            if (p[0] & 0x3F) != 9:
+                continue
+            if (p[1] & 0x3F) in (6, 38) and ((p[6] & 0x1F) * 12 > 204 or (p[7] & 0x3F) * 6 > 294):
+                continue
+            want.append(i / 300.0)
+        self.assertEqual(g.frame_times(data), want)
+        self.assertEqual(g.frame_times(b""), [])
+
+    def test_a_song_from_zero_does_not_read_the_file_on_the_calling_thread(self):
+        import threading
+        import time
+        import types
+        import mpv_karaoke_transport as mkt
+        plugin = types.SimpleNamespace(loadSingWSMedia=lambda *a, **k: True, stopMedia=lambda: None, pauseMedia=lambda: None, playMedia=lambda: None,
+                                       seekMedia=lambda *a, **k: None, isPlaying=lambda: False,
+                                       setVolume=lambda *a, **k: None, setPlaybackRate=lambda *a, **k: None, setPitch=lambda *a, **k: None)
+        t = mkt.MpvKaraokeTransport(plugin, audio_path="/t/x.mp3", video_path="/t/x.cdg", mode="cdg")
+        callers = []
+        real = g.load_gap
+        g.load_gap = lambda path: (callers.append(threading.current_thread()), [(1.0, 9.0)])[1]
+        try:
+            t.start(0.0)
+            for _ in range(100):
+                if t._cdg_zones:
+                    break
+                time.sleep(0.02)
+            self.assertEqual(t._cdg_zones, [(1.0, 9.0)])
+            self.assertIsNot(callers[0], threading.main_thread())
+            callers.clear()
+            t.start(30.0)
+            self.assertIs(callers[0], threading.current_thread())   # a start inside the song needs the zones to clamp, so it waits
+        finally:
+            g.load_gap = real
