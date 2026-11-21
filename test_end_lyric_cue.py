@@ -63,24 +63,47 @@ class LyricCueTests(unittest.TestCase):
         app._end_silence_mode = ""
         self.assertFalse(app._lyric_end_cue_ready(290.0, 14.0))
 
-    def test_the_tick_hands_over_once_with_the_cue_reason(self):
+    def stubbed(self):
         app = self.make(272.2, 304.0)
-        app._karaoke_early_silence_trim_enabled = lambda: True
-        app._end_silence_tail_handoff_started = False
-        app._end_silence_min_elapsed_s = 5.0
-        app._prefire_bgm_at_verified_audio_end = mock.Mock(return_value=True)
-        handed = []
-        app._handle_media_end_safe = lambda trigger="eos": handed.append(trigger)
-        timers = []
-        with mock.patch.object(self.m.QTimer, "singleShot", staticmethod(lambda ms, fn: timers.append(fn))):
-            self.assertTrue(app._maybe_trim_end_silence(int(304 * NS), int(280 * NS)))
-            for fn in timers:
-                fn()
-            self.assertEqual(handed, ["lyric_end_cue"])
-            self.assertTrue(app._end_silence_tail_handoff_started and app._end_silence_triggered)
-            self.assertEqual(app._end_silence_last_reason, "lyric_end_cue")
-            self.assertFalse(app._maybe_trim_end_silence(int(304 * NS), int(281 * NS)), "once: the handoff is already started")
-        app._prefire_bgm_at_verified_audio_end.assert_called_once()
+        object.__getattribute__(app, "__dict__")["_song_outro_shown_early"] = False
+        app._song_outro_payload_from_current = lambda: {"singer": "Dan", "title": "T", "artist": "A", "on_deck": ""}
+        self.outros = []
+        app._mark_next_up_overlay_pending_after_completion = lambda reason="media_end": (self.outros.append(reason), True)[1]
+        app._handle_media_end_safe = lambda trigger="eos": self.fail("the cue must never end the song")
+        app._prefire_bgm_at_verified_audio_end = lambda: self.fail("the cue must never start the music")
+        return app
+
+    def test_at_the_cue_only_the_animation_starts_and_the_audio_is_left_alone(self):
+        app = self.stubbed()
+        self.assertFalse(app._maybe_show_lyric_cue_outro(int(304 * NS), int(200 * NS)), "mid-song")
+        self.assertEqual(self.outros, [])
+        self.assertTrue(app._maybe_show_lyric_cue_outro(int(304 * NS), int(276 * NS)))
+        self.assertEqual(self.outros, ["lyric_cue"])
+        self.assertFalse(app._maybe_show_lyric_cue_outro(int(304 * NS), int(280 * NS)), "once per song")
+        self.assertEqual(self.outros, ["lyric_cue"])
+        self.assertFalse(object.__getattribute__(app, "__dict__").get("_end_silence_tail_handoff_started"), "no handoff was started")
+
+    def test_the_tick_shows_it_even_with_the_silence_trim_setting_off_and_never_ends_the_song(self):
+        app = self.stubbed()
+        app.settings["karaoke_trim_verified_tail"] = False
+        app.settings["karaoke_allow_early_silence_trim"] = False
+        self.assertFalse(app._karaoke_early_silence_trim_enabled())
+        self.assertFalse(app._maybe_trim_end_silence(int(304 * NS), int(280 * NS)), "the tick itself ends nothing")
+        self.assertEqual(self.outros, ["lyric_cue"])
+
+    def test_no_speaker_name_no_animation_but_the_flag_is_set_so_the_real_end_still_works(self):
+        app = self.stubbed()
+        app._song_outro_payload_from_current = lambda: {}
+        self.assertFalse(app._maybe_show_lyric_cue_outro(int(304 * NS), int(280 * NS)))
+        self.assertEqual(self.outros, [])
+
+    def test_the_real_media_end_does_not_show_the_outro_a_second_time_and_each_song_resets_the_flag(self):
+        import inspect
+        end = inspect.getsource(self.m.KaraokeApp._finish_media_end_cleanup)
+        self.assertIn('get("_song_outro_shown_early")', end)
+        self.assertLess(end.index('get("_song_outro_shown_early")'), end.index('reason="media_end"'))
+        setup = inspect.getsource(self.m.KaraokeApp._setup_end_silence_state)
+        self.assertIn('"_song_outro_shown_early"] = False', setup)
 
     def test_on_real_cdg_files_the_cue_is_inside_the_song_and_the_old_end_is_later(self):
         lib = "/Users/daniel/Music/Karaoke/Karaoke Library"

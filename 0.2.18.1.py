@@ -30791,7 +30791,10 @@ class KaraokeApp(QWidget):
             except Exception as e:
                 _diag(f"[REMOTE-DEFER] media-end flush failed: {e}")
             try:
-                if bool(getattr(self, "_media_end_overlay_eligible", False)):
+                if object.__getattribute__(self, "__dict__").get("_song_outro_shown_early"):
+                    self._clear_next_up_overlay_pending("outro_already_shown_at_lyric_cue")
+                    _diag("[SONG-OUTRO] not shown again: it started at the lyric cue")
+                elif bool(getattr(self, "_media_end_overlay_eligible", False)):
                     self._pending_song_outro_payload = song_outro_payload
                     self._mark_next_up_overlay_pending_after_completion(reason="media_end")
                 else:
@@ -43438,6 +43441,7 @@ class KaraokeApp(QWidget):
         self._end_silence_auto_advance_next = False
         self._end_silence_last_reason = ""
         self._end_silence_tail_handoff_started = False
+        object.__getattribute__(self, "__dict__")["_song_outro_shown_early"] = False
         self._end_audio_hold_log_ts = 0.0
         self._end_audio_unknown_log_ts = 0.0
         if self._end_silence_mode in ("cdg", "mp4"):
@@ -43549,25 +43553,38 @@ class KaraokeApp(QWidget):
             _diag(f"[CROSSFADE] verified-audio-tail BG fade failed: {exc}")
             return False
 
-    def _try_lyric_end_cue(self, elapsed: float, remain: float) -> bool:
-        """Hand a CDG song over a few seconds after its last lyric wipe (see _lyric_end_cue_ready). True when the handoff was started."""
+    def _maybe_show_lyric_cue_outro(self, dur_ns: int, pos_ns: int) -> bool:
+        """A few seconds after a CDG song's last lyric wipe, start the end-of-song animation OVER the song. The audio keeps playing to the end of the track and the
+        song ends by the normal rules (the animation is not shown a second time then). It never stops or hands over anything: the first 1.0.4.0 version ended the song at
+        the cue and cut the audio off (2026-11-20 Intel show). True when the animation was started."""
+        state = object.__getattribute__(self, "__dict__")
+        if state.get("_song_outro_shown_early") or dur_ns <= 0 or pos_ns <= 0:
+            return False
+        elapsed = float(pos_ns) / float(NS_PER_SECOND)
+        remain = float(dur_ns - pos_ns) / float(NS_PER_SECOND)
         if not self._lyric_end_cue_ready(elapsed, remain):
             return False
-        # the lyrics finished (their last wipe) a few seconds ago: hand over now instead of sitting through the instrumental tail / the static final card
-        self._end_silence_tail_handoff_started = True
-        self._end_silence_triggered = True
-        self._end_silence_last_reason = "lyric_end_cue"
-        self._end_silence_auto_advance_next = bool(self.settings.get("karaoke_auto_advance", False))
+        state["_song_outro_shown_early"] = True
+        shown = False
         try:
-            self._prefire_bgm_at_verified_audio_end()
-        except Exception:
-            pass
-        _diag(f"[END-CUE] handing over at {elapsed:.2f}s: last lyric change at {float(self._karaoke_lyric_cue_s):.1f}s, {remain:.1f}s of the song left")
-        QTimer.singleShot(0, lambda: self._handle_media_end_safe("lyric_end_cue"))
-        return True
+            payload = self._song_outro_payload_from_current()
+            if isinstance(payload, dict) and str(payload.get("singer", "") or "").strip():
+                state["_pending_song_outro_payload"] = payload
+                shown = bool(self._mark_next_up_overlay_pending_after_completion(reason="lyric_cue"))
+        except Exception as exc:
+            _diag(f"[END-CUE] outro failed: {exc}")
+        _diag(f"[END-CUE] outro {'started' if shown else 'not shown'} at {elapsed:.2f}s (last lyric change at {float(self._karaoke_lyric_cue_s):.1f}s); "
+              f"the audio keeps playing, {remain:.1f}s of the song left")
+        return shown
 
     def _maybe_trim_end_silence(self, dur_ns: int, pos_ns: int) -> bool:
         """End karaoke once the scanned audio and visible lyrics are finished."""
+        _cue_outro = getattr(self, "_maybe_show_lyric_cue_outro", None)
+        if callable(_cue_outro):
+            try:
+                _cue_outro(dur_ns, pos_ns)         # animation only: never ends the song, whatever the silence-trim setting says
+            except Exception:
+                pass
         if not self._karaoke_early_silence_trim_enabled():
             return False
         if getattr(self, "_end_silence_mode", "") not in ("cdg", "mp4"):
@@ -43583,9 +43600,6 @@ class KaraokeApp(QWidget):
             self._end_silence_accum_s = 0.0
             self._end_silence_last_tick = time.monotonic()
             return False
-        _cue = getattr(self, "_try_lyric_end_cue", None)
-        if callable(_cue) and _cue(elapsed, remain):
-            return True
 
         # Prefer real-time bus meter data; fallback to polling last-message.
         db = None
