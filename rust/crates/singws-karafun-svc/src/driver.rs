@@ -683,6 +683,49 @@ mod tests {
         let holds_after = d.io.app.iter().filter(|e| e[0] == "log" && e[1].as_str().is_some_and(|t| t.starts_with("holding the play"))).count();
         assert_eq!(holds_after, holds_before, "the play was sent long ago: nothing is held again");
     }
+
+    #[test]
+    fn a_player_signed_out_in_the_middle_of_a_show_signs_in_again_with_the_saved_login_and_is_ready_again() {
+        let mut d = driver();
+        d.io.saved = Some(SavedLogin::Found);
+        d.start_song(&req(), 0.0);
+        d.on_display_message(&status(true, false, 0.0, 0.0), 0.5);
+        d.tick(5.0);
+        d.on_display_message(&status(true, true, 1.0, 100.0), 5.5);
+        assert_eq!(d.service_state(), "ready");
+        assert_eq!(d.io.logins, 0);
+        // KaraFun signs the player out while the song plays: 16 signed-out statuses later the saved login is used
+        let signed_out = status(false, false, 0.0, 0.0);
+        for n in 1..=15u32 {
+            d.on_display_message(&signed_out, 6.0 + 0.5 * n as f64);
+        }
+        assert_eq!(d.io.logins, 0, "not yet");
+        d.on_display_message(&signed_out, 14.0);
+        assert_eq!(d.io.logins, 1, "the saved login is sent once");
+        // it signs in: the page is reloaded once, then the player is ready again
+        d.on_display_message(&status(true, false, 0.0, 0.0), 15.0);
+        assert_eq!(d.io.display.iter().filter(|c| c["cmd"] == "reload").count(), 1);
+        d.on_display_message(&status(true, false, 0.0, 0.0), 15.0 + crate::RELOAD_SETTLE_S + 0.5);
+        assert_eq!(d.service_state(), "ready");
+    }
+
+    #[test]
+    fn skipping_a_song_then_starting_the_next_plays_the_next_one() {
+        let mut d = playing_song(100.0);
+        assert!(d.on_finish(10.0), "the skip stops the player");
+        assert_eq!(d.io.display.last().map(|c| c["cmd"].clone()), Some(json!("stop")));
+        let mut next = req();
+        next.song_id = Some(61234);
+        next.title = "Next".into();
+        assert!(d.start_song(&next, 10.5));
+        d.tick(10.5 + 4.0);
+        let plays: Vec<_> = d.io.display.iter().filter(|c| c["cmd"] == "play").collect();
+        assert_eq!(plays.len(), 2, "one play for each song: {:?}", d.io.display);
+        assert_eq!(plays[1]["id"], 61234, "the second play is the next song");
+        // and the skipped song's late 'playing' status does not complete the new one
+        d.on_display_message(&status(true, true, 1.0, 100.0), 15.0);
+        assert_eq!(finishes(&d), 0);
+    }
 }
 
 /// Replay of a whole session for the parity tool (`{"kind":"driver", ...}`): a scripted clock, a fake display program and a fake saved login. Events (each with `t`):

@@ -97,6 +97,21 @@ class RustHostTests(unittest.TestCase):
         self.assertIsNone(self.host._proc.poll())
         self.wait(lambda: nxt.get("karafun_status") == "playing")
 
+    def test_skipping_a_song_stops_the_player_and_the_next_song_plays(self):
+        self.assertTrue(self.host.start(self.entry, 0, 100))
+        self.wait(lambda: self.entry.get("karafun_status") == "playing")
+        proc = self.host._proc
+        self.assertTrue(self.host.on_finish(), "a skip with a song open")
+        self.assertIsNone(self.host.asked)
+        nxt = {"artist": "Sugar Ray", "title": "Someday", "provider_track_id": "kf_3240783", "duration": 200, "duration_estimated": True}
+        self.app.entry = nxt
+        self.app._active_external_karafun = {"entry": nxt}
+        self.assertTrue(self.host.start(nxt, 0, 100))
+        self.assertIs(self.host._proc, proc, "the same driver process plays the next song (no restart for a skip)")
+        self.wait(lambda: nxt.get("karafun_status") == "playing")
+        cmds = self.commands()
+        self.assertEqual([c for c in cmds if c in ("play", "stop")], ["play", "stop", "play"], cmds)
+
     def test_a_driver_that_dies_between_songs_is_just_replaced(self):
         self.host.ensure_service()
         first = self.host._proc
