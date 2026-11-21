@@ -14,7 +14,8 @@ python3 tools/check_native_libs_fresh.py --arch arm64 --require || { echo "!! th
 ./rust/build_relaymsg.sh || echo "!! could not build the singws-relaymsg helper; relay_msg_shadow will be skipped in this build"
 ./rust/build_settingsmig.sh || echo "!! could not build the singws-settingsmig helper; settings_migrate_shadow will be skipped in this build"
 ./rust/build_songend.sh || echo "!! could not build the singws-songend helper; the opt-in songend_shadow will be skipped in this build"
-./rust/build_karafun_svc.sh || echo "!! could not build the singws-karafun-svc program; karafun_web_engine=rust will use the Python host in this build"
+# The Rust KaraFun program is the DEFAULT KaraFun engine since 1.0.4.0: a build without it would silently play KaraFun through the Python host, so it stops the build.
+./rust/build_karafun_svc.sh || { echo "!! could not build the singws-karafun-svc program (the default KaraFun engine); refusing to build an installer without it"; exit 1; }
 ./rust/build_karafun_display.sh || { echo "!! could not build the singws-karafun-display program (needs the CEF files in native/cef150-*, see rust/build_karafun_display.sh); KaraFun songs will not work in this build"; exit 1; }
 ./rust/build_scan.sh || echo "!! could not build the singws-scan-cli helper; the scan shadow will report helper-not-found in this build"
 
