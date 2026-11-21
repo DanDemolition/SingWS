@@ -58,6 +58,37 @@ class StartHoldTests(unittest.TestCase):
         self.assertFalse(app._start_hold_pending)
         self.assertEqual(app._start_hold_released, 0, "the pass is used up")
 
+    def test_a_zip_resume_of_the_same_start_is_never_held_again(self):
+        """The 2026-11-20 show: a ZIP song rolls its start back to prepare the files and calls play_next_file again as zip_resume; the animation played twice."""
+        app = self.make()
+        self.assertTrue(app._start_hold_gate(False, "manual_idle"))
+        calls = []
+        def fake_play(skip_confirmation=False, *, command_source="internal"):
+            calls.append((command_source, app._start_hold_gate(skip_confirmation, command_source)))
+        app.play_next_file = fake_play
+        self.timers[0][1]()                                           # the hold ends: the first pass, let through
+        self.assertEqual(calls, [("manual_idle", False)])
+        # the start rolled back for the ZIP preparation and comes back as zip_resume: no second animation, no second wait
+        self.assertFalse(app._start_hold_gate(True, "zip_resume"))
+        self.assertEqual(len(self.vfx), 1)
+        self.assertEqual(len(self.timers), 2, "only the 15 s flag clean-up was added, no second hold")
+        # even with another source name, a call right after a hold is the same start
+        self.assertFalse(app._start_hold_gate(True, "internal"))
+        self.assertEqual(len(self.vfx), 1)
+
+    def test_a_zip_resume_without_an_earlier_hold_is_not_held_either(self):
+        app = self.make()
+        self.assertFalse(app._start_hold_gate(True, "zip_resume"))
+        self.assertEqual((self.vfx, self.timers), ([], []))
+
+    def test_a_later_start_after_the_window_is_held_again(self):
+        app = self.make()
+        app._start_hold_gate(False, "manual_idle")
+        app.play_next_file = lambda *a, **k: None
+        self.timers[0][1]()
+        with mock.patch.object(self.m.time, "monotonic", return_value=object.__getattribute__(app, "__dict__")["_start_hold_done_at"] + 31.0):
+            self.assertTrue(app._start_hold_gate(False, "manual_idle"), "31 s later it is a new start")
+
     def test_stop_during_the_animation_cancels_the_start(self):
         app = self.make()
         app._start_hold_gate(False, "internal")

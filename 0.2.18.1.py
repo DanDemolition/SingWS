@@ -57717,6 +57717,10 @@ class KaraokeApp(QWidget):
         hold = self._start_hold_seconds()
         if hold <= 0.0:
             return False
+        # A ZIP song is prepared first: the start rolls back ("zip_prepare_pending") and play_next_file is called again as "zip_resume". That second call is the SAME start,
+        # whose animation already played (2026-11-20 Intel show: 37 of 51 starts showed the animation twice and waited 6 s). Never hold a resume, nor a call right after a hold.
+        if command_source == "zip_resume" or (time.monotonic() - float(state.get("_start_hold_done_at", 0.0) or 0.0)) < 30.0:
+            return False
         if state.get("_start_hold_pending"):
             _diag("[START-HOLD] ignored: a start is already waiting for its animation")
             return True
@@ -57750,6 +57754,7 @@ class KaraokeApp(QWidget):
                 return                                     # cancelled (Stop, or a newer hold)
             st["_start_hold_pending"] = False
             st["_start_hold_released"] = tok
+            st["_start_hold_done_at"] = time.monotonic()
             try:
                 self.play_next_file(skip_confirmation, command_source=command_source)
             finally:
