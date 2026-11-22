@@ -4027,8 +4027,9 @@ def _install_main_thread_watchdog(owner, threshold_ms: int = 120):
                 # (it crashed shows on 2026-08-09 and 2026-10-30). Set stall_stack_capture_tenant_off=true there to opt out.
                 if bool(_st.get("stall_stack_capture_tenant_off", False)):
                     return False
-                _tenant = str(_st.get("user", _st.get("tenant", "")) or "").strip().lower()
-                return _tenant in {"kwj"}
+                # Operator-approved 2026-11-22: on for every tenant for now, so each show's zip carries the stacks (the Intel show logs of 11-21 had
+                # a 6.9 s freeze and no stack). The dump is written by faulthandler on the main thread only when a stall is detected.
+                return True
             except Exception:
                 return False
 

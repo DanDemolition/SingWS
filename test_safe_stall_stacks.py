@@ -24,7 +24,7 @@ CHILD = textwrap.dedent('''
     lines = []
     mod._diag = lambda text, *a, **k: lines.append(str(text))
     owner = QWidget()
-    owner.settings = {"performance_debug_enabled": True, "stall_stack_capture": %(capture)s, "stall_system_snapshot": False, "stall_event_attribution": False}
+    owner.settings = {"performance_debug_enabled": True, "stall_stack_capture": %(capture)s, "stall_stack_capture_tenant_off": not %(capture)s, "stall_system_snapshot": False, "stall_event_attribution": False}
     mod._install_main_thread_watchdog(owner, threshold_ms=150)
     t0 = time.monotonic()
     while time.monotonic() - t0 < 0.6:
@@ -89,3 +89,19 @@ class SafeStallStacks(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StackCaptureDefault(unittest.TestCase):
+    """Operator-approved 2026-11-22: stall stacks are on for every tenant unless stall_stack_capture_tenant_off is set, and the show zip script carries the file."""
+
+    def test_capture_is_on_for_any_tenant_and_the_opt_out_stays(self):
+        src = SOURCE[SOURCE.index("def _stack_capture_enabled"):][:1400]
+        self.assertIn('stall_stack_capture_tenant_off', src)
+        self.assertNotIn('in {"kwj"}', src)
+        self.assertIn("return True", src)
+
+    def test_the_after_show_zip_takes_the_stacks_and_the_display_log(self):
+        for path in ("tools/intel/after_show.sh", "tools/intel_kit/after_show.sh"):
+            text = open(path, encoding="utf-8").read()
+            self.assertIn('-name "singws_*.log*"', text)           # includes singws_stall_stacks.log
+            self.assertIn("karafun_display_stderr.log", text)
