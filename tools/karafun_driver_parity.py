@@ -29,6 +29,9 @@ sys.path.insert(0, str(ROOT))
 import karafun_web  # noqa: E402
 import karafun_web_host  # noqa: E402
 
+# the Python host has neither of the 2026-11-22 rules (a song clock stuck at 0, a player that ignores repeated stops): the Rust program is told to leave them out here
+os.environ["SINGWS_KF_OLD_RULES"] = "1"
+
 WALL_FIELDS = {"karafun_pending_at", "karafun_submitted_at", "karafun_play_started_at"}
 CREDS = ("a@example.com", "not-a-real-password")
 SONG_ID = 3241559

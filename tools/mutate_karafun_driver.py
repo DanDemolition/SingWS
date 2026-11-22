@@ -30,6 +30,12 @@ MANIFEST = str(WORK / "crate" / "Cargo.toml")
 
 # "<file>|<snippet[:70]>|<old>-><new>" -> "equivalent: why" | "GAP: what is missing"
 NOTES: dict = {
+    # 2026-11-22: the two rules added after the 2026-11-21 show (stuck song clock, a player that ignores stops)
+    "host.rs|stray_count: 0,|0->1": "equivalent: the first stray resets the window (stray_since starts at 0, far older than a minute) so the count starts at 0 whatever it held",
+    "host.rs|stray_since: 0.0,|0.0->1.0": "equivalent: any real clock reading is more than a minute after 1.0, so the first stray starts a window either way",
+    "host.rs|recoveries: 0, last_position: None, resume_at: None, gen: self.gens, s|false->true": "equivalent: `started` overwrites `moved` when the song is heard starting, and `follow` only reads it after that",
+    "host.rs|recoveries: 0, last_position: None, resume_at: None, gen: self.gens, s|0.0->1.0": "equivalent: `started` overwrites `started_at` when the song is heard starting, and `follow` only reads it after that",
+
     'driver.rs|self.returns.unwrap_or(false)|false->true': 'equivalent: the song machine always answers `returns` after StartBranch, so the default is never used',
     'driver.rs|if t.0 <= now && pos.map_or(true, |p: usize| t.0 < self.timers[p].0) {|<-><=': 'equivalent: two timers due at the same instant (watchdog and hold) give the same app-visible effects in either order',
     'driver.rs|let ms = arg(1).as_f64().unwrap_or(0.0);|0.0->1.0': 'equivalent: `hold_timer` always carries its milliseconds; the default is for a malformed effect only',

@@ -14,8 +14,10 @@ class DawQueueButtonTests(unittest.TestCase):
         src = JS.read_text(encoding="utf-8")
         sent = set(re.findall(r"dispatchQueue\('queue\.move_singer',\{singer_id:id,direction:'(\w+)'\}\)", src))
         self.assertEqual(sent, {"up", "down", "top", "bottom"})
+        self.assertIn("direction:'position',position:n", src)
         app = Path("0.2.18.1.py").read_text(encoding="utf-8")
         self.assertIn('where not in ("up", "down", "top", "bottom")', app)
+        self.assertIn('where == "position"', app)
 
     def test_the_top_and_bottom_buttons_are_small_and_labelled(self):
         src = JS.read_text(encoding="utf-8")

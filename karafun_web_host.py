@@ -783,6 +783,15 @@ class KaraFunWebHost:
         except Exception as error:
             self._log(f"could not place the preview picture: {error!r}")
 
+    def _audience_screen_name(self) -> str:
+        """The name of the screen the audience window is on (for the log: which display got the KaraFun picture)."""
+        try:
+            vw = getattr(self.app, "video_window", None)
+            screen = vw.screen() if vw is not None else None
+            return str(screen.name()) if screen is not None else "none"
+        except Exception:
+            return "unknown"
+
     def _place_picture(self, force: bool = False) -> None:
         self._place_preview(force)
         try:
@@ -794,6 +803,7 @@ class KaraFunWebHost:
                     self._picture_placed = None
                     self._picture_targets.pop("audience", None)
                     self.service.web.window(False)      # the audience window is hidden or minimised: no loose picture over other windows
+                    self._log("the picture is hidden: the audience window is hidden or minimised")
                 return
             if not force and placed == self._picture_placed:
                 self.service.web.order("audience", placed[1])
@@ -802,6 +812,7 @@ class KaraFunWebHost:
             self._picture_placed = placed
             self._picture_targets["audience"] = above
             self.service.web.window(True, x, y, w, h, 0, above)
+            self._log(f"the picture is placed on screen {self._audience_screen_name()!r} at {x},{y} {w}x{h} over window {above}")
         except Exception as error:
             self._log(f"could not place the picture: {error!r}")
 

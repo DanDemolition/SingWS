@@ -69,6 +69,8 @@ pub struct Host {
     stray_stopped_at: f64,
     stray_count: u32,
     stray_since: f64,
+    /// the parity tools compare with the Python host, which has neither of the 2026-11-22 rules (stuck clock, ignored stops): `SINGWS_KF_OLD_RULES` switches them off
+    old_rules: bool,
     pub state: (String, String),
     status: Value,
     gens: u64,
@@ -165,6 +167,7 @@ impl Host {
             stray_stopped_at: 0.0,
             stray_count: 0,
             stray_since: 0.0,
+            old_rules: std::env::var_os("SINGWS_KF_OLD_RULES").is_some(),
             state: ("idle".into(), String::new()),
             status: json!({}),
             gens: 0,
@@ -426,7 +429,7 @@ impl Host {
         }
         self.stray_count += 1;
         o.push(json!(["log", "the player was playing a song SingWS did not ask for; stopped it"]));
-        if self.stray_count >= STRAY_STOPS_BEFORE_CLOSE {
+        if !self.old_rules && self.stray_count >= STRAY_STOPS_BEFORE_CLOSE {
             // the page ignores the stop (the 2026-11-21 show: 620 stops in 45 minutes): close the player; the next song starts a new one
             self.stray_count = 0;
             o.push(json!(["log", format!("the player ignored {STRAY_STOPS_BEFORE_CLOSE} stops in a row; closing it (the next song starts a fresh one)")]));
@@ -603,7 +606,7 @@ impl Host {
             if position > 0.5 {
                 a.moved = true;
             }
-            same && playing && !a.moved && now - a.started_at > STUCK_CLOCK_S
+            !self.old_rules && same && playing && !a.moved && now - a.started_at > STUCK_CLOCK_S
         };
         if stuck {
             let state = self.status.get("state").map(|v| v.to_string()).unwrap_or_default();
@@ -833,7 +836,7 @@ mod hold_tests {
     fn a_clock_that_moves_is_never_restarted() {
         let mut h = Host::new();
         begin_playing(&mut h, 100.0);
-        h.step(Event::Status(&playing(2.0)), &world("ready"), 106.0).unwrap();
+        h.step(Event::Status(&playing(1.0)), &world("ready"), 106.0).unwrap();
         // even if the page later reports the position 0 again (a seek back), nothing is restarted
         let o = h.step(Event::Status(&playing(0.0)), &world("ready"), 130.0).unwrap();
         assert!(!has(&o, "service_stop"));
@@ -882,5 +885,63 @@ mod hold_tests {
         // a new run of strays much later starts counting again
         let o = h.step(Event::Status(&playing(5.0)), &w, 400.0).unwrap();
         assert!(has(&o, "web_stop") && !has(&o, "service_stop"));
+    }
+
+    #[test]
+    fn the_stuck_clock_limit_is_more_than_eight_seconds_not_eight_exactly() {
+        let mut h = Host::new();
+        begin_playing(&mut h, 100.0);                      // started at 104.0
+        let o = h.step(Event::Status(&playing(0.0)), &world("ready"), 104.0 + STUCK_CLOCK_S).unwrap();
+        assert!(!has(&o, "service_stop"), "exactly the limit is not yet stuck");
+        let o = h.step(Event::Status(&playing(0.0)), &world("ready"), 104.0 + STUCK_CLOCK_S + 0.01).unwrap();
+        assert!(has(&o, "service_stop"));
+    }
+
+    #[test]
+    fn a_position_of_half_a_second_is_not_movement_but_one_second_is() {
+        let mut h = Host::new();
+        begin_playing(&mut h, 100.0);
+        // 0.5 s is not movement: the clock is still called stuck past the limit
+        h.step(Event::Status(&playing(0.5)), &world("ready"), 106.0).unwrap();
+        let o = h.step(Event::Status(&playing(0.5)), &world("ready"), 113.0).unwrap();
+        assert!(has(&o, "service_stop"), "0.5 s is not movement");
+        // a song heard starting at position 0.5 is not moved either; at 1.0 it is
+        let mut h = Host::new();
+        start(&mut h, "ready", 100.0);
+        h.step(Event::HoldOver, &world("ready"), 103.53).unwrap();
+        h.step(Event::Status(&playing(1.0)), &world("ready"), 104.0).unwrap();
+        let o = h.step(Event::Status(&playing(1.0)), &world("ready"), 130.0).unwrap();
+        assert!(!has(&o, "service_stop"), "a song that started at 1 s has moved");
+        let mut h = Host::new();
+        start(&mut h, "ready", 100.0);
+        h.step(Event::HoldOver, &world("ready"), 103.53).unwrap();
+        h.step(Event::Status(&playing(0.5)), &world("ready"), 104.0).unwrap();
+        let o = h.step(Event::Status(&playing(0.5)), &world("ready"), 130.0).unwrap();
+        assert!(has(&o, "service_stop"), "a song that started at 0.5 s has not moved");
+    }
+
+    #[test]
+    fn stops_exactly_a_minute_apart_do_not_start_a_new_count_and_a_closed_player_starts_over() {
+        let mut h = Host::new();
+        let w = world("ready");
+        h.step(Event::Status(&playing(5.0)), &w, 1000.0).unwrap();               // count 1, window starts
+        h.step(Event::Status(&playing(5.0)), &w, 1030.0).unwrap();               // count 2
+        // exactly 60 s after the window began: still the same window, so this is the third stop and closes the player
+        let o = h.step(Event::Status(&playing(5.0)), &w, 1000.0 + STRAY_WINDOW_S).unwrap();
+        assert!(has(&o, "service_stop"), "the window is more than 60 s, not 60 s exactly");
+    }
+
+    #[test]
+    fn the_stop_count_starts_over_after_the_player_is_closed() {
+        let mut h = Host::new();
+        let w = world("ready");
+        for (k, t) in [1000.0, 1010.0, 1020.0].iter().enumerate() {
+            let o = h.step(Event::Status(&playing(5.0)), &w, *t).unwrap();
+            assert_eq!(has(&o, "service_stop"), k == 2);
+        }
+        // inside the same minute: two more stops do not close it, the third does
+        assert!(!has(&h.step(Event::Status(&playing(5.0)), &w, 1025.0).unwrap(), "service_stop"));
+        assert!(!has(&h.step(Event::Status(&playing(5.0)), &w, 1030.0).unwrap(), "service_stop"), "only the second stop since the close");
+        assert!(has(&h.step(Event::Status(&playing(5.0)), &w, 1035.0).unwrap(), "service_stop"));
     }
 }

@@ -4,6 +4,13 @@ Status 2026-11-18: `karafun_web_engine` defaults to `rust` (commit 416cc1b). The
 program or the display program is not found at launch (`karafun_web_host_rust.make_host` returns None). This note maps what could go, what has to stay, and what
 must be true first. The rule from the operator is: Rust owns everything, but a rule is only retired after a clean show (rehearsals count) and never silently.
 
+## Status 2026-11-22: gate NOT met, nothing deleted
+
+The 2026-11-21 Intel show was not clean: KaraFun songs started but the player's clock never moved (six starts), and after the last Stop the page ignored 620 stops.
+Rules added to the Rust driver for it (not in the Python host): `STUCK_CLOCK_S`, `STRAY_STOPS_BEFORE_CLOSE`; the parity tools run with `SINGWS_KF_OLD_RULES=1`.
+Step 3 (the frozen oracle) is done in `tools/oracle/` (copies, not yet used). Steps 1 (a clean show) and 4 to 6 wait for a show where `karafun_rust_report.py --require-all` is CLEAN.
+The Python host also stays as the fallback until then.
+
 ## What the Rust host already replaces, and what it still borrows
 
 `KaraFunWebHostRust` subclasses `KaraFunWebHost`. Measured on the code (2026-11-18, `ast` over both files):

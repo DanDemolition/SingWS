@@ -22,7 +22,7 @@ from pathlib import Path
 sys.setswitchinterval(0.001)
 
 _GST_RUNTIME_DEBUG = {}
-APP_VERSION = "1.0.4.2"
+APP_VERSION = "1.0.4.3"
 PROCESS_STARTUP_UTC = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
 PROCESS_SESSION_UUID = str(uuid.uuid4())
 PROCESSING_NOTIFICATION_TIMEOUT_MS = 15000
@@ -50757,12 +50757,25 @@ class KaraokeApp(QWidget):
                     return si, sj
         return -1, -1
 
-    def shell_queue_move_singer(self, singer_id: str, where: str) -> str:
-        """Move a singer `up`/`down` one place or to the `top`/`bottom` (what Move Up/Down and Shift+Move do). Returns a short result text."""
+    def shell_queue_move_singer(self, singer_id: str, where: str, position=None) -> str:
+        """Move a singer `up`/`down` one place, to the `top`/`bottom` (what Move Up/Down and Shift+Move do), or to a place in the rotation
+        (`where="position"`, `position` = 1 for the first singer). Returns a short result text."""
         i = self._queue_singer_index_by_id(singer_id)
         if i < 0:
             return "unknown_singer"
         last = len(self.queue) - 1
+        if where == "position":
+            target = int(position) - 1
+            if target < 0 or target > last:
+                return "bad_position"
+            if target == i:
+                return "no_change"
+            undo = KaraokeApp._begin_undoable_action(self, "Reorder")
+            singer = self.queue.pop(i)
+            self.queue.insert(target, singer)
+            self.update_queue_display()
+            KaraokeApp._commit_undoable_action(self, undo, "Queue reordered")
+            return "moved"
         if (where in ("up", "top") and i <= 0) or (where in ("down", "bottom") and i >= last):
             return "no_change"
         undo = KaraokeApp._begin_undoable_action(self, "Reorder")
@@ -51605,7 +51618,11 @@ class KaraokeApp(QWidget):
         where = str(args.get("direction") or args.get("where") or "").strip().lower()
         singer_id = str(args.get("singer_id") or "").strip()
         entry_id = str(args.get("entry_id") or "").strip()
-        if action in ("queue.move_singer", "queue.move_song") and where not in ("up", "down", "top", "bottom"):
+        if action == "queue.move_singer" and where == "position":
+            place = args.get("position")
+            if isinstance(place, bool) or not isinstance(place, int) or not 1 <= place <= len(self.queue):
+                return remember(False, "bad_position")
+        elif action in ("queue.move_singer", "queue.move_song") and where not in ("up", "down", "top", "bottom"):
             return remember(False, "bad_direction")
         if action in ("queue.move_singer", "queue.remove_singer", "queue.skip_singer", "queue.rename_singer", "queue.set_singer_brand", "queue.message_singer") and self._queue_singer_index_by_id(singer_id) < 0:
             return remember(False, "unknown_singer")
@@ -51678,7 +51695,7 @@ class KaraokeApp(QWidget):
             return remember(True, f"dry_run: would {action}")
         try:
             if action == "queue.move_singer":
-                result = self.shell_queue_move_singer(singer_id, where)
+                result = self.shell_queue_move_singer(singer_id, where, args.get("position"))
             elif action == "queue.move_song":
                 result = self.shell_queue_move_song(entry_id, where)
             elif action == "queue.remove_singer":

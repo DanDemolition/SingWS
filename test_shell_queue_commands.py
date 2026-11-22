@@ -232,6 +232,20 @@ class DifferentialTests(unittest.TestCase):
         self.assertEqual(h.command("queue.remove_singer", {"singer_id": "b"}), (True, "removed"))
         self.assertEqual([s["singer_id"] for s in h.app.queue], ["a"])
 
+    def test_a_singer_can_be_moved_to_a_place_in_the_rotation(self):
+        h = Harness([{"singer_id": c, "name": c.upper(), "songs": [entry(i)]} for i, c in enumerate("abcde", 1)])
+        order = lambda: "".join(s["singer_id"] for s in h.app.queue)
+        self.assertEqual(h.command("queue.move_singer", {"singer_id": "e", "direction": "position", "position": 2}), (True, "moved"))
+        self.assertEqual(order(), "aebcd")
+        self.assertEqual(h.command("queue.move_singer", {"singer_id": "a", "direction": "position", "position": 5}), (True, "moved"))
+        self.assertEqual(order(), "ebcda")
+        self.assertEqual(h.command("queue.move_singer", {"singer_id": "e", "direction": "position", "position": 1}), (True, "no_change"))
+        for bad in (0, 6, -1, "2", 2.0, True, None):
+            self.assertEqual(h.command("queue.move_singer", {"singer_id": "b", "direction": "position", "position": bad}), (False, "bad_position"), bad)
+        self.assertEqual(order(), "ebcda")
+        # a song cannot be moved by place: only the four directions
+        self.assertEqual(h.command("queue.move_song", {"entry_id": "local:uid1", "direction": "position", "position": 1}), (False, "bad_direction"))
+
 
 class GuardTests(unittest.TestCase):
     def harness(self, mode="apply"):
