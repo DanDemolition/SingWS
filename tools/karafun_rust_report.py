@@ -82,6 +82,8 @@ _PATTERNS = (
     ("effect_failed", "KARAFUN-WEB", re.compile(r"effect failed|unknown effect from the Rust driver")),
     ("stray_song", "KARAFUN-WEB", re.compile(r"the player was playing a song SingWS did not ask for")),
     ("stalled", "KARAFUN-WEB", re.compile(r"stalled|never started|did not start")),
+    ("clock_stuck", "KARAFUN-WEB", re.compile(r"the song's clock has not moved")),
+    ("stop_ignored", "KARAFUN-WEB", re.compile(r"the player ignored \d+ stops in a row")),
 )
 # what each problem means, in the words the report prints
 PROBLEMS = {
@@ -92,6 +94,8 @@ PROBLEMS = {
     "no_answer": "the Rust driver did not answer a request",
     "effect_failed": "an effect from the Rust driver failed or was unknown",
     "stalled": "a song never started or stalled",
+    "clock_stuck": "KaraFun said a song was playing but its clock never moved (the player was restarted)",
+    "stop_ignored": "KaraFun's player ignored repeated stops (it was closed)",
 }
 # not failures, but worth a look
 NOTES = {

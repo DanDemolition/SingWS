@@ -14,6 +14,11 @@ pub const MAX_RECOVERIES: i64 = 3;
 pub const SAT_AT_END_S: f64 = 2.5;
 pub const END_MARGIN_S: f64 = 1.5;
 pub const SEEK_END_GUARD_S: f64 = 8.0;
+/// A song the page calls playing whose position is still 0 this long after it started is stuck (the 2026-11-21 Intel show: six starts, the clock never left 0): restart the player.
+pub const STUCK_CLOCK_S: f64 = 8.0;
+/// A player that still plays after this many stops within `STRAY_WINDOW_S` ignores them: close it (the next song starts a fresh one).
+pub const STRAY_STOPS_BEFORE_CLOSE: u32 = 3;
+pub const STRAY_WINDOW_S: f64 = 60.0;
 
 type R<T> = Result<T, String>;
 
@@ -51,6 +56,9 @@ struct Asked {
     last_position: Option<f64>,
     resume_at: Option<f64>,
     gen: u64,
+    /// when the song was heard starting, and whether its position has moved since
+    started_at: f64,
+    moved: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -59,6 +67,8 @@ pub struct Host {
     song_open: bool,
     sat_since: Option<f64>,
     stray_stopped_at: f64,
+    stray_count: u32,
+    stray_since: f64,
     pub state: (String, String),
     status: Value,
     gens: u64,
@@ -153,6 +163,8 @@ impl Host {
             song_open: false,
             sat_since: None,
             stray_stopped_at: 0.0,
+            stray_count: 0,
+            stray_since: 0.0,
             state: ("idle".into(), String::new()),
             status: json!({}),
             gens: 0,
@@ -201,7 +213,7 @@ impl Host {
                 let key_i = key.unwrap_or(0);
                 self.gens += 1;
                 self.asked = Some(Asked { id, title: title.to_string(), heard: false, sent: false, sent_at: None, at: now, play_not_before: now + self.hold_s.max(0.0), hold_armed: false, limit: NEVER_STARTED_AFTER_S, key: key_i, tempo: tempo_v,
-                                          recoveries: 0, last_position: None, resume_at: None, gen: self.gens });
+                                          recoveries: 0, last_position: None, resume_at: None, gen: self.gens, started_at: 0.0, moved: false });
                 self.sat_since = None;
                 self.song_open = true;
                 o.push(json!(["entry_wall", "karafun_pending_at"]));
@@ -408,7 +420,22 @@ impl Host {
             return;
         }
         self.stray_stopped_at = now;
+        if now - self.stray_since > STRAY_WINDOW_S {
+            self.stray_since = now;
+            self.stray_count = 0;
+        }
+        self.stray_count += 1;
         o.push(json!(["log", "the player was playing a song SingWS did not ask for; stopped it"]));
+        if self.stray_count >= STRAY_STOPS_BEFORE_CLOSE {
+            // the page ignores the stop (the 2026-11-21 show: 620 stops in 45 minutes): close the player; the next song starts a new one
+            self.stray_count = 0;
+            o.push(json!(["log", format!("the player ignored {STRAY_STOPS_BEFORE_CLOSE} stops in a row; closing it (the next song starts a fresh one)")]));
+            if w.service_present {
+                o.push(json!(["stop_frames"]));
+                o.push(json!(["service_stop"]));
+            }
+            return;
+        }
         if w.service_present && w.has_web {
             o.push(json!(["web_stop"]));
         }
@@ -571,6 +598,18 @@ impl Host {
         if position > 0.0 {
             self.asked.as_mut().unwrap().last_position = Some(position);
         }
+        let stuck = {
+            let a = self.asked.as_mut().unwrap();
+            if position > 0.5 {
+                a.moved = true;
+            }
+            same && playing && !a.moved && now - a.started_at > STUCK_CLOCK_S
+        };
+        if stuck {
+            let state = self.status.get("state").map(|v| v.to_string()).unwrap_or_default();
+            o.push(json!(["log", format!("the player says it is playing but the song's clock has not moved for {}s (state={state}, position={}); restarting the player", f0(STUCK_CLOCK_S), f0(position))]));
+            return self.recover("the song's clock never moved", w, now, o);
+        }
         if duration > 0.0 {
             o.push(json!(["entry_set", "karafun_display_duration", duration]));
         }
@@ -608,6 +647,8 @@ impl Host {
         let (title, at, key, tempo, id) = {
             let a = self.asked.as_mut().unwrap();
             a.heard = true;
+            a.started_at = now;
+            a.moved = position > 0.5;
             (a.title.clone(), a.at, a.key, a.tempo, a.id)
         };
         let _ = id;
@@ -765,5 +806,81 @@ mod hold_tests {
         let mut h = Host::new();
         h.hold_s = 0.0;
         assert!(has(&start(&mut h, "ready", 100.0), "web_play"));
+    }
+
+    fn playing(pos: f64) -> Value {
+        json!({"playing": true, "moving": pos > 0.0, "position": pos, "duration": 200.0, "state": 3, "song": {"id": 7}})
+    }
+    fn begin_playing(h: &mut Host, now: f64) {
+        start(h, "ready", now);
+        h.step(Event::HoldOver, &world("ready"), now + 3.53).unwrap();
+        h.step(Event::Status(&playing(0.0)), &world("ready"), now + 4.0).unwrap();
+    }
+
+    #[test]
+    fn a_clock_that_never_leaves_zero_restarts_the_player() {
+        let mut h = Host::new();
+        begin_playing(&mut h, 100.0);
+        // 7 s after it started: still waiting
+        let o = h.step(Event::Status(&playing(0.0)), &world("ready"), 111.0).unwrap();
+        assert!(!has(&o, "service_stop"));
+        // past STUCK_CLOCK_S: the player is restarted and the song resumes
+        let o = h.step(Event::Status(&playing(0.0)), &world("ready"), 112.5).unwrap();
+        assert!(has(&o, "service_stop") && has(&o, "service_start"), "{o:?}");
+    }
+
+    #[test]
+    fn a_clock_that_moves_is_never_restarted() {
+        let mut h = Host::new();
+        begin_playing(&mut h, 100.0);
+        h.step(Event::Status(&playing(2.0)), &world("ready"), 106.0).unwrap();
+        // even if the page later reports the position 0 again (a seek back), nothing is restarted
+        let o = h.step(Event::Status(&playing(0.0)), &world("ready"), 130.0).unwrap();
+        assert!(!has(&o, "service_stop"));
+    }
+
+    #[test]
+    fn a_paused_player_is_not_called_stuck() {
+        let mut h = Host::new();
+        begin_playing(&mut h, 100.0);
+        let paused = json!({"playing": false, "moving": false, "position": 0.0, "duration": 200.0, "state": 2, "song": {"id": 7}});
+        let o = h.step(Event::Status(&paused), &world("ready"), 130.0).unwrap();
+        assert!(!has(&o, "service_stop"));
+    }
+
+    #[test]
+    fn a_stuck_clock_that_keeps_happening_ends_with_a_failed_song_after_three_restarts() {
+        let mut h = Host::new();
+        begin_playing(&mut h, 100.0);
+        let mut t = 112.5;
+        for attempt in 0..3 {
+            let o = h.step(Event::Status(&playing(0.0)), &world("ready"), t).unwrap();
+            assert!(has(&o, "service_stop"), "attempt {attempt}");
+            // the restarted player is ready again, plays, and is stuck again
+            h.step(Event::Service { state: "ready", detail: "" }, &world("ready"), t + 5.0).unwrap();
+            h.step(Event::Status(&playing(0.0)), &world("ready"), t + 6.0).unwrap();
+            t += 20.0;
+        }
+        let o = h.step(Event::Status(&playing(0.0)), &world("ready"), t).unwrap();
+        assert!(has(&o, "entry_status") && o.iter().any(|a| a[0] == "log" && a[1].as_str().unwrap_or("").contains("giving up")), "{o:?}");
+    }
+
+    #[test]
+    fn a_player_that_ignores_three_stops_is_closed() {
+        let mut h = Host::new();
+        let w = world("ready");
+        let mut closed = false;
+        for k in 0..3 {
+            let o = h.step(Event::Status(&playing(5.0)), &w, 200.0 + 4.5 * k as f64).unwrap();
+            assert!(has(&o, "log"));
+            closed = has(&o, "service_stop");
+            if k < 2 {
+                assert!(has(&o, "web_stop") && !closed);
+            }
+        }
+        assert!(closed);
+        // a new run of strays much later starts counting again
+        let o = h.step(Event::Status(&playing(5.0)), &w, 400.0).unwrap();
+        assert!(has(&o, "web_stop") && !has(&o, "service_stop"));
     }
 }
