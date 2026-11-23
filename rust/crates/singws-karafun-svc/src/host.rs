@@ -994,6 +994,16 @@ mod hold_tests {
     }
 
     #[test]
+    fn strays_more_than_a_minute_apart_do_not_add_up_to_a_close() {
+        let mut h = Host::new();
+        let w = world("ready");
+        h.step(Event::Status(&playing(5.0)), &w, 200.0).unwrap();
+        h.step(Event::Status(&playing(5.0)), &w, 204.5).unwrap();
+        let o = h.step(Event::Status(&playing(5.0)), &w, 265.0).unwrap();
+        assert!(has(&o, "web_stop") && !has(&o, "service_stop"), "{o:?}");
+    }
+
+    #[test]
     fn a_stray_stop_needs_both_the_service_and_its_page() {
         for (svc, web) in [(false, true), (true, false)] {
             let mut h = Host::new();
