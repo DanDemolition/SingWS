@@ -888,6 +888,124 @@ mod hold_tests {
     }
 
     #[test]
+    fn the_giving_up_log_keeps_exactly_120_characters_of_the_reason() {
+        let mut h = Host::new();
+        begin_playing(&mut h, 100.0);
+        let mut o = Vec::new();
+        h.fail(&"x".repeat(200), &world("ready"), &mut o).unwrap();
+        let line = o.iter().find(|a| a[0] == "log").unwrap()[1].as_str().unwrap().to_string();
+        assert_eq!(line, format!("giving up on the song: {}", "x".repeat(120)));
+    }
+
+    #[test]
+    fn the_submission_error_keeps_exactly_240_characters_of_the_reason() {
+        let mut h = Host::new();
+        begin_playing(&mut h, 100.0);
+        let mut o = Vec::new();
+        h.fail(&"y".repeat(300), &world("ready"), &mut o).unwrap();
+        let e = o.iter().find(|a| a[0] == "entry_set" && a[1] == "karafun_submission_error").unwrap();
+        assert_eq!(e[2].as_str().unwrap(), "y".repeat(240));
+        let l = o.iter().find(|a| a[0] == "log" && a[1].as_str().unwrap_or("").starts_with("failed title=")).unwrap()[1].as_str().unwrap().to_string();
+        assert!(l.contains(&"y".repeat(240)) && !l.contains(&"y".repeat(241)), "{l}");
+    }
+
+    #[test]
+    fn a_zero_duration_is_not_published() {
+        let mut h = Host::new();
+        begin_playing(&mut h, 100.0);
+        let st = json!({"playing": true, "moving": true, "position": 3.0, "duration": 0.0, "state": 3, "song": {"id": 7}});
+        let o = h.step(Event::Status(&st), &world("ready"), 106.0).unwrap();
+        assert!(!o.iter().any(|a| a[0] == "entry_set" && a[1] == "karafun_display_duration"), "{o:?}");
+        let o = h.step(Event::Status(&playing(4.0)), &world("ready"), 107.0).unwrap();
+        assert!(o.iter().any(|a| a[0] == "entry_set" && a[1] == "karafun_display_duration" && a[2] == 200.0), "{o:?}");
+        let st = json!({"playing": true, "moving": true, "position": 0.2, "duration": 0.5, "state": 3, "song": {"id": 7}});
+        let o = h.step(Event::Status(&st), &world("ready"), 108.0).unwrap();
+        assert!(o.iter().any(|a| a[0] == "entry_set" && a[1] == "karafun_display_duration" && a[2] == 0.5), "{o:?}");
+    }
+
+    #[test]
+    fn a_paused_song_ends_exactly_at_the_end_margin() {
+        let paused = |pos: f64| json!({"playing": false, "moving": false, "position": pos, "duration": 200.0, "state": 2, "song": {"id": 7}});
+        let mut h = Host::new();
+        begin_playing(&mut h, 100.0);
+        let o = h.step(Event::Status(&paused(200.0 - END_MARGIN_S - 0.5)), &world("ready"), 150.0).unwrap();
+        assert!(!has(&o, "finish_complete"), "{o:?}");
+        let mut h3 = Host::new();
+        begin_playing(&mut h3, 100.0);
+        let tiny = json!({"playing": false, "moving": false, "position": 0.5, "duration": 0.5, "state": 2, "song": {"id": 7}});
+        let o = h3.step(Event::Status(&tiny), &world("ready"), 150.0).unwrap();
+        assert!(has(&o, "finish_complete"), "a half-second song that reached its end is over: {o:?}");
+        let mut h2 = Host::new();
+        begin_playing(&mut h2, 100.0);
+        let no_duration = json!({"playing": false, "moving": false, "position": 0.0, "duration": 0.0, "state": 2, "song": {"id": 7}});
+        let o = h2.step(Event::Status(&no_duration), &world("ready"), 150.0).unwrap();
+        assert!(!has(&o, "finish_complete"), "an unknown duration is not the end: {o:?}");
+        let o = h.step(Event::Status(&paused(200.0 - END_MARGIN_S)), &world("ready"), 151.0).unwrap();
+        assert!(has(&o, "finish_complete"), "{o:?}");
+    }
+
+    #[test]
+    fn the_verified_duration_is_published_only_for_a_known_duration() {
+        let begin = |duration: f64| {
+            let mut h = Host::new();
+            start(&mut h, "ready", 100.0);
+            h.step(Event::HoldOver, &world("ready"), 103.53).unwrap();
+            let st = json!({"playing": true, "moving": false, "position": 0.0, "duration": duration, "state": 3, "song": {"id": 7}});
+            h.step(Event::Status(&st), &world("ready"), 104.0).unwrap()
+        };
+        assert!(!has(&begin(0.0), "verified_duration"));
+        assert!(has(&begin(0.5), "verified_duration"));
+        assert!(has(&begin(200.0), "verified_duration"));
+    }
+
+    #[test]
+    fn key_and_tempo_are_sent_to_the_page_only_when_the_service_and_page_both_exist() {
+        for (svc, web, sent) in [(true, true, true), (false, true, false), (true, false, false)] {
+            let mut h = Host::new();
+            let tempo = json!(90);
+            h.step(Event::Start { song_id: Some(7), enabled: true, key: Some(2), tempo: Some(&tempo), title: "T" }, &world("ready"), 100.0).unwrap();
+            h.step(Event::HoldOver, &world("ready"), 103.53).unwrap();
+            let mut w = world("ready");
+            w.service_present = svc;
+            w.has_web = web;
+            let o = h.step(Event::Status(&playing(0.0)), &w, 104.0).unwrap();
+            assert_eq!(has(&o, "web_set_key") && has(&o, "web_set_tempo"), sent, "service {svc}, page {web}: {o:?}");
+        }
+    }
+
+    #[test]
+    fn a_restarted_song_resumes_where_it_was_even_when_the_duration_is_unknown() {
+        let resumed = |last: f64, duration: f64| {
+            let mut h = Host::new();
+            begin_playing(&mut h, 100.0);
+            h.step(Event::Status(&playing(last)), &world("ready"), 110.0).unwrap();
+            let o = h.step(Event::Service { state: "error", detail: "died" }, &world("ready"), 111.0).unwrap();
+            assert!(has(&o, "service_stop"), "{o:?}");
+            h.step(Event::Service { state: "ready", detail: "" }, &world("ready"), 115.0).unwrap();
+            h.step(Event::HoldOver, &world("ready"), 118.6).unwrap();
+            let st = json!({"playing": true, "moving": true, "position": 1.0, "duration": duration, "state": 3, "song": {"id": 7}});
+            let o = h.step(Event::Status(&st), &world("ready"), 119.0).unwrap();
+            o.iter().find(|a| a[0] == "web_seek").map(|a| a[1].as_f64().unwrap())
+        };
+        assert_eq!(resumed(50.0, 0.0), Some(50.0));
+        assert_eq!(resumed(50.0, 200.0), Some(50.0));
+        assert_eq!(resumed(50.0, 0.5), Some(0.0));
+        assert_eq!(resumed(195.0, 200.0), Some(200.0 - SEEK_END_GUARD_S));
+    }
+
+    #[test]
+    fn a_stray_stop_needs_both_the_service_and_its_page() {
+        for (svc, web) in [(false, true), (true, false)] {
+            let mut h = Host::new();
+            let mut w = world("ready");
+            w.service_present = svc;
+            w.has_web = web;
+            let o = h.step(Event::Status(&playing(5.0)), &w, 200.0).unwrap();
+            assert!(!has(&o, "web_stop"), "service {svc}, page {web}: {o:?}");
+        }
+    }
+
+    #[test]
     fn the_stuck_clock_limit_is_more_than_eight_seconds_not_eight_exactly() {
         let mut h = Host::new();
         begin_playing(&mut h, 100.0);                      // started at 104.0
