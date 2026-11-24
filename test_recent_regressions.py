@@ -2163,6 +2163,29 @@ class PostShowAnalysisSafetyTests(unittest.TestCase):
         loaded_branch = source[:source.index("with _transition_analysis_cache_lock")]
         self.assertIn("_transition_analysis_cache.get", loaded_branch)
 
+    def test_playback_transition_cache_read_does_not_wait_for_the_loader(self):
+        import threading
+        held = threading.Event()
+        release = threading.Event()
+
+        def loader_holds_the_lock():
+            with self.singws._transition_analysis_cache_lock:
+                held.set()
+                release.wait(5)
+
+        thread = threading.Thread(target=loader_holds_the_lock, daemon=True)
+        with mock.patch.object(self.singws, "_transition_analysis_cache_loaded", False), \
+             mock.patch.object(self.singws, "_transition_analysis_cache_loading", True):
+            thread.start()
+            self.assertTrue(held.wait(2))
+            started = time.monotonic()
+            result = self.singws.transition_analysis_cached("/tmp/song.mp3")
+            waited = time.monotonic() - started
+            release.set()
+            thread.join(2)
+        self.assertIsNone(result)
+        self.assertLess(waited, 0.2)
+
     def test_isolated_worker_protocol_returns_transition_payload(self):
         import libmpv_media_jobs
 

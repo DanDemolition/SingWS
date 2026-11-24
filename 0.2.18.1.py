@@ -1974,6 +1974,10 @@ def transition_analysis_cached(path: str):
         # on this playback/UI path: serializing a library-sized cache in the
         # analysis worker held it for 1–2 seconds during the 2026-08-27 show.
         return _transition_analysis_cache.get(str(path or ""))
+    if _transition_analysis_cache_loading:
+        # the loader thread holds the lock for the whole file read; waiting for it here froze the screen for 3.5 s
+        # during the 2026-11-22 show. Playback just goes without the cached analysis until the load is done.
+        return None
     with _transition_analysis_cache_lock:
         if not _transition_analysis_cache_loaded:
             if not _transition_analysis_cache_loading:
