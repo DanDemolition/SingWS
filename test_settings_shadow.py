@@ -283,7 +283,7 @@ class WiringTests(unittest.TestCase):
         # the save hook sits after the unchanged-payload skip and before the file is written
         skip = _SRC.index("json_write_skipped", 0)
         self.assertLess(skip, save)
-        self.assertLess(save, _SRC.index("_atomic_write_text(path, payload)", skip))
+        self.assertLess(save, _SRC.index("_atomic_write_text(path, payload, durable)", skip))
         self.assertGreater(load, 0)
 
     def test_specs_bundle_the_module(self):

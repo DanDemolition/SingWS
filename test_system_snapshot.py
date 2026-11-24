@@ -75,7 +75,8 @@ class WiringGuardTests(unittest.TestCase):
         cls.src = (cls.root / "0.2.18.1.py").read_text()
 
     def test_watchdog_logs_the_snapshot_only_for_stalls_over_a_second(self):
-        self.assertIn("if gap >= 1.0 and not long_logged and _system_snapshot_enabled():", self.src)
+        self.assertIn("if gap >= 1.0 and not long_logged:", self.src)
+        self.assertIn("if _system_snapshot_enabled():", self.src)
         self.assertIn('"stall_system_snapshot": True', self.src)
 
     def test_misleading_cpu_line_is_gone(self):

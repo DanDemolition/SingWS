@@ -3,7 +3,7 @@
 # The zip holds the newest log and a REDUCED settings file (only the flag values the report needs: no keys, PINs, URLs or names).
 set -euo pipefail
 HOME_DIR="${SINGWS_HOME:-$HOME/SingWS}"; OUT_DIR="${OUT_DIR:-$HOME/Desktop}"
-LOGS=$(find "$HOME_DIR/logs" \( -name "singws_*.log*" -o -name "karafun_display_stderr.log" \) -mtime -3 2>/dev/null | sort | tail -8); [[ -n "$LOGS" ]] || { echo "No log found."; exit 1; }
+LOGS=$( { find "$HOME_DIR/logs" -name "singws_*.log*" -mtime -3 2>/dev/null | sort | tail -8; find "$HOME_DIR/logs" -name "karafun_display_stderr.log" -mtime -3 2>/dev/null; } ); [[ -n "$LOGS" ]] || { echo "No log found."; exit 1; }
 T=$(mktemp -d); D="$T/singws-show-$(date +%Y%m%d-%H%M)"; mkdir -p "$D"
 for f in $LOGS; do cp "$f" "$D/"; done
 # Native crash reports (the app log only catches Python errors): SingWS/Python .ips files from the last 3 days, if any.

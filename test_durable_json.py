@@ -259,7 +259,7 @@ class WiringTests(unittest.TestCase):
         self.assertLess(flush, replace)
         self.assertLess(replace, dirsync)
         body = _SRC[_SRC.index("def _save_json_atomic"):][:2600]
-        self.assertLess(body.index("_atomic_write_text(path, payload)"), body.index("_JSON_WRITE_DIGESTS[key] = digest"),
+        self.assertLess(body.index("_atomic_write_text(path, payload, durable)"), body.index("_JSON_WRITE_DIGESTS[key] = digest"),
                         "the digest is recorded only after the save is durable")
 
     def test_no_store_is_written_with_a_plain_overwrite_any_more(self):

@@ -792,6 +792,17 @@ class KaraFunWebHost:
         except Exception:
             return "unknown"
 
+    def _audience_window_state(self) -> str:
+        """For the placement log: whether the audience window is full screen, its own frame and its screen's frame (the picture's size jumped between
+        placements while the window went in and out of full screen on 2026-11-22, and the log could not say which one was the settled rectangle)."""
+        try:
+            vw = getattr(self.app, "video_window", None)
+            screen = vw.screen() if vw is not None else None
+            g, sg = vw.geometry(), screen.geometry()
+            return f" (audience window {'full screen' if vw.isFullScreen() else 'windowed'} {g.x()},{g.y()} {g.width()}x{g.height()}; screen {sg.x()},{sg.y()} {sg.width()}x{sg.height()})"
+        except Exception:
+            return ""
+
     def _place_picture(self, force: bool = False) -> None:
         self._place_preview(force)
         try:
@@ -812,7 +823,7 @@ class KaraFunWebHost:
             self._picture_placed = placed
             self._picture_targets["audience"] = above
             self.service.web.window(True, x, y, w, h, 0, above)
-            self._log(f"the picture is placed on screen {self._audience_screen_name()!r} at {x},{y} {w}x{h} over window {above}")
+            self._log(f"the picture is placed on screen {self._audience_screen_name()!r} at {x},{y} {w}x{h} over window {above}{self._audience_window_state()}")
         except Exception as error:
             self._log(f"could not place the picture: {error!r}")
 

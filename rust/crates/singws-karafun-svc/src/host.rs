@@ -11,6 +11,8 @@ pub const NEVER_STARTED_AFTER_S: f64 = 60.0;
 pub const SIGN_IN_HOLD_S: f64 = 240.0;
 pub const RECOVER_START_WITHIN_S: f64 = 150.0;
 pub const MAX_RECOVERIES: i64 = 3;
+/// A song waits this long for the player to come up (`starting`/`preparing`, not signing in) before the player is restarted (2026-11-22: a dead page held a song for the whole 4-minute hold).
+pub const PLAYER_NOT_READY_S: f64 = 60.0;
 pub const SAT_AT_END_S: f64 = 2.5;
 pub const END_MARGIN_S: f64 = 1.5;
 pub const SEEK_END_GUARD_S: f64 = 8.0;
@@ -554,6 +556,11 @@ impl Host {
             },
             _ => return Ok(()),
         };
+        let waiting_for_player = matches!(&self.asked, Some(a) if !a.sent);
+        if !self.old_rules && waiting_for_player && waited >= PLAYER_NOT_READY_S && w.service_present && (w.service_state == "starting" || w.service_state == "preparing") {
+            o.push(json!(["log", format!("the player has not come up after {}s (state={}); restarting it", f0(waited), w.service_state)]));
+            return self.recover("the player never became ready", w, now, o);
+        }
         if waited >= limit {
             let cur = self.song_id()?;
             let st = &self.status;
@@ -1021,6 +1028,25 @@ mod hold_tests {
         let mut other = Host::new();
         start(&mut other, "starting", 100.0);
         let o = other.step(Event::PageError(&json!("something else")), &world("starting"), 101.0).unwrap();
+        assert!(!has(&o, "service_stop"), "{o:?}");
+    }
+
+    #[test]
+    fn a_player_that_never_comes_up_is_restarted_after_a_minute() {
+        let mut h = Host::new();
+        start(&mut h, "starting", 100.0);
+        let o = h.step(Event::Watchdog, &world("starting"), 100.0 + PLAYER_NOT_READY_S - 0.5).unwrap();
+        assert!(!has(&o, "service_stop"), "{o:?}");
+        let mut h = Host::new();
+        start(&mut h, "starting", 100.0);
+        h.step(Event::Watchdog, &world("starting"), 101.0).unwrap();
+        let o = h.step(Event::Watchdog, &world("starting"), 100.0 + PLAYER_NOT_READY_S).unwrap();
+        assert!(has(&o, "service_stop") && has(&o, "service_start"), "{o:?}");
+        // signing in (the operator may be typing the login) is not a stuck player
+        let mut h = Host::new();
+        start(&mut h, "sign_in", 100.0);
+        h.step(Event::Watchdog, &world("sign_in"), 101.0).unwrap();
+        let o = h.step(Event::Watchdog, &world("sign_in"), 100.0 + PLAYER_NOT_READY_S + 30.0).unwrap();
         assert!(!has(&o, "service_stop"), "{o:?}");
     }
 

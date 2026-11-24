@@ -316,6 +316,38 @@ class StatusSnapshot(unittest.TestCase):
         app._status_snapshot_payload(now=1030.0)
         self.assertEqual(len(calls), 2)
 
+    def test_a_found_browser_is_not_searched_for_again_for_ten_minutes(self):
+        import karafun_web
+        app = self.make_app()
+        app.settings["karafun_provider_enabled"] = True
+        found = []
+        with mock.patch.object(karafun_web, "find_browser", side_effect=lambda: found.append(1) or "/Applications/Chrome"):
+            self.assertEqual(app._status_snapshot_diagnostic_facts()["karafun_path"], "/Applications/Chrome")
+            self.assertEqual(app._status_snapshot_diagnostic_facts()["karafun_path"], "/Applications/Chrome")
+        self.assertEqual(len(found), 1)
+        # a browser that was NOT found is looked for again at the next probe
+        app2 = self.make_app()
+        app2.settings["karafun_provider_enabled"] = True
+        missing = []
+        with mock.patch.object(karafun_web, "find_browser", side_effect=lambda: missing.append(1) or None):
+            app2._status_snapshot_diagnostic_facts()
+            app2._status_snapshot_diagnostic_facts()
+        self.assertEqual(len(missing), 2)
+
+    def test_the_status_files_are_written_without_flushing_to_the_drive(self):
+        app = self.make_app()
+        app.settings["status_snapshot"] = True
+        calls = []
+        with mock.patch.object(self.singws, "_save_json_atomic", side_effect=lambda path, value, durable=True: calls.append(durable)):
+            app._write_status_snapshot()
+        self.assertEqual(calls, [False])
+        with tempfile.TemporaryDirectory() as d:
+            with mock.patch.object(self.singws, "_fsync_durable") as fsync:
+                self.singws._save_json_atomic(Path(d) / "x.json", {"a": 1}, durable=False)
+                fsync.assert_not_called()
+                self.singws._save_json_atomic(Path(d) / "y.json", {"a": 1})
+                fsync.assert_called()
+
     def test_a_write_that_fails_never_reaches_the_app(self):
         app = self.make_app()
         with mock.patch.object(self.singws, "_save_json_atomic", side_effect=OSError("disk full")), mock.patch.object(self.singws, "_diag", lambda *a, **k: None):

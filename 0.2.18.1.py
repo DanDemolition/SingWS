@@ -3567,7 +3567,7 @@ def _fsync_directory(directory: Path) -> None:
         os.close(dir_fd)
 
 
-def _atomic_write_text(path: Path, payload: str) -> None:
+def _atomic_write_text(path: Path, payload: str, durable: bool = True) -> None:
     """Write `payload` to `path` so that a crash OR a power cut leaves either the complete old file or the complete new one.
 
     Temp file in the same directory -> flush data to the drive -> rename over the destination -> flush the directory. Raises on any
@@ -3578,9 +3578,11 @@ def _atomic_write_text(path: Path, payload: str) -> None:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(payload)
             f.flush()
-            _fsync_durable(f.fileno())
+            if durable:
+                _fsync_durable(f.fileno())
         os.replace(tmp_name, path)
-        _fsync_directory(path.parent)
+        if durable:
+            _fsync_directory(path.parent)
     except Exception:
         try:
             os.unlink(tmp_name)
@@ -3591,7 +3593,8 @@ def _atomic_write_text(path: Path, payload: str) -> None:
         _store_shadow_submit(path.name, payload)  # after the durable write succeeded; background, log-only
 
 
-def _save_json_atomic(path: Path, value) -> None:
+def _save_json_atomic(path: Path, value, durable: bool = True) -> None:
+    """`durable=False` skips the two flushes to the drive (fsync can block the calling thread for a second): for status files that are rewritten constantly and need no power-cut safety."""
     _perf_t0 = time.perf_counter()
     path.parent.mkdir(parents=True, exist_ok=True)
     if path == TRACKS_PATH:
@@ -3615,7 +3618,7 @@ def _save_json_atomic(path: Path, value) -> None:
         except Exception:
             pass
     try:
-        _atomic_write_text(path, payload)
+        _atomic_write_text(path, payload, durable)
         _JSON_WRITE_DIGESTS[key] = digest
         _perf_record(f"json_write:{path.name}", (time.perf_counter() - _perf_t0) * 1000.0)
     except Exception:
@@ -4062,14 +4065,14 @@ def _install_main_thread_watchdog(owner, threshold_ms: int = 120):
             except Exception:
                 pass
 
-        def _request_stall_dump(gap_s: float) -> str:
+        def _request_stall_dump(gap_s: float, force: bool = False) -> str:
             """Ask the main thread to write all thread stacks to singws_stall_stacks.log. Returns the text for the [STALL] log line."""
             if not stall_dump["ready"]:
                 return "(stack dump unavailable)"
             now = time.monotonic()
             if stall_dump["count"] >= STALL_STACK_MAX_DUMPS_PER_SESSION:
                 return "(stack dump limit reached for this session)"
-            if now - float(stall_dump["last"]) < STALL_STACK_MIN_INTERVAL_S:
+            if not force and now - float(stall_dump["last"]) < STALL_STACK_MIN_INTERVAL_S:
                 return "(stack dump skipped: another was written moments ago)"
             try:
                 stall_dump["count"] += 1
@@ -4135,13 +4138,18 @@ def _install_main_thread_watchdog(owner, threshold_ms: int = 120):
                     # A freeze over a second also freezes the TV picture (karaoke frames are drawn on the main thread),
                     # so record what else the Mac was doing at that moment. Log only; costs ~0.3 s on this watchdog
                     # thread, and only during an already-long stall.
-                    if gap >= 1.0 and not long_logged and _system_snapshot_enabled():
+                    if gap >= 1.0 and not long_logged:
                         long_logged = True
-                        try:
-                            import system_snapshot as _system_snapshot
-                            _diag(f"[STALL] system during a >1s stall: {_system_snapshot.snapshot()}")
-                        except Exception as _snap_exc:
-                            _diag(f"[STALL] system snapshot failed: {_snap_exc}")
+                        if _stack_capture_enabled():
+                            # the stack at detection shows what STARTED a stall; this second one, a second in, shows what still holds the main thread
+                            # (the 1.9 s freeze of 2026-11-22 23:46 had only the first)
+                            _diag(f"[STALL] main-thread stack ~1s into the stall: {_request_stall_dump(gap, force=True)}")
+                        if _system_snapshot_enabled():
+                            try:
+                                import system_snapshot as _system_snapshot
+                                _diag(f"[STALL] system during a >1s stall: {_system_snapshot.snapshot()}")
+                            except Exception as _snap_exc:
+                                _diag(f"[STALL] system snapshot failed: {_snap_exc}")
                 else:
                     if stall_logged:
                         _diag(f"[STALL] GUI thread recovered after ~{int(peak * 1000)}ms")
@@ -35250,7 +35258,7 @@ class KaraokeApp(QWidget):
         try:
             if not bool((getattr(self, "settings", None) or {}).get("waitlist_snapshot", False)):
                 return False
-            _save_json_atomic(WAITLIST_SNAPSHOT_PATH, self._waitlist_snapshot_payload())
+            _save_json_atomic(WAITLIST_SNAPSHOT_PATH, self._waitlist_snapshot_payload(), durable=False)
             return True
         except Exception as exc:
             _diag(f"[WAITLIST-SNAPSHOT] write failed: {exc!r}")
@@ -35275,7 +35283,16 @@ class KaraokeApp(QWidget):
         settings = state.get("settings") or {}
         try:
             import karafun_web
-            karafun_path = karafun_web.find_browser() if bool(settings.get("karafun_provider_enabled", True)) else None
+            karafun_path = None
+            if bool(settings.get("karafun_provider_enabled", True)):
+                # find_browser starts a subprocess: on the main thread that was 6 of the 213 stall stacks of 2026-11-22. A browser that was found stays
+                # found for ten minutes; one that was not is looked for again at the next probe.
+                cached_browser = state.get("_status_snapshot_browser")
+                if cached_browser and cached_browser[1] and time.time() - cached_browser[0] < 600.0:
+                    karafun_path = cached_browser[1]
+                else:
+                    karafun_path = karafun_web.find_browser()
+                    self._status_snapshot_browser = (time.time(), karafun_path)
         except Exception:
             karafun_path = None
         try:
@@ -35358,7 +35375,7 @@ class KaraokeApp(QWidget):
         try:
             if not bool((getattr(self, "settings", None) or {}).get("status_snapshot", False)):
                 return False
-            _save_json_atomic(STATUS_SNAPSHOT_PATH, self._status_snapshot_payload())
+            _save_json_atomic(STATUS_SNAPSHOT_PATH, self._status_snapshot_payload(), durable=False)
             return True
         except Exception as exc:
             _diag(f"[STATUS-SNAPSHOT] write failed: {exc!r}")
