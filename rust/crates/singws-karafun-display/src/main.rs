@@ -18,7 +18,7 @@ mod cef_host;
 
 use cef_host::Picture;
 use objc2::{msg_send, rc::Retained, runtime::AnyObject, MainThreadMarker, MainThreadOnly};
-use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSColor, NSScreen, NSView, NSWindow, NSWindowOrderingMode, NSWindowStyleMask};
+use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSColor, NSScreen, NSView, NSWindow, NSWindowCollectionBehavior, NSWindowOrderingMode, NSWindowStyleMask};
 use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
 use serde_json::{json, Value};
 use std::{cell::RefCell, collections::HashMap, io::{BufRead, Write}, path::PathBuf};
@@ -91,6 +91,9 @@ fn make_window(mtm: MainThreadMarker, rect: NSRect) -> (Retained<NSWindow>, Reta
     window.setBackgroundColor(Some(&NSColor::blackColor()));
     window.setHasShadow(false);
     window.setIgnoresMouseEvents(true);
+    // When SingWS's audience window goes full screen macOS gives it a Space of its own; a window without these flags stays on the old Space and the
+    // audience screen shows black (2026-11-22 show: the picture only appeared with the audience window "windowed").
+    window.setCollectionBehavior(NSWindowCollectionBehavior::CanJoinAllSpaces | NSWindowCollectionBehavior::FullScreenAuxiliary | NSWindowCollectionBehavior::IgnoresCycle);
     let view = window.contentView().expect("a window has a content view");
     view.setWantsLayer(true);
     // SAFETY: the view's own layer (it wants one, above); the picture is stretched to the window as the audience screen does.

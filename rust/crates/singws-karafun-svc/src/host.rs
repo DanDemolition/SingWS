@@ -272,6 +272,10 @@ impl Host {
                 if let Some(a) = &self.asked {
                     if !a.heard && text.starts_with("Play") {
                         self.fail(&text, w, &mut o)?;
+                    } else if !self.old_rules && text.starts_with("Chromium's page stopped") {
+                        // the 2026-11-22 show: the idle page's process died, the reload never brought the page back, and the song waited the whole
+                        // sign-in hold (4 minutes) until the operator restarted SingWS: start a fresh player instead
+                        self.recover("Chromium's page stopped", w, now, &mut o)?;
                     }
                 }
             }
@@ -1001,6 +1005,23 @@ mod hold_tests {
         h.step(Event::Status(&playing(5.0)), &w, 204.5).unwrap();
         let o = h.step(Event::Status(&playing(5.0)), &w, 265.0).unwrap();
         assert!(has(&o, "web_stop") && !has(&o, "service_stop"), "{o:?}");
+    }
+
+    #[test]
+    fn a_stopped_page_while_a_song_waits_starts_a_fresh_player() {
+        let mut h = Host::new();
+        start(&mut h, "starting", 100.0);
+        let o = h.step(Event::PageError(&json!("Chromium's page stopped; loading it again")), &world("starting"), 101.0).unwrap();
+        assert!(has(&o, "service_stop"), "{o:?}");
+        // without a song nothing is restarted
+        let mut idle = Host::new();
+        let o = idle.step(Event::PageError(&json!("Chromium's page stopped; loading it again")), &world("ready"), 101.0).unwrap();
+        assert!(!has(&o, "service_stop"), "{o:?}");
+        // other page errors do not restart it
+        let mut other = Host::new();
+        start(&mut other, "starting", 100.0);
+        let o = other.step(Event::PageError(&json!("something else")), &world("starting"), 101.0).unwrap();
+        assert!(!has(&o, "service_stop"), "{o:?}");
     }
 
     #[test]
