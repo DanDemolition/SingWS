@@ -8257,8 +8257,32 @@ class RenderThreadShowScreenVfx(QFrame):
                 self.lower()
             self.update()
             _diag(f"[SHOW-VFX] surface plane={'effect' if active else 'video'}")
+            self._log_effect_frames(active)
         except Exception as exc:
             _diag(f"[SHOW-VFX] surface plane update failed: {exc}")
+
+    def _count_effect_frame(self):
+        self._effect_frames = getattr(self, "_effect_frames", 0) + 1
+
+    def _log_effect_frames(self, active: bool):
+        """How many frames the transition really presented and how long it took (2026-11-22: the animations ran slow while an AirPlay screen was attached)."""
+        try:
+            started = getattr(self, "_effect_started", None)
+            if active and started is None:
+                self._effect_frames = 0
+                self._effect_started = time.monotonic()
+                self._view.frameSwapped.connect(self._count_effect_frame)
+            elif not active and started is not None:
+                self._view.frameSwapped.disconnect(self._count_effect_frame)
+                self._effect_started = None
+                took = max(0.001, time.monotonic() - started)
+                frames = int(getattr(self, "_effect_frames", 0))
+                screen = self._view.screen()
+                hz = float(screen.refreshRate()) if screen is not None else 0.0
+                _diag(f"[SHOW-VFX] effect ran {took:.2f}s, {frames} frames ({frames / took:.1f} fps) on screen={(screen.name() if screen is not None else '?')!r} {hz:.0f}Hz, "
+                      f"{len(QGuiApplication.screens() or [])} screens, cap {_SHOW_TRANSITION_FPS_CAP} fps")
+        except Exception as exc:
+            _diag(f"[SHOW-VFX] frame logging failed: {exc}")
 
     def show_next_up(self, payload: dict, duration_sec: float = 10.0):
         payload = payload if isinstance(payload, dict) else {}
@@ -31532,6 +31556,9 @@ class KaraokeApp(QWidget):
                         who = (f" screen={screen.name()!r} "
                                f"{geo.width()}x{geo.height()} dpr={screen.devicePixelRatio():.1f}")
                     _diag(f"[SCREEN] {event}{who} | {_describe_window_topology()}")
+                    # the refresh rate each screen reports (an AirPlay screen can report an odd one that the animation timing may follow)
+                    rates = ", ".join(f"{sc.name() or '?'}={float(sc.refreshRate()):.1f}Hz" for sc in (QGuiApplication.screens() or []))
+                    _diag(f"[SCREEN] refresh rates: {rates}")
                 except Exception:
                     pass
 

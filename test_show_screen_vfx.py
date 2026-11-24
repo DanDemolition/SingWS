@@ -6,6 +6,7 @@ import os
 import random
 import sys
 import unittest
+from unittest import mock
 from pathlib import Path
 
 os.environ.setdefault("SINGWS_SKIP_GSTREAMER_INIT_FOR_TESTS", "1")
@@ -179,6 +180,21 @@ class ShowScreenVfxTests(unittest.TestCase):
         self.assertEqual(overlay._root.property("artistText"), "Journey")
         self.assertEqual(overlay._root.property("onDeckText"), "Jordan")
         self.assertEqual(overlay._root.property("countdownValue"), 8)
+
+    def test_the_transition_logs_its_real_frame_rate(self):
+        overlay = mod.RenderThreadShowScreenVfx()
+        self.addCleanup(overlay.close)
+        lines = []
+        with mock.patch.object(mod, "_diag", side_effect=lines.append):
+            overlay._log_effect_frames(True)
+            overlay._count_effect_frame()
+            overlay._count_effect_frame()
+            overlay._log_effect_frames(False)
+            overlay._log_effect_frames(False)       # a second "off" logs nothing more
+        ran = [line for line in lines if "effect ran" in line]
+        self.assertEqual(len(ran), 1, lines)
+        self.assertIn("2 frames", ran[0])
+        self.assertIn("cap ", ran[0])
 
     def test_singer_start_runs_full_screen_three_two_one_then_explodes(self):
         overlay = mod.RenderThreadShowScreenVfx()
