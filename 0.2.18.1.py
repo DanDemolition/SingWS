@@ -4330,6 +4330,7 @@ DEFAULTS = {
     # which it starts the background music, and a separate low-priority process (the Rust song-end model, singws-songend) is driven through an idealised run of the same song; [SONGEND-SHADOW]
     # logs ONLY a difference (more than 1.5 s or another reason; song lengths and numbers only, never names). The app's own decision is always the one acted on.
     "songend_shadow": True,
+    "songend_drive_prestart": False,     # opt-in: Rust answers the pre-start question at each tick when it agrees with Python (songend_drive.py); Python decides otherwise
     # Stage E shadow: every ~30 s the host relay messages this app just sent (playback_tick, state, queue, chat) are rebuilt by a separate low-priority process
     # (a Rust helper) from a snapshot of the same inputs, and [RELAY-MSG-SHADOW] logs ONLY a difference (never chat text, names or ids). The message the app built
     # is always the one sent; the relay schema, retries and connection are untouched.
@@ -43971,15 +43972,27 @@ class KaraokeApp(QWidget):
                 _lead_s = 5.0
             crossfade_window_ns = int(max(2.0, min(8.0, _lead_s)) * 1_000_000_000)  # was a fixed 3.2s
 
-            if (crossfade_enabled
-                    and time_remaining_ns <= crossfade_window_ns
-                    and time_remaining_ns > 150_000_000   # allow late fire near EOS to reduce dead-air
-                    and not getattr(self, "_bg_crossfade_prefired", False)
-                    and hasattr(self, "bg_music")
-                    and bool(getattr(self.bg_music, "playlist", None))
-                    and not bool(getattr(self.bg_music, "is_playing", False))
-                    and bool(self.settings.get("bg_enabled", True))
-                    and bool(self.settings.get("bg_autoplay_on_idle", True))):
+            _prestart_due = bool(
+                crossfade_enabled
+                and time_remaining_ns <= crossfade_window_ns
+                and time_remaining_ns > 150_000_000   # allow late fire near EOS to reduce dead-air
+                and not getattr(self, "_bg_crossfade_prefired", False)
+                and hasattr(self, "bg_music")
+                and bool(getattr(self.bg_music, "playlist", None))
+                and not bool(getattr(self.bg_music, "is_playing", False))
+                and bool(self.settings.get("bg_enabled", True))
+                and bool(self.settings.get("bg_autoplay_on_idle", True)))
+            if bool(self.settings.get("songend_drive_prestart", False)):
+                # Opt-in Rust drive (songend_drive.py): Rust's answer when it agrees with the one above, this one when it does not or Rust cannot answer.
+                try:
+                    import songend_drive
+                    _prestart_due, _, _ = songend_drive.decide_prestart(
+                        _prestart_due, time_remaining_ns, _lead_s, crossfade_enabled, getattr(self, "_bg_crossfade_prefired", False),
+                        bool(getattr(getattr(self, "bg_music", None), "playlist", None)), bool(getattr(getattr(self, "bg_music", None), "is_playing", False)),
+                        bool(self.settings.get("bg_enabled", True)), bool(self.settings.get("bg_autoplay_on_idle", True)), log=_diag)
+                except Exception:
+                    pass
+            if _prestart_due:
                 self._bg_crossfade_prefired = True
                 try:
                     self._bg_resume_reason = "karaoke_end_overlap"

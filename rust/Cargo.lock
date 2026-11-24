@@ -2503,6 +2503,7 @@ dependencies = [
  "singws-phrase",
  "singws-plan",
  "singws-queue",
+ "singws-songend",
  "singws-start",
  "singws-store",
  "singws-transport",

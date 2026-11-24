@@ -1342,7 +1342,7 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertIn('settings.get("karaoke_bgm_crossfade_enabled", False)', overlap_gate)
         timer_tick = function_source("update_time_left")
         self.assertIn("crossfade_enabled = self._karaoke_bgm_crossfade_enabled()", timer_tick)
-        self.assertIn("if (crossfade_enabled", timer_tick)
+        self.assertIn("crossfade_enabled\n                and time_remaining_ns <= crossfade_window_ns", timer_tick)   # the rule's own condition (songend_drive.py may answer it too)
         self.assertNotIn("silent_prefire", timer_tick)
         trim = function_source("_maybe_trim_end_silence")
         self.assertIn("self._karaoke_early_silence_trim_enabled()", trim)

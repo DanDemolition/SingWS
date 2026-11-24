@@ -576,3 +576,30 @@ pub unsafe extern "C" fn singws_kfweb_json(request: *const std::os::raw::c_char,
         }
     }
 }
+
+/// One live song-end question as JSON (`singws_songend::answer_json`): the opt-in drive of the pre-start decision (setting `songend_drive_prestart`, default off).
+///
+/// # Safety
+/// `request` must be a NUL-terminated string and `out` writable for `cap` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn singws_songend_json(request: *const std::os::raw::c_char, out: *mut u8, cap: usize) -> i64 {
+    if request.is_null() || out.is_null() {
+        return -1;
+    }
+    let r = catch_unwind(AssertUnwindSafe(|| {
+        let req = unsafe { std::ffi::CStr::from_ptr(request) }.to_str().map_err(|_| ())?;
+        Ok::<String, ()>(singws_songend::answer_json(req))
+    }));
+    match r {
+        Err(_) => -3,
+        Ok(Err(())) => -1,
+        Ok(Ok(json)) => {
+            let b = json.as_bytes();
+            if b.len() > cap {
+                return -2;
+            }
+            unsafe { std::ptr::copy_nonoverlapping(b.as_ptr(), out, b.len()) };
+            b.len() as i64
+        }
+    }
+}

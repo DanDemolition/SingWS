@@ -49,6 +49,38 @@ enum Deferred {
     Visual { path: String, safe: bool, visual_end: Option<f64>, conf: f64, reason: String },
 }
 
+/// The pre-start rule of `update_time_left` (0.2.18.1.py): with crossfade on, the music starts under the song once the time left is inside the window (`lead_s`
+/// clamped to 2..8 s, but more than 150 ms away from the end), once per song, when the playlist is non-empty, nothing is playing and both settings are on.
+/// One function, used by the tick below AND answered live over the FFI for the opt-in drive (`songend_drive_prestart`).
+#[allow(clippy::too_many_arguments)]
+pub fn prestart_due(crossfade: bool, remaining_ns: i64, lead_s: f64, prefired: bool, has_playlist: bool, bg_playing: bool, bg_enabled: bool, bg_autoplay: bool) -> bool {
+    let window = (2.0_f64.max(8.0_f64.min(lead_s)) * 1_000_000_000.0) as i64;
+    crossfade && remaining_ns <= window && remaining_ns > 150_000_000 && !prefired && has_playlist && !bg_playing && bg_enabled && bg_autoplay
+}
+
+/// The live questions Python may ask (`{"op":"prestart_due", ...}`), answered as `{"v": bool}`; anything else is an error object. Never panics on bad input.
+pub fn answer_json(request: &str) -> String {
+    let req: Value = match serde_json::from_str(request) {
+        Ok(v) => v,
+        Err(_) => return json!({"err": "bad json"}).to_string(),
+    };
+    let flag = |k: &str| req.get(k).and_then(Value::as_bool);
+    match req.get("op").and_then(Value::as_str) {
+        Some("prestart_due") => {
+            let (Some(crossfade), Some(prefired), Some(has_playlist), Some(bg_playing), Some(bg_enabled), Some(bg_autoplay)) =
+                (flag("crossfade"), flag("prefired"), flag("has_playlist"), flag("bg_playing"), flag("bg_enabled"), flag("bg_autoplay"))
+            else {
+                return json!({"err": "missing flag"}).to_string();
+            };
+            let (Some(remaining_ns), Some(lead_s)) = (req.get("remaining_ns").and_then(Value::as_i64), req.get("lead_s").and_then(Value::as_f64)) else {
+                return json!({"err": "missing number"}).to_string();
+            };
+            json!({"v": prestart_due(crossfade, remaining_ns, lead_s, prefired, has_playlist, bg_playing, bg_enabled, bg_autoplay)}).to_string()
+        }
+        _ => json!({"err": "unknown op"}).to_string(),
+    }
+}
+
 pub struct Machine {
     audio_end: Option<f64>,
     audio_dur: Option<f64>,
@@ -632,16 +664,7 @@ impl Machine {
         let crossfade = self.crossfade_enabled();
         let remaining = dur - pos;
         let lead = self.sf("bgm_fallback_prestart_sec", 5.0).unwrap_or(5.0);
-        let window = (2.0_f64.max(8.0_f64.min(lead)) * 1_000_000_000.0) as i64;
-        if crossfade
-            && remaining <= window
-            && remaining > 150_000_000
-            && !self.prefired
-            && self.bg_has_playlist()
-            && !self.bg_playing
-            && self.bg_enabled_setting()
-            && self.bg_autoplay_setting()
-        {
+        if prestart_due(crossfade, remaining, lead, self.prefired, self.bg_has_playlist(), self.bg_playing, self.bg_enabled_setting(), self.bg_autoplay_setting()) {
             self.prefired = true;
             self.resume_reason = "karaoke_end_overlap".into();
             self.bg_fade_in(Value::Null, 3000, true);
@@ -1177,5 +1200,37 @@ impl Machine {
         self.cmd("bg:preload_current_track_paused", vec![]);
         self.resume_reason = "verified_retry".into();
         self.start_bg_with_fade("verified_retry");
+    }
+}
+
+#[cfg(test)]
+mod prestart_tests {
+    use super::*;
+
+    #[test]
+    fn the_prestart_rule_and_its_json_answer() {
+        // inside the window, away from the very end, nothing else in the way
+        assert!(prestart_due(true, 5_000_000_000, 5.0, false, true, false, true, true));
+        // exactly the window is inside, one nanosecond more is not; 150 ms exactly is too late, one ns more is not
+        assert!(!prestart_due(true, 5_000_000_001, 5.0, false, true, false, true, true));
+        assert!(!prestart_due(true, 150_000_000, 5.0, false, true, false, true, true));
+        assert!(prestart_due(true, 150_000_001, 5.0, false, true, false, true, true));
+        // the lead is clamped to 2..8 s
+        assert!(prestart_due(true, 8_000_000_000, 99.0, false, true, false, true, true));
+        assert!(!prestart_due(true, 8_000_000_001, 99.0, false, true, false, true, true));
+        assert!(prestart_due(true, 2_000_000_000, 0.5, false, true, false, true, true));
+        assert!(!prestart_due(true, 2_000_000_001, 0.5, false, true, false, true, true));
+        // every other condition blocks it
+        assert!(!prestart_due(false, 3_000_000_000, 5.0, false, true, false, true, true));
+        assert!(!prestart_due(true, 3_000_000_000, 5.0, true, true, false, true, true));
+        assert!(!prestart_due(true, 3_000_000_000, 5.0, false, false, false, true, true));
+        assert!(!prestart_due(true, 3_000_000_000, 5.0, false, true, true, true, true));
+        assert!(!prestart_due(true, 3_000_000_000, 5.0, false, true, false, false, true));
+        assert!(!prestart_due(true, 3_000_000_000, 5.0, false, true, false, true, false));
+        let ok = r#"{"op":"prestart_due","crossfade":true,"remaining_ns":3000000000,"lead_s":5.0,"prefired":false,"has_playlist":true,"bg_playing":false,"bg_enabled":true,"bg_autoplay":true}"#;
+        assert_eq!(answer_json(ok), r#"{"v":true}"#);
+        assert!(answer_json("not json").contains("err"));
+        assert!(answer_json(r#"{"op":"nope"}"#).contains("err"));
+        assert!(answer_json(r#"{"op":"prestart_due","crossfade":true}"#).contains("err"));
     }
 }
