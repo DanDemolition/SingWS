@@ -2500,6 +2500,7 @@ dependencies = [
  "serde_json",
  "singws-dsp",
  "singws-karafun-svc",
+ "singws-mac",
  "singws-phrase",
  "singws-plan",
  "singws-queue",

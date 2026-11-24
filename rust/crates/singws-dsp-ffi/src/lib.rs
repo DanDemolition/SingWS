@@ -603,3 +603,25 @@ pub unsafe extern "C" fn singws_songend_json(request: *const std::os::raw::c_cha
         }
     }
 }
+
+/// The macOS keep-awake assertion through the platform shim (`singws-mac`): the opt-in replacement of `mac_keep_awake.py`'s PyObjC call (setting `mac_shim_keep_awake`).
+/// `op` 1 = begin (`reason` a NUL-terminated string; returns 1 when held), 0 = end (returns 0), 2 = is it held (1/0). Anything else, or a panic: -1.
+///
+/// # Safety
+/// `reason` may be null for ops 0 and 2; for op 1 it must be a NUL-terminated string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn singws_macshim_keep_awake(op: i32, reason: *const std::os::raw::c_char) -> i32 {
+    catch_unwind(AssertUnwindSafe(|| match op {
+        1 => {
+            let why = if reason.is_null() { "SingWS session".to_string() } else { unsafe { std::ffi::CStr::from_ptr(reason) }.to_string_lossy().into_owned() };
+            singws_mac::keep_awake_begin(&why) as i32
+        }
+        0 => {
+            singws_mac::keep_awake_end();
+            0
+        }
+        2 => singws_mac::keep_awake_active() as i32,
+        _ => -1,
+    }))
+    .unwrap_or(-1)
+}

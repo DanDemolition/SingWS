@@ -20,4 +20,5 @@ singws-wire = { path = "../singws-wire" }
 singws-phrase = { path = "../singws-phrase" }
 singws-karafun-svc = { path = "../singws-karafun-svc" }
 singws-songend = { path = "../singws-songend" }
+singws-mac = { path = "../singws-mac" }
 serde_json = "1"

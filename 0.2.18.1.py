@@ -4095,6 +4095,8 @@ def _install_main_thread_watchdog(owner, threshold_ms: int = 120):
         def _watch():
             stall_logged = False
             long_logged = False
+            second_dump_done = False
+            first_gap = None
             peak = 0.0
             while not bool(getattr(owner, "_mt_watch_stop", False)):
                 time.sleep(0.1 if light else 0.03)
@@ -4135,15 +4137,17 @@ def _install_main_thread_watchdog(owner, threshold_ms: int = 120):
                             f" main-thread stack at detection:\n{stack}{topology}"
                         )
                         stall_logged = True
+                        first_gap = gap
                     # A freeze over a second also freezes the TV picture (karaoke frames are drawn on the main thread),
                     # so record what else the Mac was doing at that moment. Log only; costs ~0.3 s on this watchdog
                     # thread, and only during an already-long stall.
+                    if first_gap is not None and not second_dump_done and gap >= max(1.0, first_gap + 0.6) and _stack_capture_enabled():
+                        # the stack at detection shows what STARTED a stall; this second one, taken once the stall has run at least 0.6 s longer (and
+                        # is over a second), shows what still holds the main thread (the 1.9 s freeze of 2026-11-22 23:46 had only the first)
+                        second_dump_done = True
+                        _diag(f"[STALL] main-thread stack {int(gap * 1000)}ms into the stall: {_request_stall_dump(gap, force=True)}")
                     if gap >= 1.0 and not long_logged:
                         long_logged = True
-                        if _stack_capture_enabled():
-                            # the stack at detection shows what STARTED a stall; this second one, a second in, shows what still holds the main thread
-                            # (the 1.9 s freeze of 2026-11-22 23:46 had only the first)
-                            _diag(f"[STALL] main-thread stack ~1s into the stall: {_request_stall_dump(gap, force=True)}")
                         if _system_snapshot_enabled():
                             try:
                                 import system_snapshot as _system_snapshot
@@ -4155,6 +4159,8 @@ def _install_main_thread_watchdog(owner, threshold_ms: int = 120):
                         _diag(f"[STALL] GUI thread recovered after ~{int(peak * 1000)}ms")
                     stall_logged = False
                     long_logged = False
+                    second_dump_done = False
+                    first_gap = None
                     peak = 0.0
 
         watch_thread = threading.Thread(target=_watch, name="singws-main-thread-watchdog", daemon=True)
@@ -4512,6 +4518,7 @@ DEFAULTS = {
     "end_silence_threshold_2_5_migrated": False,
     "karaoke_auto_advance": False,         # auto-play the next queued karaoke when a song ends (off = stop after each song)
     "keep_mac_awake": True,                # macOS: prevent App Nap + idle system/display sleep while SingWS runs (stops idle "freezes")
+    "mac_shim_keep_awake": False,          # opt-in: the Rust platform shim (singws-mac) holds the keep-awake assertion instead of PyObjC; PyObjC is the fallback
     "bg_end_silence_trim_enabled": False,  # Background music: skip trailing silence between BG tracks (opt-in)
     "request_poll_interval_sec": 2,        # how often the app checks the server for new requests (seconds)
     # --- Audio processing master switch ---
@@ -23061,11 +23068,13 @@ class KaraokeApp(QWidget):
         # Keep macOS from napping/idle-sleeping SingWS during a session, so the
         # idle app no longer "freezes" between songs (tester logs 2026-07-18).
         try:
+            import mac_keep_awake
             from mac_keep_awake import KeepAwake
+            mac_keep_awake.prefer_rust(bool(self.settings.get("mac_shim_keep_awake", False)))     # opt-in: the Rust platform shim holds the assertion, PyObjC is the fallback
             self._mac_keep_awake = KeepAwake("SingWS karaoke session active")
             if bool(self.settings.get("keep_mac_awake", True)):
                 if self._mac_keep_awake.begin():
-                    _diag("[KEEP-AWAKE] macOS App Nap / idle sleep prevention active for this session")
+                    _diag(f"[KEEP-AWAKE] macOS App Nap / idle sleep prevention active for this session (held by {self._mac_keep_awake.backend()})")
         except Exception as e:
             self._mac_keep_awake = None
             try:
