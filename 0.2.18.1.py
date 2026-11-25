@@ -4337,6 +4337,7 @@ DEFAULTS = {
     # logs ONLY a difference (more than 1.5 s or another reason; song lengths and numbers only, never names). The app's own decision is always the one acted on.
     "songend_shadow": True,
     "songend_drive_prestart": False,     # opt-in: Rust answers the pre-start question at each tick when it agrees with Python (songend_drive.py); Python decides otherwise
+    "songend_drive_floors": False,        # opt-in: Rust also answers the effective-duration floor and the verified audio end when it equals Python (songend_drive.py)
     # Stage E shadow: every ~30 s the host relay messages this app just sent (playback_tick, state, queue, chat) are rebuilt by a separate low-priority process
     # (a Rust helper) from a snapshot of the same inputs, and [RELAY-MSG-SHADOW] logs ONLY a difference (never chat text, names or ids). The message the app built
     # is always the one sent; the relay schema, retries and connection are untouched.
@@ -22736,6 +22737,14 @@ class SoundboardStrip(QWidget):
             except Exception:
                 pass
 
+
+
+def _diag_rate_limited_songend(message: str) -> None:
+    """The song-end drive's disagreement lines, at most one per kind per 30 s (a disagreement on every 500 ms tick would flood the log)."""
+    try:
+        _diag_rate_limited("songend_drive:" + message.split(" python=")[0][:60], message, 30.0)
+    except Exception:
+        pass
 
 
 def _songend_shadow_note(app, kind, mode=None):
@@ -43286,6 +43295,18 @@ class KaraokeApp(QWidget):
             pass
 
     def _apply_audio_end_floor(self, scan_path: str, duration: float, trailing: float, source: str, runs_to_end: bool = False):
+        self._apply_audio_end_floor_python(scan_path, duration, trailing, source, runs_to_end)
+        if (bool((self.__dict__.get("settings") or {}).get("songend_drive_floors", False))
+                and str(scan_path) == str(getattr(self, "_karaoke_audio_end_path", ""))):
+            # Opt-in Rust drive (songend_drive.py): the verified audio end Rust computes, when it equals Python's (it never differs unless one is wrong).
+            try:
+                import songend_drive
+                self._karaoke_audio_end_s = songend_drive.decide_audio_end(
+                    getattr(self, "_karaoke_audio_end_s", None), float(duration), max(0.0, float(trailing)), bool(runs_to_end), log=_diag_rate_limited_songend)
+            except Exception:
+                pass
+
+    def _apply_audio_end_floor_python(self, scan_path: str, duration: float, trailing: float, source: str, runs_to_end: bool = False):
         # A late scan must not be applied to whatever is playing now.
         if str(scan_path) != str(getattr(self, "_karaoke_audio_end_path", "")):
             return
@@ -43453,6 +43474,18 @@ class KaraokeApp(QWidget):
         )
 
     def _effective_karaoke_duration_ns(self, dur_ns):
+        value = self._effective_karaoke_duration_ns_python(dur_ns)
+        if bool((self.__dict__.get("settings") or {}).get("songend_drive_floors", False)):
+            # Opt-in Rust drive (songend_drive.py): Rust's answer when it equals the one above, this one when it does not or Rust cannot answer.
+            try:
+                import songend_drive
+                audio_s = float(getattr(self, "_karaoke_audio_duration_s", None) or 0.0)
+                value = songend_drive.decide_effective_duration(value, dur_ns, audio_s, log=_diag_rate_limited_songend)
+            except Exception:
+                pass
+        return value
+
+    def _effective_karaoke_duration_ns_python(self, dur_ns):
         """Media duration floored by the real AUDIO duration.
 
         MP3+G is two files. mpv loads the .cdg as the media and the .mp3 as an

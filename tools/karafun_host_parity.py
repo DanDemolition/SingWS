@@ -25,6 +25,8 @@ ROOT = Path(__file__).resolve().parent.parent
 if not os.environ.get("SINGWS_HOME") or Path(os.environ["SINGWS_HOME"]).resolve() == (Path.home() / "SingWS").resolve():
     os.environ["SINGWS_HOME"] = tempfile.mkdtemp(prefix="kf_host_parity_home_")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+# the Python host has none of the 2026-11-22/24 rules (a song clock stuck at 0, a player that ignores stops, a stopped page, a player that never comes up): the Rust program is told to leave them out here
+os.environ["SINGWS_KF_OLD_RULES"] = "1"
 sys.path.insert(0, str(ROOT))
 import karafun_web_host  # noqa: E402
 

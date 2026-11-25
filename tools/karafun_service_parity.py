@@ -16,6 +16,9 @@ import os
 import random
 import subprocess
 import sys
+
+# the Python service predates the 2026-11 host rules: the Rust program is told to leave them out here
+os.environ["SINGWS_KF_OLD_RULES"] = "1"
 import tempfile
 from pathlib import Path
 from unittest import mock

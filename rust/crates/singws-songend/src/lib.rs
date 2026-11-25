@@ -58,6 +58,34 @@ pub fn prestart_due(crossfade: bool, remaining_ns: i64, lead_s: f64, prefired: b
     crossfade && remaining_ns <= window && remaining_ns > 150_000_000 && !prefired && has_playlist && !bg_playing && bg_enabled && bg_autoplay
 }
 
+/// `_effective_karaoke_duration_ns`: the media duration floored by the real AUDIO duration (MP3+G graphics streams run short). Never shorter than the media duration.
+pub fn effective_duration_ns(dur_ns: Option<i64>, audio_s: f64) -> Option<i64> {
+    let d = dur_ns?;
+    if audio_s <= 0.0 {
+        return dur_ns;
+    }
+    let audio_ns = (audio_s * NS) as i64;
+    if audio_ns <= d {
+        dur_ns
+    } else {
+        Some(audio_ns)
+    }
+}
+
+/// `_apply_audio_end_floor`: the verified end of the audio, in seconds (None = no trailing silence found, the full duration plays). Silence beyond
+/// `MAX_CREDITED_SILENCE_S` is credited only up to the cap.
+pub fn audio_end_s(duration: f64, trailing: f64, runs_to_end: bool) -> Option<f64> {
+    let trailing = 0.0_f64.max(trailing);
+    if trailing <= 0.0 && runs_to_end && duration > 0.0 {
+        return Some(duration);
+    }
+    if trailing <= 0.0 {
+        return None;
+    }
+    let credited = if trailing > MAX_CREDITED_SILENCE_S { MAX_CREDITED_SILENCE_S } else { trailing };
+    Some(0.0_f64.max(duration - credited))
+}
+
 /// The live questions Python may ask (`{"op":"prestart_due", ...}`), answered as `{"v": bool}`; anything else is an error object. Never panics on bad input.
 pub fn answer_json(request: &str) -> String {
     let req: Value = match serde_json::from_str(request) {
@@ -76,6 +104,25 @@ pub fn answer_json(request: &str) -> String {
                 return json!({"err": "missing number"}).to_string();
             };
             json!({"v": prestart_due(crossfade, remaining_ns, lead_s, prefired, has_playlist, bg_playing, bg_enabled, bg_autoplay)}).to_string()
+        }
+        Some("effective_duration") => {
+            let Some(audio_s) = req.get("audio_s").and_then(Value::as_f64) else {
+                return json!({"err": "missing number"}).to_string();
+            };
+            let dur = match req.get("dur_ns") {
+                Some(Value::Null) | None => None,
+                Some(v) => match v.as_i64() {
+                    Some(n) => Some(n),
+                    None => return json!({"err": "bad dur_ns"}).to_string(),
+                },
+            };
+            json!({"v": effective_duration_ns(dur, audio_s)}).to_string()
+        }
+        Some("audio_end") => {
+            let (Some(duration), Some(trailing), Some(runs_to_end)) = (req.get("duration").and_then(Value::as_f64), req.get("trailing").and_then(Value::as_f64), flag("runs_to_end")) else {
+                return json!({"err": "missing field"}).to_string();
+            };
+            json!({"v": audio_end_s(duration, trailing, runs_to_end)}).to_string()
         }
         _ => json!({"err": "unknown op"}).to_string(),
     }
@@ -529,7 +576,7 @@ impl Machine {
             self.log(format!("[END-AUDIO] trailing silence {:.2}s capped to {:.1}s source={} file={}", trailing, MAX_CREDITED_SILENCE_S, source, base(path)));
             trailing = MAX_CREDITED_SILENCE_S;
         }
-        let end = 0.0_f64.max(duration - trailing);
+        let end = audio_end_s(duration, trailing, runs_to_end).unwrap_or(0.0);
         self.audio_end = Some(end);
         self.log(format!(
             "[END-AUDIO] last audible audio at {:.2}s (trailing_silence={:.2}s duration={:.2}s source={}) file={}",
@@ -627,10 +674,11 @@ impl Machine {
         if audio_s <= 0.0 {
             return dur;
         }
-        let audio_ns = (audio_s * NS) as i64;
-        if audio_ns <= d {
+        let effective = effective_duration_ns(dur, audio_s);
+        if effective == dur {
             return dur;
         }
+        let audio_ns = effective.unwrap_or(d);
         if !self.floor_logged {
             self.floor_logged = true;
             self.log(format!(
@@ -1232,5 +1280,31 @@ mod prestart_tests {
         assert!(answer_json("not json").contains("err"));
         assert!(answer_json(r#"{"op":"nope"}"#).contains("err"));
         assert!(answer_json(r#"{"op":"prestart_due","crossfade":true}"#).contains("err"));
+    }
+
+    #[test]
+    fn the_duration_floor_and_the_audio_end_cap() {
+        // never shorter than the media duration; None stays None; no audio length means no change
+        assert_eq!(effective_duration_ns(Some(234_250_000_000), 256.76), Some(256_760_000_000));
+        assert_eq!(effective_duration_ns(Some(300_000_000_000), 256.76), Some(300_000_000_000));
+        assert_eq!(effective_duration_ns(Some(256_760_000_000), 256.76), Some(256_760_000_000));
+        assert_eq!(effective_duration_ns(None, 256.76), None);
+        assert_eq!(effective_duration_ns(Some(10), 0.0), Some(10));
+        assert_eq!(effective_duration_ns(Some(10), -3.0), Some(10));
+        // the audio end: the trailing silence is credited up to 8 s
+        assert_eq!(audio_end_s(200.0, 3.0, false), Some(197.0));
+        assert_eq!(audio_end_s(200.0, 8.0, false), Some(192.0));
+        assert_eq!(audio_end_s(200.0, 20.0, false), Some(192.0));
+        assert_eq!(audio_end_s(200.0, 0.0, false), None);
+        assert_eq!(audio_end_s(200.0, 0.0, true), Some(200.0));
+        assert_eq!(audio_end_s(0.0, 0.0, true), None);
+        assert_eq!(audio_end_s(5.0, 20.0, false), Some(0.0));
+        assert_eq!(audio_end_s(200.0, -4.0, false), None);
+        // through the JSON answers
+        assert_eq!(answer_json(r#"{"op":"effective_duration","dur_ns":234250000000,"audio_s":256.76}"#), r#"{"v":256760000000}"#);
+        assert_eq!(answer_json(r#"{"op":"effective_duration","dur_ns":null,"audio_s":256.76}"#), r#"{"v":null}"#);
+        assert_eq!(answer_json(r#"{"op":"audio_end","duration":200.0,"trailing":20.0,"runs_to_end":false}"#), r#"{"v":192.0}"#);
+        assert_eq!(answer_json(r#"{"op":"audio_end","duration":200.0,"trailing":0.0,"runs_to_end":false}"#), r#"{"v":null}"#);
+        assert!(answer_json(r#"{"op":"audio_end","duration":200.0}"#).contains("err"));
     }
 }

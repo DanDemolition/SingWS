@@ -74,3 +74,52 @@ def decide_prestart(python_due: bool, remaining_ns: int, lead_s: float, crossfad
     if log and (disagreed or due):
         log(f"[{TAG}] decision=prestart python={int(bool(python_due))} rust={'-' if rust is None else int(rust)} selected={int(due)} owner={owner} disagreement={int(disagreed)}")
     return due, disagreed, owner
+
+
+def _ask(request: dict):
+    """One JSON question to Rust: the answer's "v" and True, or (None, False) when Rust could not answer."""
+    lib = _library()
+    if lib is None:
+        return None, False
+    out = ctypes.create_string_buffer(_OUT_CAP)
+    n = lib.singws_songend_json(json.dumps(request).encode("utf-8"), out, _OUT_CAP)
+    if n < 0:
+        return None, False
+    answer = json.loads(out.raw[:n].decode("utf-8"))
+    if "err" in answer or "v" not in answer:
+        return None, False
+    return answer["v"], True
+
+
+def decide_effective_duration(python_value, dur_ns, audio_s: float, log=None):
+    """The duration the song-end rules key off (`_effective_karaoke_duration_ns`): Rust's answer when it equals Python's, Python's otherwise. Never raises."""
+    try:
+        rust, ok = _ask({"op": "effective_duration", "dur_ns": None if dur_ns is None else int(dur_ns), "audio_s": float(audio_s)})
+    except Exception as exc:
+        if log:
+            log(f"[{TAG}] decision=effective_duration fallback=python error={exc!r}")
+        return python_value
+    if not ok:
+        return python_value
+    if rust != python_value:
+        if log:
+            log(f"[{TAG}] decision=effective_duration python={python_value} rust={rust} selected={python_value} owner=python-fallback disagreement=1")
+        return python_value
+    return python_value if rust is None else int(rust)
+
+
+def decide_audio_end(python_value, duration: float, trailing: float, runs_to_end: bool, log=None):
+    """The verified end of the audio in seconds (`_apply_audio_end_floor`): Rust's answer when it equals Python's, Python's otherwise. Never raises."""
+    try:
+        rust, ok = _ask({"op": "audio_end", "duration": float(duration), "trailing": float(trailing), "runs_to_end": bool(runs_to_end)})
+    except Exception as exc:
+        if log:
+            log(f"[{TAG}] decision=audio_end fallback=python error={exc!r}")
+        return python_value
+    if not ok:
+        return python_value
+    if rust != python_value:
+        if log:
+            log(f"[{TAG}] decision=audio_end python={python_value} rust={rust} selected={python_value} owner=python-fallback disagreement=1")
+        return python_value
+    return python_value if rust is None else float(rust)
