@@ -123,3 +123,37 @@ def decide_audio_end(python_value, duration: float, trailing: float, runs_to_end
             log(f"[{TAG}] decision=audio_end python={python_value} rust={rust} selected={python_value} owner=python-fallback disagreement=1")
         return python_value
     return python_value if rust is None else float(rust)
+
+
+def _decide_bool(op: str, python_value: bool, request: dict, log=None) -> bool:
+    """One yes/no rule: Rust's answer when it equals Python's, Python's otherwise (the difference is logged). Never raises."""
+    try:
+        rust, ok = _ask(dict(request, op=op))
+    except Exception as exc:
+        if log:
+            log(f"[{TAG}] decision={op} fallback=python error={exc!r}")
+        return bool(python_value)
+    if not ok or not isinstance(rust, bool):
+        return bool(python_value)
+    if rust != bool(python_value):
+        if log:
+            log(f"[{TAG}] decision={op} python={int(bool(python_value))} rust={int(rust)} selected={int(bool(python_value))} owner=python-fallback disagreement=1")
+        return bool(python_value)
+    return rust
+
+
+def decide_verified_end_allowed(python_value, auto_advance, crossfade, prefired, has_playlist, bg_playing, bg_enabled, bg_autoplay, log=None) -> bool:
+    """May the music start under a verified dead audio tail (`_prefire_bgm_at_verified_audio_end`)?"""
+    return _decide_bool("verified_end_allowed", python_value, {"auto_advance": bool(auto_advance), "crossfade": bool(crossfade), "prefired": bool(prefired),
+                        "has_playlist": bool(has_playlist), "bg_playing": bool(bg_playing), "bg_enabled": bool(bg_enabled), "bg_autoplay": bool(bg_autoplay)}, log)
+
+
+def decide_lyric_cue_ready(python_value, enabled, cdg_mode, cue, delay, need, elapsed, remain, log=None) -> bool:
+    """Is a CDG song past its last lyric wipe by the delay with enough left to start the end-of-song animation (`_lyric_end_cue_ready`)?"""
+    return _decide_bool("lyric_cue_ready", python_value, {"enabled": bool(enabled), "cdg_mode": bool(cdg_mode), "cue": None if cue is None else float(cue), "delay": float(delay),
+                        "need": float(need), "elapsed": float(elapsed), "remain": float(remain)}, log)
+
+
+def decide_visual_end_trusted(python_value, safe, visual_end, confidence, log=None) -> bool:
+    """Is a scanned visual end trusted enough to end a song early (`_apply_visual_end_floor`)?"""
+    return _decide_bool("visual_end_trusted", python_value, {"safe": bool(safe), "visual_end": None if visual_end is None else float(visual_end), "confidence": float(confidence)}, log)

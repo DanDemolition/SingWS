@@ -4338,6 +4338,7 @@ DEFAULTS = {
     "songend_shadow": True,
     "songend_drive_prestart": False,     # opt-in: Rust answers the pre-start question at each tick when it agrees with Python (songend_drive.py); Python decides otherwise
     "songend_drive_floors": False,        # opt-in: Rust also answers the effective-duration floor and the verified audio end when it equals Python (songend_drive.py)
+    "songend_drive_gates": False,         # opt-in: Rust also answers the verified-end music gate, the lyric-cue readiness and the visual-end trust; a difference is logged and Python decides (songend_drive.py)
     # Stage E shadow: every ~30 s the host relay messages this app just sent (playback_tick, state, queue, chat) are rebuilt by a separate low-priority process
     # (a Rust helper) from a snapshot of the same inputs, and [RELAY-MSG-SHADOW] logs ONLY a difference (never chat text, names or ids). The message the app built
     # is always the one sent; the relay schema, retries and connection are untouched.
@@ -43417,6 +43418,24 @@ class KaraokeApp(QWidget):
         _diag(f"[END-CUE] last lyric change at {cue:.1f}s of {total:.1f}s of graphics: {'cue armed' if trusted else 'not trusted, normal end rules only'} file={os.path.basename(scan_path)}")
 
     def _lyric_end_cue_ready(self, elapsed: float, remain: float) -> bool:
+        result = self._lyric_end_cue_ready_python(elapsed, remain)
+        if bool((self.__dict__.get("settings") or {}).get("songend_drive_gates", False)):
+            try:
+                import songend_drive
+                try:
+                    delay = max(0.0, float(self.settings.get("karaoke_lyric_cue_delay_sec", 3.0)))
+                    need = max(0.0, float(self.settings.get("karaoke_lyric_cue_min_remaining_sec", 4.0)))
+                except (TypeError, ValueError):
+                    delay, need = 3.0, 4.0
+                cue = getattr(self, "_karaoke_lyric_cue_s", None)
+                result = songend_drive.decide_lyric_cue_ready(
+                    result, bool(self.settings.get("karaoke_end_on_lyric_cue", True)), getattr(self, "_end_silence_mode", "") == "cdg",
+                    None if cue is None else float(cue), delay, need, elapsed, remain, log=_diag_rate_limited_songend)
+            except Exception:
+                pass
+        return result
+
+    def _lyric_end_cue_ready_python(self, elapsed: float, remain: float) -> bool:
         """True once a CDG song is past its last lyric wipe by the configured delay with at least min_remaining seconds still to play."""
         if not bool(self.settings.get("karaoke_end_on_lyric_cue", True)):
             return False
@@ -43441,6 +43460,12 @@ class KaraokeApp(QWidget):
         confidence = float(getattr(result, "confidence", 0.0) or 0.0)
         reason = str(getattr(result, "reason", "analysis_unavailable") or "analysis_unavailable")
         self._karaoke_visual_end_reason = reason
+        if bool((self.__dict__.get("settings") or {}).get("songend_drive_gates", False)):
+            try:
+                import songend_drive
+                songend_drive.decide_visual_end_trusted(not (not safe or visual_end is None or confidence < 0.85), safe, visual_end, confidence, log=_diag_rate_limited_songend)
+            except Exception:
+                pass
         if not safe or visual_end is None or confidence < 0.85:
             self._karaoke_visual_end_s = None
             self._karaoke_visual_end_confidence = 0.0
@@ -43628,6 +43653,26 @@ class KaraokeApp(QWidget):
 
 
     def _prefire_bgm_at_verified_audio_end(self) -> bool:
+        drive = bool((self.__dict__.get("settings") or {}).get("songend_drive_gates", False))
+        flags = None
+        if drive:
+            try:
+                bg = getattr(self, "bg_music", None)
+                flags = (bool(self.settings.get("karaoke_auto_advance", False)), bool(self._karaoke_bgm_crossfade_enabled()), bool(getattr(self, "_bg_crossfade_prefired", False)),
+                         bool(getattr(bg, "playlist", None)) if bg is not None else False, bool(getattr(bg, "is_playing", False)) if bg is not None else False,
+                         bool(self.settings.get("bg_enabled", True)), bool(self.settings.get("bg_autoplay_on_idle", True)))
+            except Exception:
+                flags = None
+        result = self._prefire_bgm_at_verified_audio_end_python()
+        if flags is not None:
+            try:
+                import songend_drive
+                songend_drive.decide_verified_end_allowed(result, *flags, log=_diag_rate_limited_songend)    # Python's result stands; a difference is logged
+            except Exception:
+                pass
+        return result
+
+    def _prefire_bgm_at_verified_audio_end_python(self) -> bool:
         """Fade BGM under a verified dead audio tail without ending visuals.
 
         Audio analysis is sufficient authority for an audio-only crossfade. A

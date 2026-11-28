@@ -110,6 +110,63 @@ class SongEndDrive(unittest.TestCase):
                 self.assertTrue(ok)
                 self.assertEqual(got, expected, (duration, trailing, runs))
 
+    def test_gate_rules_use_rust_only_when_it_equals_python_and_never_raise(self):
+        flags = (False, True, False, True, False, True, True)
+        with mock.patch.object(drive, "_ask", return_value=(True, True)):
+            self.assertTrue(drive.decide_verified_end_allowed(True, *flags))
+            self.assertFalse(drive.decide_verified_end_allowed(False, *flags))        # Rust says yes, Python no: Python wins
+        lines = []
+        with mock.patch.object(drive, "_ask", return_value=(False, True)):
+            self.assertTrue(drive.decide_lyric_cue_ready(True, True, True, 100.0, 3.0, 4.0, 103.0, 9.0, log=lines.append))
+        self.assertIn("disagreement=1", lines[0])
+        with mock.patch.object(drive, "_ask", return_value=(None, False)):
+            self.assertTrue(drive.decide_visual_end_trusted(True, True, 5.0, 0.9))
+            self.assertFalse(drive.decide_visual_end_trusted(False, False, None, 0.1))
+        with mock.patch.object(drive, "_ask", side_effect=RuntimeError("boom")):
+            self.assertTrue(drive.decide_visual_end_trusted(True, True, 5.0, 0.9))
+            self.assertFalse(drive.decide_lyric_cue_ready(False, False, False, None, 3.0, 4.0, 0.0, 0.0))
+
+    @unittest.skipIf(drive._library() is None, "libsingws_dsp_ffi without singws_songend_json is not built here")
+    def test_the_real_rust_gates_match_the_real_python_methods_over_a_grid(self):
+        import itertools
+        mod = self.main_module()
+        KA = mod.KaraokeApp
+        with mock.patch.object(mod, "_diag", lambda *a, **k: None):
+            # the verified-end gate: every combination of the seven conditions, through the real method
+            for auto, cross, pre, playlist, playing, enabled, autoplay in itertools.product((False, True), repeat=7):
+                bg = types.SimpleNamespace(playlist=["t"] if playlist else [], is_playing=playing, fade_in=lambda *a, **k: None)
+                fake = types.SimpleNamespace(settings={"karaoke_auto_advance": auto, "bg_enabled": enabled, "bg_autoplay_on_idle": autoplay}, bg_music=bg, _bg_crossfade_prefired=pre,
+                                             _karaoke_bgm_crossfade_enabled=lambda cross=cross: cross)
+                expected = KA._prefire_bgm_at_verified_audio_end_python(fake)
+                got, ok = drive._ask({"op": "verified_end_allowed", "auto_advance": auto, "crossfade": cross, "prefired": pre, "has_playlist": playlist, "bg_playing": playing,
+                                      "bg_enabled": enabled, "bg_autoplay": autoplay})
+                self.assertTrue(ok)
+                self.assertEqual(got, expected, (auto, cross, pre, playlist, playing, enabled, autoplay))
+            # the lyric cue: the real method over settings, mode, cue and the clock
+            for enabled, mode, cue, delay, need, elapsed, remain in itertools.product((False, True), ("cdg", "mp4", ""), (None, 100.0), (0.0, 3.0), (0.0, 4.0), (99.0, 102.9, 103.0, 150.0), (3.9, 4.0, 40.0)):
+                fake = types.SimpleNamespace(settings={"karaoke_end_on_lyric_cue": enabled, "karaoke_lyric_cue_delay_sec": delay, "karaoke_lyric_cue_min_remaining_sec": need},
+                                             _end_silence_mode=mode, _karaoke_lyric_cue_s=cue)
+                expected = KA._lyric_end_cue_ready_python(fake, elapsed, remain)
+                got, ok = drive._ask({"op": "lyric_cue_ready", "enabled": enabled, "cdg_mode": mode == "cdg", "cue": cue, "delay": delay, "need": need, "elapsed": elapsed, "remain": remain})
+                self.assertTrue(ok)
+                self.assertEqual(got, expected, (enabled, mode, cue, delay, need, elapsed, remain))
+            # the visual-end trust: whether the real method goes on to apply the endpoint
+            for safe, end, conf in itertools.product((False, True), (None, 0.0, 12.5), (0.0, 0.84, 0.85, 0.99)):
+                applied = []
+                fake = types.SimpleNamespace(settings={}, _karaoke_visual_end_path="p", _set_lyric_cue=lambda *a, **k: None, _apply_visual_end_values=lambda *a, **k: applied.append(1))
+                result = types.SimpleNamespace(safe_for_early_completion=safe, visual_end=end, confidence=conf, reason="r", last_change=None, duration=0.0)
+                KA._apply_visual_end_floor(fake, "p", result)
+                got, ok = drive._ask({"op": "visual_end_trusted", "safe": safe, "visual_end": end, "confidence": conf})
+                self.assertTrue(ok)
+                self.assertEqual(got, bool(applied), (safe, end, conf))
+
+    def test_the_gates_drive_is_off_by_default_and_wired_in_the_app(self):
+        src = (Path(__file__).parent / "0.2.18.1.py").read_text()
+        self.assertIn('"songend_drive_gates": False', src)
+        self.assertEqual(src.count('__dict__.get("settings") or {}).get("songend_drive_gates", False)'), 3)
+        for name in ("decide_verified_end_allowed(", "decide_lyric_cue_ready(", "decide_visual_end_trusted("):
+            self.assertIn("songend_drive." + name, src)
+
     def test_the_floors_drive_is_off_by_default_and_wired_in_the_app(self):
         src = (Path(__file__).parent / "0.2.18.1.py").read_text()
         self.assertIn('"songend_drive_floors": False', src)

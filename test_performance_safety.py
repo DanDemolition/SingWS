@@ -1476,7 +1476,7 @@ class PerformanceSafetyTests(unittest.TestCase):
         visual_guard = trim.index("if visual_end is None or visual_confidence < 0.85:", audio_crossfade)
         self.assertLess(audio_crossfade, visual_guard)
 
-        prefire = function_source("_prefire_bgm_at_verified_audio_end")
+        prefire = function_source("_prefire_bgm_at_verified_audio_end_python")
         self.assertIn('self.settings.get("karaoke_auto_advance", False)', prefire)
         self.assertIn("_karaoke_bgm_crossfade_enabled()", prefire)
         self.assertIn("bg_music.fade_in(None, 3000, allow_during_karaoke=True)", prefire)
@@ -1489,7 +1489,7 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertIn("_prefire_bgm_at_verified_audio_end", trim)
         self.assertIn(
             "bg_music.fade_in",
-            function_source("_prefire_bgm_at_verified_audio_end"),
+            function_source("_prefire_bgm_at_verified_audio_end_python"),
         )
         self.assertIn('_handle_media_end_safe("verified_silent_tail")', trim)
         self.assertIn("_end_silence_triggered = True", trim)
