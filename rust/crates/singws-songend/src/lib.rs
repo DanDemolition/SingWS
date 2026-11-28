@@ -112,6 +112,69 @@ pub fn visual_end_trusted(safe: bool, visual_end: Option<f64>, confidence: f64) 
     !(!safe || visual_end.is_none() || confidence < VISUAL_CONFIDENCE_MIN)
 }
 
+/// The ticks of near-end silence the fallback end-of-stream detector waits for before it ends a song (`_eos_guard >= 2`).
+pub const EOS_GUARD_TICKS: i64 = 2;
+/// The silent ticks without movement the stalled-position detector waits for (`_stalled_pos_ticks >= 20`, about 10 s of 500 ms ticks).
+pub const STALL_TICKS: i64 = 20;
+/// Movement smaller than this (20 ms, in nanoseconds) is jitter, not progress.
+pub const PROGRESS_NS: i64 = 20_000_000;
+
+/// The fallback end-of-stream detector of `update_time_left`, one tick: within 200 ms of the end and no live audio for two ticks in a row ends the song. Returns the
+/// new `_eos_guard` and whether to end the song now (the guard is then back at 0).
+pub fn eos_step(guard: i64, near_end: bool, audio_live: bool) -> (i64, bool) {
+    if near_end && !audio_live {
+        let g = guard + 1;
+        if g >= EOS_GUARD_TICKS {
+            (0, true)
+        } else {
+            (g, false)
+        }
+    } else {
+        (0, false)
+    }
+}
+
+/// The stalled-position detector, one tick: the position has not moved by 20 ms, nothing is paused, no audio is live, a song is playing, past the start and not at the end,
+/// for 20 ticks. Returns the new last position, the new tick count and whether to end the song now (the count is then back at 0 and the caller also clears `_eos_guard`).
+pub fn stall_step(last_pos: Option<i64>, ticks: i64, pos: i64, paused: bool, audio_live: bool, karaoke_playing: bool, near_end: bool) -> (Option<i64>, i64, bool) {
+    let advanced = match last_pos {
+        None => true,
+        Some(l) => (pos - l) >= PROGRESS_NS,
+    };
+    let mut t = ticks;
+    if advanced || paused || audio_live {
+        t = 0;
+    } else if karaoke_playing && pos > 0 && !near_end {
+        t += 1;
+    } else {
+        t = 0;
+    }
+    if t >= STALL_TICKS {
+        (Some(pos), 0, true)
+    } else {
+        (Some(pos), t, false)
+    }
+}
+
+/// `_maybe_trim_end_silence`, the pre-start overlap: with the verified-tail setting on and an overlap above 0, the music starts under the last notes once the song is within
+/// `overlap_s` of the verified audio end (and not past it).
+pub fn overlap_window(overlap_s: f64, trim_tail: bool, audio_end: f64, elapsed: f64) -> bool {
+    overlap_s > 0.0 && trim_tail && audio_end - overlap_s <= elapsed && elapsed < audio_end
+}
+
+/// `_maybe_trim_end_silence`, the verified tail: the hold after the audio end (`threshold_s`) is over and, when a level meter exists, it reads quiet (`db` None = no meter).
+pub fn tail_cleared(elapsed: f64, audio_end: f64, threshold_s: f64, db: Option<f64>, db_threshold: f64) -> bool {
+    !(elapsed < audio_end + threshold_s) && !db.is_some_and(|d| d > db_threshold)
+}
+
+/// `_maybe_trim_end_silence`, the visual gate: a trusted visual end (at least `VISUAL_CONFIDENCE_MIN` sure) that the song has reached.
+pub fn visual_end_reached(visual_end: Option<f64>, confidence: f64, elapsed: f64) -> bool {
+    match visual_end {
+        Some(v) if confidence >= VISUAL_CONFIDENCE_MIN => !(elapsed < v),
+        _ => false,
+    }
+}
+
 /// The live questions Python may ask (`{"op":"prestart_due", ...}`), answered as `{"v": bool}`; anything else is an error object. Never panics on bad input.
 pub fn answer_json(request: &str) -> String {
     let req: Value = match serde_json::from_str(request) {
@@ -187,6 +250,63 @@ pub fn answer_json(request: &str) -> String {
                 },
             };
             json!({"v": visual_end_trusted(safe, end, confidence)}).to_string()
+        }
+        Some("eos_step") => {
+            let (Some(guard), Some(near_end), Some(audio_live)) = (req.get("guard").and_then(Value::as_i64), flag("near_end"), flag("audio_live")) else {
+                return json!({"err": "missing field"}).to_string();
+            };
+            let (g, fire) = eos_step(guard, near_end, audio_live);
+            json!({"v": {"guard": g, "fire": fire}}).to_string()
+        }
+        Some("stall_step") => {
+            let (Some(ticks), Some(pos), Some(paused), Some(audio_live), Some(playing), Some(near_end)) =
+                (req.get("ticks").and_then(Value::as_i64), req.get("pos").and_then(Value::as_i64), flag("paused"), flag("audio_live"), flag("karaoke_playing"), flag("near_end"))
+            else {
+                return json!({"err": "missing field"}).to_string();
+            };
+            let last = match req.get("last_pos") {
+                Some(Value::Null) | None => None,
+                Some(v) => match v.as_i64() {
+                    Some(l) => Some(l),
+                    None => return json!({"err": "bad last_pos"}).to_string(),
+                },
+            };
+            let (l, t, fire) = stall_step(last, ticks, pos, paused, audio_live, playing, near_end);
+            json!({"v": {"last_pos": l, "ticks": t, "fire": fire}}).to_string()
+        }
+        Some("overlap_window") => {
+            let num = |k: &str| req.get(k).and_then(Value::as_f64);
+            let (Some(overlap_s), Some(trim_tail), Some(audio_end), Some(elapsed)) = (num("overlap_s"), flag("trim_tail"), num("audio_end"), num("elapsed")) else {
+                return json!({"err": "missing field"}).to_string();
+            };
+            json!({"v": overlap_window(overlap_s, trim_tail, audio_end, elapsed)}).to_string()
+        }
+        Some("tail_cleared") => {
+            let num = |k: &str| req.get(k).and_then(Value::as_f64);
+            let (Some(elapsed), Some(audio_end), Some(threshold_s), Some(db_threshold)) = (num("elapsed"), num("audio_end"), num("threshold_s"), num("db_threshold")) else {
+                return json!({"err": "missing field"}).to_string();
+            };
+            let db = match req.get("db") {
+                Some(Value::Null) | None => None,
+                Some(v) => match v.as_f64() {
+                    Some(d) => Some(d),
+                    None => return json!({"err": "bad db"}).to_string(),
+                },
+            };
+            json!({"v": tail_cleared(elapsed, audio_end, threshold_s, db, db_threshold)}).to_string()
+        }
+        Some("visual_end_reached") => {
+            let (Some(confidence), Some(elapsed)) = (req.get("confidence").and_then(Value::as_f64), req.get("elapsed").and_then(Value::as_f64)) else {
+                return json!({"err": "missing field"}).to_string();
+            };
+            let end = match req.get("visual_end") {
+                Some(Value::Null) | None => None,
+                Some(v) => match v.as_f64() {
+                    Some(e) => Some(e),
+                    None => return json!({"err": "bad visual_end"}).to_string(),
+                },
+            };
+            json!({"v": visual_end_reached(end, confidence, elapsed)}).to_string()
         }
         _ => json!({"err": "unknown op"}).to_string(),
     }
@@ -791,31 +911,18 @@ impl Machine {
             audio_is_live = true;
         }
         let near_end = (dur - pos) <= 200_000_000;
-        if near_end && !audio_is_live {
-            self.eos_guard += 1;
-            if self.eos_guard >= 2 {
-                self.eos_guard = 0;
-                self.timer(0, "_handle_media_end_safe", vec![]);
-                return;
-            }
-        } else {
-            self.eos_guard = 0;
+        let (guard, end_now) = eos_step(self.eos_guard, near_end, audio_is_live);
+        self.eos_guard = guard;
+        if end_now {
+            self.timer(0, "_handle_media_end_safe", vec![]);
+            return;
         }
-        let advanced = match self.last_pos {
-            None => true,
-            Some(l) => (pos - l) >= 20_000_000,
-        };
         let paused = self.snap["paused"].as_bool().unwrap_or(false);
-        if advanced || paused || audio_is_live {
-            self.stalled = 0;
-        } else if self.snap["karaoke_playing"].as_bool().unwrap_or(false) && pos > 0 && !near_end {
-            self.stalled += 1;
-        } else {
-            self.stalled = 0;
-        }
-        self.last_pos = Some(pos);
-        if self.stalled >= 20 {
-            self.stalled = 0;
+        let playing = self.snap["karaoke_playing"].as_bool().unwrap_or(false);
+        let (last, ticks, stalled) = stall_step(self.last_pos, self.stalled, pos, paused, audio_is_live, playing, near_end);
+        self.last_pos = last;
+        self.stalled = ticks;
+        if stalled {
             self.eos_guard = 0;
             self.log("[TIME] Position stalled ~10s with silence; forcing end-safe handler".into());
             self.timer(0, "_handle_media_end_safe", vec![]);
@@ -889,7 +996,7 @@ impl Machine {
             Some(e) => e,
         };
         let overlap = self.sf("bgm_overlap_before_audio_end_sec", 2.0).unwrap_or(0.0);
-        if overlap > 0.0 && self.sb("karaoke_trim_verified_tail", true) && audio_end - overlap <= elapsed && elapsed < audio_end {
+        if overlap_window(overlap, self.sb("karaoke_trim_verified_tail", true), audio_end, elapsed) {
             self.prefire_bgm_at_verified_audio_end();
         }
         if elapsed < audio_end {
@@ -902,18 +1009,11 @@ impl Machine {
         }
         let gate = self.snap["gate"].clone(); // true / false / "raise" / "missing"
         if self.sb("karaoke_trim_verified_tail", true) {
-            if elapsed < audio_end + threshold {
-                return false;
-            }
-            if !meterless && db.unwrap() > DB_THRESHOLD {
+            if !tail_cleared(elapsed, audio_end, threshold, db, DB_THRESHOLD) {
                 return false;
             }
             self.prefire_bgm_at_verified_audio_end();
-            let vend = match self.visual_end {
-                Some(v) if self.visual_conf >= 0.85 => v,
-                _ => return false,
-            };
-            if elapsed < vend {
+            if !visual_end_reached(self.visual_end, self.visual_conf, elapsed) {
                 return false;
             }
             if self.mode == "cdg" && gate.as_bool() != Some(true) {
@@ -1388,6 +1488,56 @@ mod prestart_tests {
         assert_eq!(answer_json(r#"{"op":"visual_end_trusted","safe":true,"visual_end":12.5,"confidence":0.9}"#), r#"{"v":true}"#);
         assert_eq!(answer_json(r#"{"op":"visual_end_trusted","safe":true,"visual_end":null,"confidence":0.9}"#), r#"{"v":false}"#);
         assert!(answer_json(r#"{"op":"visual_end_trusted","safe":true}"#).contains("err"));
+    }
+
+    #[test]
+    fn the_end_of_file_and_stall_detectors() {
+        // two silent near-end ticks end the song; audio or distance resets the guard
+        assert_eq!(eos_step(0, true, false), (1, false));
+        assert_eq!(eos_step(1, true, false), (0, true));
+        assert_eq!(eos_step(1, true, true), (0, false));
+        assert_eq!(eos_step(1, false, false), (0, false));
+        // the stall detector: movement, a pause or audio clears it; 20 still ticks end the song
+        assert_eq!(stall_step(None, 5, 1000, false, false, true, false), (Some(1000), 0, false));
+        assert_eq!(stall_step(Some(1000), 0, 1000 + PROGRESS_NS, false, false, true, false), (Some(1000 + PROGRESS_NS), 0, false));
+        assert_eq!(stall_step(Some(1000), 0, 1000 + PROGRESS_NS - 1, false, false, true, false), (Some(1000 + PROGRESS_NS - 1), 1, false));
+        assert_eq!(stall_step(Some(1000), 7, 1000, true, false, true, false), (Some(1000), 0, false));
+        assert_eq!(stall_step(Some(1000), 7, 1000, false, true, true, false), (Some(1000), 0, false));
+        assert_eq!(stall_step(Some(1000), 7, 1000, false, false, false, false), (Some(1000), 0, false));
+        assert_eq!(stall_step(Some(0), 7, 0, false, false, true, false), (Some(0), 0, false));
+        assert_eq!(stall_step(Some(1000), 7, 1000, false, false, true, true), (Some(1000), 0, false));
+        assert_eq!(stall_step(Some(1000), STALL_TICKS - 2, 1000, false, false, true, false), (Some(1000), STALL_TICKS - 1, false));
+        assert_eq!(stall_step(Some(1000), STALL_TICKS - 1, 1000, false, false, true, false), (Some(1000), 0, true));
+        // through the JSON answers
+        assert_eq!(answer_json(r#"{"op":"eos_step","guard":1,"near_end":true,"audio_live":false}"#), r#"{"v":{"fire":true,"guard":0}}"#);
+        assert_eq!(answer_json(r#"{"op":"stall_step","last_pos":null,"ticks":0,"pos":5,"paused":false,"audio_live":false,"karaoke_playing":true,"near_end":false}"#), r#"{"v":{"fire":false,"last_pos":5,"ticks":0}}"#);
+        assert!(answer_json(r#"{"op":"stall_step","pos":5}"#).contains("err"));
+    }
+
+    #[test]
+    fn the_overlap_window_the_cleared_tail_and_the_reached_visual_end() {
+        // overlap: inside [audio_end - overlap, audio_end), needs overlap > 0 and the verified-tail setting
+        assert!(overlap_window(2.0, true, 100.0, 98.0));
+        assert!(!overlap_window(2.0, true, 100.0, 97.999));
+        assert!(overlap_window(2.0, true, 100.0, 99.999));
+        assert!(!overlap_window(2.0, true, 100.0, 100.0));
+        assert!(!overlap_window(0.0, true, 100.0, 99.0));
+        assert!(!overlap_window(2.0, false, 100.0, 99.0));
+        // the tail: past the hold, and the meter (when there is one) quiet; the boundaries are inclusive on the "cleared" side
+        assert!(tail_cleared(102.5, 100.0, 2.5, None, -38.0));
+        assert!(!tail_cleared(102.4, 100.0, 2.5, None, -38.0));
+        assert!(tail_cleared(103.0, 100.0, 2.5, Some(-38.0), -38.0));
+        assert!(!tail_cleared(103.0, 100.0, 2.5, Some(-37.9), -38.0));
+        assert!(tail_cleared(103.0, 100.0, 2.5, Some(-60.0), -38.0));
+        // the visual gate: trusted and reached
+        assert!(visual_end_reached(Some(100.0), 0.85, 100.0));
+        assert!(!visual_end_reached(Some(100.0), 0.85, 99.999));
+        assert!(!visual_end_reached(Some(100.0), 0.8499, 150.0));
+        assert!(!visual_end_reached(None, 0.99, 150.0));
+        assert_eq!(answer_json(r#"{"op":"overlap_window","overlap_s":2.0,"trim_tail":true,"audio_end":100.0,"elapsed":98.0}"#), r#"{"v":true}"#);
+        assert_eq!(answer_json(r#"{"op":"tail_cleared","elapsed":103.0,"audio_end":100.0,"threshold_s":2.5,"db":null,"db_threshold":-38.0}"#), r#"{"v":true}"#);
+        assert_eq!(answer_json(r#"{"op":"visual_end_reached","visual_end":null,"confidence":0.9,"elapsed":10.0}"#), r#"{"v":false}"#);
+        assert!(answer_json(r#"{"op":"tail_cleared","elapsed":1.0}"#).contains("err"));
     }
 }
 
