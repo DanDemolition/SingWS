@@ -160,6 +160,76 @@ class SongEndDrive(unittest.TestCase):
                 self.assertTrue(ok)
                 self.assertEqual(got, bool(applied), (safe, end, conf))
 
+    def test_step_decisions_use_rust_only_when_the_whole_new_state_equals_pythons(self):
+        py = {"guard": 0, "fire": True}
+        with mock.patch.object(drive, "_ask", return_value=({"guard": 0, "fire": True}, True)):
+            self.assertEqual(drive.decide_eos_step(py, 1, True, False), py)
+        lines = []
+        with mock.patch.object(drive, "_ask", return_value=({"guard": 1, "fire": False}, True)):
+            self.assertEqual(drive.decide_eos_step(py, 1, True, False, log=lines.append), py)
+        self.assertIn("disagreement=1", lines[0])
+        with mock.patch.object(drive, "_ask", return_value=(None, False)):
+            self.assertEqual(drive.decide_stall_step({"last_pos": 5, "ticks": 0, "fire": False}, None, 0, 5, False, False, True, False), {"last_pos": 5, "ticks": 0, "fire": False})
+        with mock.patch.object(drive, "_ask", side_effect=RuntimeError("boom")):
+            self.assertEqual(drive.decide_stall_step(py, None, 0, 5, False, False, True, False), py)
+        with mock.patch.object(drive, "_ask", return_value=(False, True)):
+            self.assertTrue(drive.decide_overlap_window(True, 2.0, True, 100.0, 99.0))
+            self.assertTrue(drive.decide_tail_cleared(True, 103.0, 100.0, 2.5, None, -38.0))
+            self.assertTrue(drive.decide_visual_end_reached(True, 100.0, 0.9, 101.0))
+
+    @unittest.skipIf(drive._library() is None, "libsingws_dsp_ffi without singws_songend_json is not built here")
+    def test_the_real_detectors_match_rust_tick_by_tick_over_random_sequences(self):
+        import random
+        mod = self.main_module()
+        KA = mod.KaraokeApp
+        rng = random.Random(20261128)
+        fired = {"eos": 0, "stall": 0}
+        with mock.patch.object(mod, "_diag", lambda *a, **k: None):
+            for _seq in range(60):
+                fake = types.SimpleNamespace(karaoke_playing=True)
+                pos = rng.choice([0, 1_000_000, 5_000_000_000])
+                frozen = 0
+                for _tick in range(120):
+                    if frozen == 0 and rng.random() < 0.04:
+                        frozen = rng.choice([5, 19, 20, 21, 30])       # the position stops, silent, playing: the stall detector's case
+                    if frozen:
+                        frozen -= 1
+                        near_end, live, paused = False, False, False
+                        fake.karaoke_playing = True
+                        pos = max(pos, 1)
+                    else:
+                        pos += rng.choice([0, 0, 0, 5_000_000, 19_999_999, 20_000_000, 500_000_000])
+                        near_end = rng.random() < 0.15
+                        live = rng.random() < 0.2
+                        paused = rng.random() < 0.05
+                        fake.karaoke_playing = rng.random() < 0.95
+                    # the end-of-stream detector
+                    pre_guard = getattr(fake, "_eos_guard", 0)
+                    fire = KA._eos_step_python(fake, near_end, live)
+                    got, ok = drive._ask({"op": "eos_step", "guard": pre_guard, "near_end": near_end, "audio_live": live})
+                    self.assertTrue(ok)
+                    self.assertEqual(got, {"guard": fake._eos_guard, "fire": fire}, ("eos", pre_guard, near_end, live))
+                    fired["eos"] += fire
+                    # the stalled-position detector
+                    pre_last, pre_ticks, playing = getattr(fake, "_last_pos_ns", None), getattr(fake, "_stalled_pos_ticks", 0), fake.karaoke_playing
+                    fire = KA._stall_step_python(fake, pos, near_end, live, paused)
+                    got, ok = drive._ask({"op": "stall_step", "last_pos": pre_last, "ticks": pre_ticks, "pos": pos, "paused": paused, "audio_live": live,
+                                          "karaoke_playing": playing, "near_end": near_end})
+                    self.assertTrue(ok)
+                    self.assertEqual(got, {"last_pos": fake._last_pos_ns, "ticks": fake._stalled_pos_ticks, "fire": fire}, ("stall", pre_last, pre_ticks, pos))
+                    fired["stall"] += fire
+        self.assertGreater(fired["eos"], 5)
+        self.assertGreater(fired["stall"], 0)
+
+    def test_the_step_drive_is_on_by_default_and_wired_in_the_app(self):
+        src = (Path(__file__).parent / "0.2.18.1.py").read_text()
+        self.assertIn('"songend_drive_steps": True', src)
+        for call in ("songend_drive.decide_eos_step(", "songend_drive.decide_stall_step(", "songend_drive.decide_overlap_window(", "songend_drive.decide_tail_cleared(",
+                     "songend_drive.decide_visual_end_reached("):
+            self.assertIn(call, src)
+        self.assertIn("if self._eos_step(near_end, audio_is_live):", src)
+        self.assertIn("if self._stall_step(pos, near_end, audio_is_live):", src)
+
     def test_the_gates_drive_is_on_by_default_and_wired_in_the_app(self):
         src = (Path(__file__).parent / "0.2.18.1.py").read_text()
         self.assertIn('"songend_drive_gates": True', src)

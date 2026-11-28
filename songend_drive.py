@@ -157,3 +157,47 @@ def decide_lyric_cue_ready(python_value, enabled, cdg_mode, cue, delay, need, el
 def decide_visual_end_trusted(python_value, safe, visual_end, confidence, log=None) -> bool:
     """Is a scanned visual end trusted enough to end a song early (`_apply_visual_end_floor`)?"""
     return _decide_bool("visual_end_trusted", python_value, {"safe": bool(safe), "visual_end": None if visual_end is None else float(visual_end), "confidence": float(confidence)}, log)
+
+
+def decide_overlap_window(python_value, overlap_s, trim_tail, audio_end, elapsed, log=None) -> bool:
+    """Is the song inside the pre-start overlap before its verified audio end (`_maybe_trim_end_silence`)?"""
+    return _decide_bool("overlap_window", python_value, {"overlap_s": float(overlap_s), "trim_tail": bool(trim_tail), "audio_end": float(audio_end), "elapsed": float(elapsed)}, log)
+
+
+def decide_tail_cleared(python_value, elapsed, audio_end, threshold_s, db, db_threshold, log=None) -> bool:
+    """Is the hold after the verified audio end over, with the meter (if any) quiet (`_maybe_trim_end_silence`)? `db` None = no meter."""
+    return _decide_bool("tail_cleared", python_value, {"elapsed": float(elapsed), "audio_end": float(audio_end), "threshold_s": float(threshold_s),
+                        "db": None if db is None else float(db), "db_threshold": float(db_threshold)}, log)
+
+
+def decide_visual_end_reached(python_value, visual_end, confidence, elapsed, log=None) -> bool:
+    """Has the song reached a trusted visual end (`_maybe_trim_end_silence`)?"""
+    return _decide_bool("visual_end_reached", python_value, {"visual_end": None if visual_end is None else float(visual_end), "confidence": float(confidence), "elapsed": float(elapsed)}, log)
+
+
+def _decide_step(op: str, python_value: dict, request: dict, log=None) -> dict:
+    """One state-machine tick: Rust's new state and decision when they equal Python's, Python's otherwise (the difference is logged). Never raises."""
+    try:
+        rust, ok = _ask(dict(request, op=op))
+    except Exception as exc:
+        if log:
+            log(f"[{TAG}] decision={op} fallback=python error={exc!r}")
+        return python_value
+    if not ok or not isinstance(rust, dict):
+        return python_value
+    if rust != python_value:
+        if log:
+            log(f"[{TAG}] decision={op} python={python_value} rust={rust} selected=python owner=python-fallback disagreement=1")
+        return python_value
+    return rust
+
+
+def decide_eos_step(python_result: dict, guard, near_end, audio_live, log=None) -> dict:
+    """The fallback end-of-stream detector's tick: {"guard": new count, "fire": end the song now}."""
+    return _decide_step("eos_step", python_result, {"guard": int(guard), "near_end": bool(near_end), "audio_live": bool(audio_live)}, log)
+
+
+def decide_stall_step(python_result: dict, last_pos, ticks, pos, paused, audio_live, playing, near_end, log=None) -> dict:
+    """The stalled-position detector's tick: {"last_pos": new last position, "ticks": new count, "fire": end the song now}."""
+    return _decide_step("stall_step", python_result, {"last_pos": None if last_pos is None else int(last_pos), "ticks": int(ticks), "pos": int(pos), "paused": bool(paused),
+                        "audio_live": bool(audio_live), "karaoke_playing": bool(playing), "near_end": bool(near_end)}, log)

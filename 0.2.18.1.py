@@ -4195,7 +4195,7 @@ _RUST_EVIDENCE_FLAGS = ("queue_shadow", "plan_shadow", "settings_shadow", "store
                         "transport_drive_media_end", "transport_drive_watchdog", "start_shadow", "plan_shadow_live")
 
 
-_SONGEND_DRIVE_FLAGS = ("songend_drive_prestart", "songend_drive_floors", "songend_drive_gates", "mac_shim_keep_awake")
+_SONGEND_DRIVE_FLAGS = ("songend_drive_prestart", "songend_drive_floors", "songend_drive_gates", "songend_drive_steps", "mac_shim_keep_awake")
 
 
 def _migrate_rust_evidence_defaults(settings) -> bool:
@@ -4350,6 +4350,7 @@ DEFAULTS = {
     "songend_drive_prestart": True,          # on by default (2026-11-28; Python keeps the last word): Rust answers the pre-start question at each tick when it agrees with Python (songend_drive.py); Python decides otherwise
     "songend_drive_floors": True,            # on by default (2026-11-28; Python keeps the last word): Rust also answers the effective-duration floor and the verified audio end when it equals Python (songend_drive.py)
     "songend_drive_gates": True,             # on by default (2026-11-28; Python keeps the last word): Rust also answers the verified-end music gate, the lyric-cue readiness and the visual-end trust; a difference is logged and Python decides (songend_drive.py)
+    "songend_drive_steps": True,             # on by default (2026-11-28; Python keeps the last word): Rust also answers the end-of-stream and stall detectors and the trailing-silence trim decisions (songend_drive.py)
     # Stage E shadow: every ~30 s the host relay messages this app just sent (playback_tick, state, queue, chat) are rebuilt by a separate low-priority process
     # (a Rust helper) from a snapshot of the same inputs, and [RELAY-MSG-SHADOW] logs ONLY a difference (never chat text, names or ids). The message the app built
     # is always the one sent; the relay schema, retries and connection are untouched.
@@ -22750,6 +22751,14 @@ class SoundboardStrip(QWidget):
             except Exception:
                 pass
 
+
+
+def _songend_steps_enabled(app) -> bool:
+    """Setting songend_drive_steps (default on): ask Rust the song-end step questions as well. Safe on any object (a stub app has no settings: then off)."""
+    try:
+        return bool((object.__getattribute__(app, "__dict__").get("settings") or {}).get("songend_drive_steps", False))
+    except Exception:
+        return False
 
 
 def _diag_rate_limited_songend(message: str) -> None:
@@ -43832,8 +43841,15 @@ class KaraokeApp(QWidget):
             _overlap_s = float(self.settings.get("bgm_overlap_before_audio_end_sec", 2.0) or 0.0)
         except Exception:
             _overlap_s = 0.0
-        if (_overlap_s > 0.0 and bool(self.settings.get("karaoke_trim_verified_tail", True))
-                and float(audio_end) - _overlap_s <= elapsed < float(audio_end)):
+        _trim_tail = bool(self.settings.get("karaoke_trim_verified_tail", True))
+        _in_overlap = bool(_overlap_s > 0.0 and _trim_tail and float(audio_end) - _overlap_s <= elapsed < float(audio_end))
+        if bool(self.settings.get("songend_drive_steps", False)):
+            try:
+                import songend_drive
+                songend_drive.decide_overlap_window(_in_overlap, _overlap_s, _trim_tail, float(audio_end), elapsed, log=_diag_rate_limited_songend)
+            except Exception:
+                pass
+        if _in_overlap:
             self._prefire_bgm_at_verified_audio_end()
         if elapsed < float(audio_end):
             self._end_silence_accum_s = 0.0
@@ -43849,6 +43865,14 @@ class KaraokeApp(QWidget):
         if bool(self.settings.get("karaoke_trim_verified_tail", True)):
             # A scanned endpoint is an estimate. Preserve the host's hold in
             # media time, including when mpv has no live meter to confirm it.
+            if bool(self.settings.get("songend_drive_steps", False)):
+                try:
+                    import songend_drive
+                    _py_cleared = bool(not (elapsed < float(audio_end) + threshold_s) and not (not meterless and db > float(self._end_silence_db_threshold)))
+                    songend_drive.decide_tail_cleared(_py_cleared, elapsed, float(audio_end), threshold_s, None if meterless else db, float(self._end_silence_db_threshold),
+                                                      log=_diag_rate_limited_songend)
+                except Exception:
+                    pass
             if elapsed < float(audio_end) + threshold_s:
                 return False
             if not meterless and db > float(self._end_silence_db_threshold):
@@ -43859,6 +43883,13 @@ class KaraokeApp(QWidget):
             self._prefire_bgm_at_verified_audio_end()
             visual_end = getattr(self, "_karaoke_visual_end_s", None)
             visual_confidence = float(getattr(self, "_karaoke_visual_end_confidence", 0.0) or 0.0)
+            if bool(self.settings.get("songend_drive_steps", False)):
+                try:
+                    import songend_drive
+                    songend_drive.decide_visual_end_reached(bool(not (visual_end is None or visual_confidence < 0.85) and not (elapsed < float(visual_end))), visual_end,
+                                                            visual_confidence, elapsed, log=_diag_rate_limited_songend)
+                except Exception:
+                    pass
             if visual_end is None or visual_confidence < 0.85:
                 return False
             if elapsed < float(visual_end):
@@ -44048,6 +44079,88 @@ class KaraokeApp(QWidget):
         elapsed = max(0.0, float(reference) - float(started)) if started else 0.0
         return min(elapsed, duration), duration
 
+    def _eos_step(self, near_end: bool, audio_is_live: bool) -> bool:
+        """One tick of the fallback end-of-stream detector. True = end the song now. Python's rule runs as always; with songend_drive_steps on, Rust's step is asked too and a
+        difference is logged (Python's answer stands)."""
+        pre = int(self.__dict__.get("_eos_guard", 0) or 0)
+        fire = self._eos_step_python(near_end, audio_is_live)
+        if _songend_steps_enabled(self):
+            try:
+                import songend_drive
+                songend_drive.decide_eos_step({"guard": int(self._eos_guard), "fire": bool(fire)}, pre, near_end, audio_is_live, log=_diag_rate_limited_songend)
+            except Exception:
+                pass
+        return fire
+
+    def _eos_step_python(self, near_end: bool, audio_is_live: bool) -> bool:
+        if not hasattr(self, "_eos_guard"):
+            self._eos_guard = 0
+        if near_end and not audio_is_live:
+            self._eos_guard += 1
+            if self._eos_guard >= 2:
+                self._eos_guard = 0
+                return True
+        else:
+            self._eos_guard = 0
+        return False
+
+    def _stall_step(self, pos: int, near_end: bool, audio_is_live: bool) -> bool:
+        """One tick of the stalled-position detector. True = end the song now (see _eos_step for how Rust is compared)."""
+        try:
+            is_paused = self._is_karaoke_paused()
+        except Exception:
+            is_paused = False
+        d = self.__dict__
+        pre_last, pre_ticks, playing = d.get("_last_pos_ns"), int(d.get("_stalled_pos_ticks", 0) or 0), bool(getattr(self, "karaoke_playing", False))
+        fire = self._stall_step_python(pos, near_end, audio_is_live, is_paused)
+        if _songend_steps_enabled(self):
+            try:
+                import songend_drive
+                songend_drive.decide_stall_step({"last_pos": self._last_pos_ns, "ticks": int(self._stalled_pos_ticks), "fire": bool(fire)}, pre_last, pre_ticks, pos, is_paused,
+                                                audio_is_live, playing, near_end, log=_diag_rate_limited_songend)
+            except Exception:
+                pass
+        return fire
+
+    def _stall_step_python(self, pos: int, near_end: bool, audio_is_live: bool, is_paused: bool) -> bool:
+        if not hasattr(self, "_last_pos_ns"):
+            self._last_pos_ns = None
+        if not hasattr(self, "_stalled_pos_ticks"):
+            self._stalled_pos_ticks = 0
+
+        advanced = False
+        if self._last_pos_ns is None:
+            advanced = True
+        else:
+            # Treat >=20ms movement as progress; smaller jitter is ignored.
+            advanced = (pos - self._last_pos_ns) >= 20_000_000
+
+        # A paused track legitimately holds position; never treat that as a
+        # stall (that bug force-ended songs ~mid-play when paused with plenty
+        # of time left). Only count stalls during genuine active playback.
+        if advanced or is_paused or audio_is_live:
+            # Movement, a legitimate pause, or audible audio all mean the song
+            # is still going — clear any accumulated stall.
+            self._stalled_pos_ticks = 0
+        else:
+            if bool(getattr(self, "karaoke_playing", False)) and pos > 0 and not near_end:
+                self._stalled_pos_ticks += 1
+            else:
+                self._stalled_pos_ticks = 0
+
+        self._last_pos_ns = pos
+
+        # 20 ticks at 500ms ~= 10 seconds of no movement *and* silence. The
+        # audio-level gate above is the primary protection; this longer
+        # window is a secondary guard against transient query hiccups. A
+        # genuine end/hang is both frozen AND silent, so this only fires when
+        # the song is truly done — never while sound is still playing.
+        if self._stalled_pos_ticks >= 20:
+            self._stalled_pos_ticks = 0
+            self._eos_guard = 0
+            return True
+        return False
+
     def update_time_left(self):
         _perf_t0 = time.perf_counter()
         # Reflect any pause/resume state on the button label.
@@ -44138,60 +44251,14 @@ class KaraokeApp(QWidget):
             # Skip while audio is still audible: the real end-of-stream signal
             # (transport `ended` / pipeline EOS) will fire when the audio truly
             # finishes, so this backup must not pre-empt a still-playing tail.
-            if not hasattr(self, "_eos_guard"):
-                self._eos_guard = 0
             near_end = (dur - pos) <= 200_000_000  # 200 ms
-            if near_end and not audio_is_live:
-                self._eos_guard += 1
-                if self._eos_guard >= 2:
-                    self._eos_guard = 0
-                    QTimer.singleShot(0, self._handle_media_end_safe)
-                    return
-            else:
-                self._eos_guard = 0
+            if self._eos_step(near_end, audio_is_live):
+                QTimer.singleShot(0, self._handle_media_end_safe)
+                return
 
             # --- Stalled-position fallback: some files stop advancing without emitting EOS ---
             # If position doesn't move for several ticks while karaoke is active, force end-safe handler.
-            if not hasattr(self, "_last_pos_ns"):
-                self._last_pos_ns = None
-            if not hasattr(self, "_stalled_pos_ticks"):
-                self._stalled_pos_ticks = 0
-
-            advanced = False
-            if self._last_pos_ns is None:
-                advanced = True
-            else:
-                # Treat >=20ms movement as progress; smaller jitter is ignored.
-                advanced = (pos - self._last_pos_ns) >= 20_000_000
-
-            # A paused track legitimately holds position; never treat that as a
-            # stall (that bug force-ended songs ~mid-play when paused with plenty
-            # of time left). Only count stalls during genuine active playback.
-            try:
-                is_paused = self._is_karaoke_paused()
-            except Exception:
-                is_paused = False
-
-            if advanced or is_paused or audio_is_live:
-                # Movement, a legitimate pause, or audible audio all mean the song
-                # is still going — clear any accumulated stall.
-                self._stalled_pos_ticks = 0
-            else:
-                if bool(getattr(self, "karaoke_playing", False)) and pos > 0 and not near_end:
-                    self._stalled_pos_ticks += 1
-                else:
-                    self._stalled_pos_ticks = 0
-
-            self._last_pos_ns = pos
-
-            # 20 ticks at 500ms ~= 10 seconds of no movement *and* silence. The
-            # audio-level gate above is the primary protection; this longer
-            # window is a secondary guard against transient query hiccups. A
-            # genuine end/hang is both frozen AND silent, so this only fires when
-            # the song is truly done — never while sound is still playing.
-            if self._stalled_pos_ticks >= 20:
-                self._stalled_pos_ticks = 0
-                self._eos_guard = 0
+            if self._stall_step(pos, near_end, audio_is_live):
                 _diag("[TIME] Position stalled ~10s with silence; forcing end-safe handler")
                 QTimer.singleShot(0, self._handle_media_end_safe)
         else:
