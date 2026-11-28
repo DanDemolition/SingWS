@@ -86,6 +86,32 @@ pub fn audio_end_s(duration: f64, trailing: f64, runs_to_end: bool) -> Option<f6
     Some(0.0_f64.max(duration - credited))
 }
 
+/// The least confidence a visual end needs before it may end a song early (`_apply_visual_end_floor`, `confidence < 0.85`).
+pub const VISUAL_CONFIDENCE_MIN: f64 = 0.85;
+
+/// `_prefire_bgm_at_verified_audio_end`'s gate: the music may start under a verified dead audio tail. Not with auto-advance, not without the crossfade, not twice,
+/// and only when the playlist has tracks, nothing is playing and both background-music settings are on.
+pub fn verified_end_allowed(auto_advance: bool, crossfade: bool, prefired: bool, has_playlist: bool, bg_playing: bool, bg_enabled: bool, bg_autoplay: bool) -> bool {
+    !auto_advance && crossfade && !prefired && has_playlist && !bg_playing && bg_enabled && bg_autoplay
+}
+
+/// `_lyric_end_cue_ready`: a CDG song is past its last lyric wipe by `delay` seconds with at least `need` seconds still to play (the end-of-song animation then starts
+/// over the song; it never ends it). `delay` and `need` arrive already clamped to 0 or more, as the Python reads them.
+pub fn lyric_cue_ready(enabled: bool, cdg_mode: bool, cue: Option<f64>, delay: f64, need: f64, elapsed: f64, remain: f64) -> bool {
+    if !enabled || !cdg_mode {
+        return false;
+    }
+    match cue {
+        None => false,
+        Some(c) => elapsed >= c + delay && remain >= need,
+    }
+}
+
+/// `_apply_visual_end_floor`'s gate: a visual end is trusted only when the scan called it safe, found an end, and is at least `VISUAL_CONFIDENCE_MIN` sure.
+pub fn visual_end_trusted(safe: bool, visual_end: Option<f64>, confidence: f64) -> bool {
+    !(!safe || visual_end.is_none() || confidence < VISUAL_CONFIDENCE_MIN)
+}
+
 /// The live questions Python may ask (`{"op":"prestart_due", ...}`), answered as `{"v": bool}`; anything else is an error object. Never panics on bad input.
 pub fn answer_json(request: &str) -> String {
     let req: Value = match serde_json::from_str(request) {
@@ -123,6 +149,44 @@ pub fn answer_json(request: &str) -> String {
                 return json!({"err": "missing field"}).to_string();
             };
             json!({"v": audio_end_s(duration, trailing, runs_to_end)}).to_string()
+        }
+        Some("verified_end_allowed") => {
+            let names = ["auto_advance", "crossfade", "prefired", "has_playlist", "bg_playing", "bg_enabled", "bg_autoplay"];
+            let mut f = [false; 7];
+            for (i, n) in names.iter().enumerate() {
+                match flag(n) {
+                    Some(b) => f[i] = b,
+                    None => return json!({"err": "missing flag"}).to_string(),
+                }
+            }
+            json!({"v": verified_end_allowed(f[0], f[1], f[2], f[3], f[4], f[5], f[6])}).to_string()
+        }
+        Some("lyric_cue_ready") => {
+            let num = |k: &str| req.get(k).and_then(Value::as_f64);
+            let (Some(enabled), Some(cdg_mode), Some(delay), Some(need), Some(elapsed), Some(remain)) = (flag("enabled"), flag("cdg_mode"), num("delay"), num("need"), num("elapsed"), num("remain")) else {
+                return json!({"err": "missing field"}).to_string();
+            };
+            let cue = match req.get("cue") {
+                Some(Value::Null) | None => None,
+                Some(v) => match v.as_f64() {
+                    Some(c) => Some(c),
+                    None => return json!({"err": "bad cue"}).to_string(),
+                },
+            };
+            json!({"v": lyric_cue_ready(enabled, cdg_mode, cue, delay, need, elapsed, remain)}).to_string()
+        }
+        Some("visual_end_trusted") => {
+            let (Some(safe), Some(confidence)) = (flag("safe"), req.get("confidence").and_then(Value::as_f64)) else {
+                return json!({"err": "missing field"}).to_string();
+            };
+            let end = match req.get("visual_end") {
+                Some(Value::Null) | None => None,
+                Some(v) => match v.as_f64() {
+                    Some(e) => Some(e),
+                    None => return json!({"err": "bad visual_end"}).to_string(),
+                },
+            };
+            json!({"v": visual_end_trusted(safe, end, confidence)}).to_string()
         }
         _ => json!({"err": "unknown op"}).to_string(),
     }
@@ -637,7 +701,7 @@ impl Machine {
             return;
         }
         self.visual_reason = reason.to_string();
-        if !safe || visual_end.is_none() || conf < 0.85 {
+        if !visual_end_trusted(safe, visual_end, conf) {
             self.visual_end = None;
             self.visual_conf = 0.0;
             self.log(format!("[END-VISUAL] CDG early completion suppressed reason={} file={}", reason, base(path)));
@@ -759,19 +823,7 @@ impl Machine {
     }
 
     fn prefire_bgm_at_verified_audio_end(&mut self) -> bool {
-        if self.sb("karaoke_auto_advance", false) {
-            return false;
-        }
-        if !self.crossfade_enabled() {
-            return false;
-        }
-        if self.prefired {
-            return false;
-        }
-        if !self.bg_has_playlist() || self.bg_playing {
-            return false;
-        }
-        if !self.bg_enabled_setting() || !self.bg_autoplay_setting() {
+        if !verified_end_allowed(self.sb("karaoke_auto_advance", false), self.crossfade_enabled(), self.prefired, self.bg_has_playlist(), self.bg_playing, self.bg_enabled_setting(), self.bg_autoplay_setting()) {
             return false;
         }
         self.prefired = true;
@@ -1307,4 +1359,35 @@ mod prestart_tests {
         assert_eq!(answer_json(r#"{"op":"audio_end","duration":200.0,"trailing":0.0,"runs_to_end":false}"#), r#"{"v":null}"#);
         assert!(answer_json(r#"{"op":"audio_end","duration":200.0}"#).contains("err"));
     }
+
+    #[test]
+    fn the_verified_end_gate_the_lyric_cue_and_the_visual_trust() {
+        assert!(verified_end_allowed(false, true, false, true, false, true, true));
+        for i in 0..7 {
+            let mut f = [false, true, false, true, false, true, true];
+            f[i] = !f[i];
+            assert!(!verified_end_allowed(f[0], f[1], f[2], f[3], f[4], f[5], f[6]), "flag {i}");
+        }
+        // the lyric cue: past the cue by the delay with enough left; each condition alone blocks it; the boundaries are inclusive
+        assert!(lyric_cue_ready(true, true, Some(100.0), 3.0, 4.0, 103.0, 4.0));
+        assert!(!lyric_cue_ready(true, true, Some(100.0), 3.0, 4.0, 102.999, 4.0));
+        assert!(!lyric_cue_ready(true, true, Some(100.0), 3.0, 4.0, 103.0, 3.999));
+        assert!(!lyric_cue_ready(false, true, Some(100.0), 3.0, 4.0, 200.0, 40.0));
+        assert!(!lyric_cue_ready(true, false, Some(100.0), 3.0, 4.0, 200.0, 40.0));
+        assert!(!lyric_cue_ready(true, true, None, 3.0, 4.0, 200.0, 40.0));
+        // a visual end is trusted only when safe, found, and at least 0.85 sure
+        assert!(visual_end_trusted(true, Some(10.0), 0.85));
+        assert!(!visual_end_trusted(true, Some(10.0), 0.8499));
+        assert!(!visual_end_trusted(false, Some(10.0), 0.99));
+        assert!(!visual_end_trusted(true, None, 0.99));
+        // through the JSON answers
+        assert_eq!(answer_json(r#"{"op":"verified_end_allowed","auto_advance":false,"crossfade":true,"prefired":false,"has_playlist":true,"bg_playing":false,"bg_enabled":true,"bg_autoplay":true}"#), r#"{"v":true}"#);
+        assert!(answer_json(r#"{"op":"verified_end_allowed","auto_advance":false}"#).contains("err"));
+        assert_eq!(answer_json(r#"{"op":"lyric_cue_ready","enabled":true,"cdg_mode":true,"cue":100.0,"delay":3.0,"need":4.0,"elapsed":103.0,"remain":4.0}"#), r#"{"v":true}"#);
+        assert_eq!(answer_json(r#"{"op":"lyric_cue_ready","enabled":true,"cdg_mode":true,"cue":null,"delay":3.0,"need":4.0,"elapsed":103.0,"remain":4.0}"#), r#"{"v":false}"#);
+        assert_eq!(answer_json(r#"{"op":"visual_end_trusted","safe":true,"visual_end":12.5,"confidence":0.9}"#), r#"{"v":true}"#);
+        assert_eq!(answer_json(r#"{"op":"visual_end_trusted","safe":true,"visual_end":null,"confidence":0.9}"#), r#"{"v":false}"#);
+        assert!(answer_json(r#"{"op":"visual_end_trusted","safe":true}"#).contains("err"));
+    }
 }
+
