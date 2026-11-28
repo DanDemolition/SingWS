@@ -40,9 +40,28 @@ _last_started = 0.0
 _helper_cache: list = []
 _clean_noted = False
 _lock = threading.Lock()
+_skip_counts: dict = {}
+_LOG = None                     # the app's log function, remembered from announce()
+_skips_logged_at = 0.0
+SKIP_REPORT_EVERY = 25          # one summary line per this many skipped reconciles, at most one per ten minutes
 
-_UNSUPPORTED_ROW_KEYS = ("sort_order", "removed_at", "completed_at", "host_order_updated_at", "singer_order_updated_at", "order_revision")
-_UNSUPPORTED_STATES = {"waiting", "failed", "failed_needs_review", "removed", "completed", "sung", "skipped", "active", "delivered"}
+
+def _skipped(reason: str, log=None) -> None:
+    """Count why a reconcile was not checked (counts only, never names) and now and then say so: a shadow that checks nothing is invisible otherwise."""
+    global _skips_logged_at
+    _skip_counts[reason] = _skip_counts.get(reason, 0) + 1
+    total = sum(_skip_counts.values())
+    now = time.monotonic()
+    if log is not None and total % SKIP_REPORT_EVERY == 0 and now - _skips_logged_at >= 600.0:
+        _skips_logged_at = now
+        _say(log, "not checked so far: " + ", ".join(f"{k}={v}" for k, v in sorted(_skip_counts.items(), key=lambda kv: -kv[1])[:8]))
+    return None
+
+# 2026-11-27: the Rust model now covers server-terminal rows (removed / completed / sung, removed_at / completed_at), sort_order and the order timestamps, rows that left host
+# intake (sent / delivered / added_at / queued_at) and the "skipped" / "active" / "delivered" states (replay parity 239/239 on core, full and keyed streams). Real server lists
+# always carry such rows, so skipping them meant a whole show of reconciles went unchecked. Still skipped: the waitlist's own states, duets, KaraFun rows.
+_UNSUPPORTED_ROW_KEYS = ()
+_UNSUPPORTED_STATES = {"waiting", "failed", "failed_needs_review"}
 
 
 def enabled(settings) -> bool:
@@ -81,6 +100,8 @@ def _helper() -> Path | None:
 
 def announce(settings, log) -> str:
     """One line per launch: on or off, and whether the helper is there (a quiet shadow otherwise says nothing when everything agrees)."""
+    global _LOG
+    _LOG = log
     try:
         text = f"enabled available={int(find_helper() is not None)}" if enabled(settings) else "off (queue_state_shadow=false)"
         if driver_mode(settings) != "off":
@@ -112,8 +133,6 @@ def check_rows(rows) -> None:
             raise Unsnapshottable("row state")
         if any(r.get(k) not in (None, "", 0, "0") for k in _UNSUPPORTED_ROW_KEYS):
             raise Unsnapshottable("row field")
-        if r.get("sent") or r.get("delivered") or r.get("added_at") or r.get("queued_at"):
-            raise Unsnapshottable("row delivered")
         if _is_duet_name(str(r.get("singer", "") or "")):
             raise Unsnapshottable("duet")
         blob = " ".join(str(r.get(k) or "") for k in ("selected_source", "provider", "source_provider", "selected_version", "selected_brand", "brand", "version", "provider_track_id", "selected_disc_id")).lower()
@@ -158,7 +177,7 @@ def snapshot_state(app) -> dict:
             tempo = e.get("tempo_percent")
             songs.append({"rid": rid if rid and rid > 0 else None, "artist": str(e.get("artist") or ""), "title": str(e.get("title") or ""),
                           "key": int(e.get("key") or 0), "tempo": int(tempo) if isinstance(tempo, (int, float)) and not isinstance(tempo, bool) else None,
-                          "skipped": bool(e.get("skipped", False)),
+                          "skipped": bool(e.get("skipped", False)), "host_key": str(e.get("host_request_key") or ""),
                           "request_order": float(e["request_order"]) if isinstance(e.get("request_order"), (int, float)) and not isinstance(e.get("request_order"), bool) else None})
         def _i(v):
             try:
@@ -189,7 +208,8 @@ def snapshot_state(app) -> dict:
         except Exception:  # noqa: BLE001
             raise Unsnapshottable("odd pending order")
     terminal_titles = {str(int(k)): str(v or "") for k, v in (d.get("_remote_terminal_titles") or {}).items()} if isinstance(d.get("_remote_terminal_titles"), dict) else {}
-    return {"queue_revision": int(d.get("_queue_revision", 0) or 0), "pending_order_syncs": pending, "terminal_titles": terminal_titles,
+    aliases = {str(k): str(v) for k, v in d["_singer_rename_aliases"].items()} if isinstance(d.get("_singer_rename_aliases"), dict) else {}
+    return {"queue_revision": int(d.get("_queue_revision", 0) or 0), "pending_order_syncs": pending, "terminal_titles": terminal_titles, "aliases": aliases,
             "settings": {"queue_mode": str(settings.get("queue_mode", "classic")), "limit_pending_max": int(settings.get("limit_pending_max", 2) or 2),
                          "requests_accepting": bool(settings.get("requests_accepting", True))},
             "queue": singers, "tombstones": tombs, "removed": removed, "handled": handled}
@@ -244,7 +264,7 @@ class Recorder:
 
 
 def begin(app, rows, now: float | None = None, force: bool = False):
-    """Called at the start of a reconcile. ``None`` = do nothing this time (off, no helper, not due, or the reconcile is outside the model)."""
+    """Called at the start of a reconcile. ``None`` = do nothing this time (off, no helper, not due, or the reconcile is outside the model; the reason is counted)."""
     global _last_started
     try:
         d = object.__getattribute__(app, "__dict__")
@@ -254,27 +274,36 @@ def begin(app, rows, now: float | None = None, force: bool = False):
         t = time.monotonic()
         if not force and t - _last_started < INTERVAL_S:
             return None
-        if settings.get("use_waiting_for_add") or settings.get("rotation_locked") or d.get("_deferred_remote_adds"):
-            return None
+        if settings.get("use_waiting_for_add"):
+            return _skipped("waitlist setting", _LOG)
+        if settings.get("rotation_locked"):
+            return _skipped("rotation lock", _LOG)
+        if d.get("_deferred_remote_adds"):
+            return _skipped("deferred adds", _LOG)
         if settings.get("defer_remote_adds_until_between_singers"):
-            return None  # held-while-playing intake is modelled only in the replay (the shadow does not know when a song plays)
+            return _skipped("hold-while-playing setting", _LOG)  # held-while-playing intake is modelled only in the replay (the shadow does not know when a song plays)
         if d.get("_waiting_for_add_requests") or d.get("_remote_attention_requests"):
-            return None
+            return _skipped("waitlist rows", _LOG)
         if float(d.get("_remote_clear_in_progress_until", 0.0) or 0.0) > time.time():
-            return None
+            return _skipped("clear in progress", _LOG)
         try:
             if app._should_async_remote_request_intake():
-                return None
+                return _skipped("async intake", _LOG)
         except Exception:
-            return None
-        check_rows(rows)
+            return _skipped("async intake check failed", _LOG)
+        try:
+            check_rows(rows)
+        except Unsnapshottable as why:
+            return _skipped(f"rows: {why}", _LOG)
         pre = snapshot_state(app)
         if any(_is_duet_name(s["name"]) for s in pre["queue"]):
-            return None
+            return _skipped("duet in queue", _LOG)
         _last_started = t
         return Recorder(pre, [dict(r) for r in rows if isinstance(r, dict)], _guard(app), time.time() if now is None else now)
+    except Unsnapshottable as why:
+        return _skipped(f"state: {why}", _LOG)
     except Exception:  # noqa: BLE001
-        return None
+        return _skipped("error", _LOG)
 
 
 def finish(rec, app, log, wait: bool = False):
@@ -371,7 +400,7 @@ def _say(log, text):
 
 def run_helper(helper: Path, pre: dict, rows: list, now: float) -> dict:
     load = {"op": "load", "settings": pre["settings"], "queue": pre["queue"], "tombstones": pre["tombstones"], "removed": pre["removed"], "handled": pre["handled"],
-            "queue_revision": pre["queue_revision"], "pending_order_syncs": pre["pending_order_syncs"], "terminal_titles": pre["terminal_titles"]}
+            "queue_revision": pre["queue_revision"], "pending_order_syncs": pre["pending_order_syncs"], "terminal_titles": pre["terminal_titles"], "aliases": pre.get("aliases", {})}
     arrive = {"op": "remote_arrive", "requests": rows, "now": now}
     payload = json.dumps(load) + "\n" + json.dumps(arrive) + "\n"
     proc = subprocess.run([str(helper)], input=payload, capture_output=True, text=True, timeout=TIMEOUT_S, preexec_fn=lambda: os.nice(10))

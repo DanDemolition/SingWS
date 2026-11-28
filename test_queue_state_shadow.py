@@ -56,11 +56,18 @@ class GateTests(unittest.TestCase):
 
     def test_rows_outside_the_model_are_not_checked(self):
         base = qr._req(1, "Ada", "Alpha")
-        for bad in (dict(base, state="waiting"), dict(base, sort_order=3), dict(base, singer="Ada & Bo"), dict(base, selected_source="karafun"),
-                    dict(base, removed_at=5), dict(base, delivered=True)):
+        for bad in (dict(base, state="waiting"), dict(base, state="failed"), dict(base, singer="Ada & Bo"), dict(base, selected_source="karafun")):
             with self.assertRaises(qss.Unsnapshottable):
                 qss.check_rows([bad])
         qss.check_rows([base])
+
+    def test_rows_the_model_now_covers_are_checked(self):
+        # 2026-11-27: terminal rows, sort_order, order timestamps and rows that left host intake no longer make the shadow skip a reconcile
+        base = qr._req(1, "Ada", "Alpha")
+        for ok in (dict(base, state="completed"), dict(base, state="removed"), dict(base, state="sung"), dict(base, state="skipped"), dict(base, sort_order=3),
+                   dict(base, removed_at=5), dict(base, completed_at=9), dict(base, host_order_updated_at=7), dict(base, order_revision=2), dict(base, delivered=True),
+                   dict(base, sent=1), dict(base, added_at=4), dict(base, state="active"), dict(base, state="delivered")):
+            qss.check_rows([ok])
 
     def test_differences_never_show_values(self):
         d = qss.first_difference({"queue": [{"name": "Secret Name"}]}, {"queue": [{"name": "Other"}]})
@@ -93,6 +100,57 @@ class LiveCheckTests(unittest.TestCase):
                         world.apply(ev)  # includes restarts, moves, removals: the next check resynchronises
                 self.assertFalse([l for l in log if "MISMATCH" in l or "skipped" in l], (seed, log))
             self.assertGreater(checked, 20)
+
+    def check_stream_profile(self, profile, seeds, length=50):
+        checked = skipped = 0
+        for seed in seeds:
+            log = []
+            stream = qr.generate_stream(seed, length, profile)
+            world = qr.World(queue_mode=stream[0].get("queue_mode", "rotation"), limit=stream[0].get("limit_pending_max", 20))
+            for ev in stream:
+                if ev["op"] == "remote_arrive":
+                    rec, _t = self.reconcile_checked(world, ev["requests"], log)
+                    checked += rec is not None
+                    skipped += rec is None
+                else:
+                    world.apply(ev)
+            bad = [l for l in log if "MISMATCH" in l or "skipped:" in l]
+            self.assertFalse(bad, (profile, seed, bad[:3]))
+        return checked, skipped
+
+    def test_full_streams_with_terminal_rows_orders_and_delivered_rows_check_clean(self):
+        # the relaxed gate (2026-11-27): the same streams the Rust parity runs on, through the shadow's own snapshot/compare protocol
+        with _Env():
+            checked, skipped = self.check_stream_profile("full", range(12))
+        self.assertGreater(checked, 25, (checked, skipped))
+
+    def test_keyed_streams_check_clean(self):
+        with _Env():
+            checked, skipped = self.check_stream_profile("keyed", range(12))
+        self.assertGreater(checked, 25, (checked, skipped))
+
+    def test_the_snapshot_carries_host_keys_and_rename_aliases_to_the_helper(self):
+        with _Env():
+            world = qr.World()
+            world.apply({"op": "config", "queue_mode": "rotation", "limit_pending_max": 20, "waitlist": False})
+            world.apply({"op": "remote_arrive", "requests": [qr._req(5001, "Ada", "Alpha")]})
+            world.apply({"op": "set_host_key", "entry": "R5001", "key": "K1"})
+            world.app._singer_rename_aliases = {"eve": "Ada"}
+            snap = qss.snapshot_state(world.app)
+        self.assertEqual(snap["aliases"], {"eve": "Ada"})
+        self.assertEqual([e["host_key"] for s in snap["queue"] for e in s["songs"]], ["K1"])
+
+    def test_skipped_reconciles_are_counted_by_reason_and_summarised_now_and_then(self):
+        qss._skip_counts.clear()
+        lines = []
+        with mock.patch.object(qss, "_skips_logged_at", 0.0), mock.patch.object(qss.time, "monotonic", return_value=10_000.0):
+            for _ in range(qss.SKIP_REPORT_EVERY):
+                qss._skipped("rows: duet", lines.append)
+        self.assertEqual(qss._skip_counts, {"rows: duet": qss.SKIP_REPORT_EVERY})
+        self.assertEqual(len(lines), 1)
+        self.assertIn("not checked so far: rows: duet=", lines[0])
+        self.assertNotIn("Ada", lines[0])
+        qss._skip_counts.clear()
 
     def test_first_clean_check_is_announced_once(self):
         with _Env():

@@ -1890,7 +1890,7 @@ impl State {
         self.failed.clear();
         self.terminal_titles = ev.get("terminal_titles").and_then(Value::as_object).map(|o| o.iter().filter_map(|(k, v)| Some((k.parse::<u64>().ok()?, v.as_str()?.to_string()))).collect()).unwrap_or_default();
         self.deferred.clear();
-        self.aliases.clear();
+        self.aliases = ev.get("aliases").and_then(Value::as_object).map(|o| o.iter().filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string()))).collect()).unwrap_or_default();
         self.playing = false;
         self.queue_rev = ev.get("queue_revision").and_then(Value::as_i64).unwrap_or(0);
         self.pending = ev
@@ -1921,7 +1921,7 @@ impl State {
                     None
                 };
                 let text = |k: &str| e.get(k).and_then(Value::as_str).unwrap_or("").to_string();
-                songs.push(Entry { rid, local, artist: text("artist"), title: text("title"), song_info: text("song_info"), duet: e.get("duet_display").and_then(Value::as_str).map(String::from), key: e.get("key").and_then(Value::as_i64).unwrap_or(0), tempo: e.get("tempo").and_then(Value::as_i64), skipped: f(&e, "skipped"), order: e.get("request_order").and_then(Value::as_f64), sid: String::new(), session: 0, host_key: String::new() });
+                songs.push(Entry { rid, local, artist: text("artist"), title: text("title"), song_info: text("song_info"), duet: e.get("duet_display").and_then(Value::as_str).map(String::from), key: e.get("key").and_then(Value::as_i64).unwrap_or(0), tempo: e.get("tempo").and_then(Value::as_i64), skipped: f(&e, "skipped"), order: e.get("request_order").and_then(Value::as_f64), sid: String::new(), session: 0, host_key: text("host_key") });
             }
             let uid = self.next_uid;
             self.next_uid += 1;
