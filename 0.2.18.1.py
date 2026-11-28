@@ -4195,6 +4195,9 @@ _RUST_EVIDENCE_FLAGS = ("queue_shadow", "plan_shadow", "settings_shadow", "store
                         "transport_drive_media_end", "transport_drive_watchdog", "start_shadow", "plan_shadow_live")
 
 
+_SONGEND_DRIVE_FLAGS = ("songend_drive_prestart", "songend_drive_floors", "songend_drive_gates", "mac_shim_keep_awake")
+
+
 def _migrate_rust_evidence_defaults(settings) -> bool:
     """One time per profile: switch the Rust evidence collectors on (they used to default off, and saved profiles persist the old values).
     shell_commands moves from "off" to "dry_run" but "apply" (or "dry_run") is never touched. Returns True when it changed anything."""
@@ -4224,6 +4227,14 @@ def _migrate_rust_evidence_defaults(settings) -> bool:
         if str(settings.get("karafun_web_engine", "shadow") or "shadow").strip().lower() == "shadow":
             settings["karafun_web_engine"] = "rust"
         settings["karafun_web_engine_rust_default_migrated"] = True
+        changed = True
+    # One time (2026-11-28, operator: "make sure all the gates and shadows are on by default"): the Rust song-end drives and the Mac keep-awake shim were opt-in; saved profiles
+    # persisted False. In every drive Python keeps the last word (a difference is logged and Python's answer is used), and the keep-awake falls back to PyObjC, so switching them on
+    # cannot change what a show does. A profile can turn any of them off again afterwards and the choice is kept.
+    if not bool(settings.get("songend_gates_default_on_migrated", False)):
+        for key in _SONGEND_DRIVE_FLAGS:
+            settings[key] = True
+        settings["songend_gates_default_on_migrated"] = True
         changed = True
     return changed
 
@@ -4336,9 +4347,9 @@ DEFAULTS = {
     # which it starts the background music, and a separate low-priority process (the Rust song-end model, singws-songend) is driven through an idealised run of the same song; [SONGEND-SHADOW]
     # logs ONLY a difference (more than 1.5 s or another reason; song lengths and numbers only, never names). The app's own decision is always the one acted on.
     "songend_shadow": True,
-    "songend_drive_prestart": False,     # opt-in: Rust answers the pre-start question at each tick when it agrees with Python (songend_drive.py); Python decides otherwise
-    "songend_drive_floors": False,        # opt-in: Rust also answers the effective-duration floor and the verified audio end when it equals Python (songend_drive.py)
-    "songend_drive_gates": False,         # opt-in: Rust also answers the verified-end music gate, the lyric-cue readiness and the visual-end trust; a difference is logged and Python decides (songend_drive.py)
+    "songend_drive_prestart": True,          # on by default (2026-11-28; Python keeps the last word): Rust answers the pre-start question at each tick when it agrees with Python (songend_drive.py); Python decides otherwise
+    "songend_drive_floors": True,            # on by default (2026-11-28; Python keeps the last word): Rust also answers the effective-duration floor and the verified audio end when it equals Python (songend_drive.py)
+    "songend_drive_gates": True,             # on by default (2026-11-28; Python keeps the last word): Rust also answers the verified-end music gate, the lyric-cue readiness and the visual-end trust; a difference is logged and Python decides (songend_drive.py)
     # Stage E shadow: every ~30 s the host relay messages this app just sent (playback_tick, state, queue, chat) are rebuilt by a separate low-priority process
     # (a Rust helper) from a snapshot of the same inputs, and [RELAY-MSG-SHADOW] logs ONLY a difference (never chat text, names or ids). The message the app built
     # is always the one sent; the relay schema, retries and connection are untouched.
@@ -4520,7 +4531,7 @@ DEFAULTS = {
     "end_silence_threshold_2_5_migrated": False,
     "karaoke_auto_advance": False,         # auto-play the next queued karaoke when a song ends (off = stop after each song)
     "keep_mac_awake": True,                # macOS: prevent App Nap + idle system/display sleep while SingWS runs (stops idle "freezes")
-    "mac_shim_keep_awake": False,          # opt-in: the Rust platform shim (singws-mac) holds the keep-awake assertion instead of PyObjC; PyObjC is the fallback
+    "mac_shim_keep_awake": True,            # on by default (2026-11-28; falls back to PyObjC): the Rust platform shim (singws-mac) holds the keep-awake assertion instead of PyObjC; PyObjC is the fallback
     "karafun_prewarm": True,               # bring the KaraFun player up and signed in when a KaraFun request enters the queue, so its song does not wait 30-45 s for the sign-in
     "bg_end_silence_trim_enabled": False,  # Background music: skip trailing silence between BG tracks (opt-in)
     "request_poll_interval_sec": 2,        # how often the app checks the server for new requests (seconds)
@@ -23081,7 +23092,7 @@ class KaraokeApp(QWidget):
         try:
             import mac_keep_awake
             from mac_keep_awake import KeepAwake
-            mac_keep_awake.prefer_rust(bool(self.settings.get("mac_shim_keep_awake", False)))     # opt-in: the Rust platform shim holds the assertion, PyObjC is the fallback
+            mac_keep_awake.prefer_rust(bool(self.settings.get("mac_shim_keep_awake", True)))     # on by default: the Rust platform shim holds the assertion, PyObjC is the fallback
             self._mac_keep_awake = KeepAwake("SingWS karaoke session active")
             if bool(self.settings.get("keep_mac_awake", True)):
                 if self._mac_keep_awake.begin():
@@ -43298,7 +43309,7 @@ class KaraokeApp(QWidget):
 
     def _apply_audio_end_floor(self, scan_path: str, duration: float, trailing: float, source: str, runs_to_end: bool = False):
         self._apply_audio_end_floor_python(scan_path, duration, trailing, source, runs_to_end)
-        if (bool((self.__dict__.get("settings") or {}).get("songend_drive_floors", False))
+        if (bool((self.__dict__.get("settings") or {}).get("songend_drive_floors", True))
                 and str(scan_path) == str(getattr(self, "_karaoke_audio_end_path", ""))):
             # Opt-in Rust drive (songend_drive.py): the verified audio end Rust computes, when it equals Python's (it never differs unless one is wrong).
             try:
@@ -43419,7 +43430,7 @@ class KaraokeApp(QWidget):
 
     def _lyric_end_cue_ready(self, elapsed: float, remain: float) -> bool:
         result = self._lyric_end_cue_ready_python(elapsed, remain)
-        if bool((self.__dict__.get("settings") or {}).get("songend_drive_gates", False)):
+        if bool((self.__dict__.get("settings") or {}).get("songend_drive_gates", True)):
             try:
                 import songend_drive
                 try:
@@ -43460,7 +43471,7 @@ class KaraokeApp(QWidget):
         confidence = float(getattr(result, "confidence", 0.0) or 0.0)
         reason = str(getattr(result, "reason", "analysis_unavailable") or "analysis_unavailable")
         self._karaoke_visual_end_reason = reason
-        if bool((self.__dict__.get("settings") or {}).get("songend_drive_gates", False)):
+        if bool((self.__dict__.get("settings") or {}).get("songend_drive_gates", True)):
             try:
                 import songend_drive
                 songend_drive.decide_visual_end_trusted(not (not safe or visual_end is None or confidence < 0.85), safe, visual_end, confidence, log=_diag_rate_limited_songend)
@@ -43501,7 +43512,7 @@ class KaraokeApp(QWidget):
 
     def _effective_karaoke_duration_ns(self, dur_ns):
         value = self._effective_karaoke_duration_ns_python(dur_ns)
-        if bool((self.__dict__.get("settings") or {}).get("songend_drive_floors", False)):
+        if bool((self.__dict__.get("settings") or {}).get("songend_drive_floors", True)):
             # Opt-in Rust drive (songend_drive.py): Rust's answer when it equals the one above, this one when it does not or Rust cannot answer.
             try:
                 import songend_drive
@@ -43653,7 +43664,7 @@ class KaraokeApp(QWidget):
 
 
     def _prefire_bgm_at_verified_audio_end(self) -> bool:
-        drive = bool((self.__dict__.get("settings") or {}).get("songend_drive_gates", False))
+        drive = bool((self.__dict__.get("settings") or {}).get("songend_drive_gates", True))
         flags = None
         if drive:
             try:
@@ -44070,7 +44081,7 @@ class KaraokeApp(QWidget):
                 and not bool(getattr(self.bg_music, "is_playing", False))
                 and bool(self.settings.get("bg_enabled", True))
                 and bool(self.settings.get("bg_autoplay_on_idle", True)))
-            if bool(self.settings.get("songend_drive_prestart", False)):
+            if bool(self.settings.get("songend_drive_prestart", True)):
                 # Opt-in Rust drive (songend_drive.py): Rust's answer when it agrees with the one above, this one when it does not or Rust cannot answer.
                 try:
                     import songend_drive

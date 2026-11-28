@@ -104,10 +104,10 @@ class KeepAwakeTests(unittest.TestCase):
         finally:
             mac_keep_awake.prefer_rust(False)
 
-    def test_the_rust_switch_is_off_by_default_and_wired_in_the_app(self):
+    def test_the_rust_switch_is_on_by_default_and_wired_in_the_app(self):
         src = open("0.2.18.1.py", encoding="utf-8").read()
-        self.assertIn('"mac_shim_keep_awake": False', src)
-        self.assertIn('mac_keep_awake.prefer_rust(bool(self.settings.get("mac_shim_keep_awake", False)))', src)
+        self.assertIn('"mac_shim_keep_awake": True', src)
+        self.assertIn('mac_keep_awake.prefer_rust(bool(self.settings.get("mac_shim_keep_awake", True)))', src)
 
     def test_default_setting_is_on(self):
         spec = importlib.util.spec_from_file_location("singws_main_keepawake", "0.2.18.1.py")

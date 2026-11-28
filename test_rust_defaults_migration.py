@@ -62,7 +62,7 @@ class RustEvidenceDefaultsTests(unittest.TestCase):
         saved = {k: False for k in self.mod._RUST_EVIDENCE_FLAGS}
         saved.update({"shell_commands": "off", "rust_evidence_defaults_migrated": True, "waitlist_snapshot_default_on_migrated": True,
                       "karafun_web_engine_rust_default_migrated": True,
-                      "shell_commands_apply_default_migrated": True})
+                      "shell_commands_apply_default_migrated": True, "songend_gates_default_on_migrated": True})
         before = dict(saved)
         self.assertFalse(self.mod._migrate_rust_evidence_defaults(saved))
         self.assertEqual(saved, before)

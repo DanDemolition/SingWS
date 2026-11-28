@@ -160,27 +160,49 @@ class SongEndDrive(unittest.TestCase):
                 self.assertTrue(ok)
                 self.assertEqual(got, bool(applied), (safe, end, conf))
 
-    def test_the_gates_drive_is_off_by_default_and_wired_in_the_app(self):
+    def test_the_gates_drive_is_on_by_default_and_wired_in_the_app(self):
         src = (Path(__file__).parent / "0.2.18.1.py").read_text()
-        self.assertIn('"songend_drive_gates": False', src)
-        self.assertEqual(src.count('__dict__.get("settings") or {}).get("songend_drive_gates", False)'), 3)
+        self.assertIn('"songend_drive_gates": True', src)
+        self.assertEqual(src.count('__dict__.get("settings") or {}).get("songend_drive_gates", True)'), 3)
         for name in ("decide_verified_end_allowed(", "decide_lyric_cue_ready(", "decide_visual_end_trusted("):
             self.assertIn("songend_drive." + name, src)
 
-    def test_the_floors_drive_is_off_by_default_and_wired_in_the_app(self):
+    def test_the_floors_drive_is_on_by_default_and_wired_in_the_app(self):
         src = (Path(__file__).parent / "0.2.18.1.py").read_text()
-        self.assertIn('"songend_drive_floors": False', src)
-        self.assertGreaterEqual(src.count('__dict__.get("settings") or {}).get("songend_drive_floors", False)'), 2)
+        self.assertIn('"songend_drive_floors": True', src)
+        self.assertGreaterEqual(src.count('__dict__.get("settings") or {}).get("songend_drive_floors", True)'), 2)
         self.assertIn("songend_drive.decide_effective_duration(", src)
         self.assertIn("songend_drive.decide_audio_end(", src)
 
     def test_the_app_keeps_python_in_charge_and_the_setting_is_off_by_default(self):
         src = (Path(__file__).parent / "0.2.18.1.py").read_text()
-        self.assertIn('"songend_drive_prestart": False', src)
+        self.assertIn('"songend_drive_prestart": True', src)
         body = src[src.index("    def update_time_left(self):"):][:6000]
-        self.assertIn('self.settings.get("songend_drive_prestart", False)', body)
+        self.assertIn('self.settings.get("songend_drive_prestart", True)', body)
         self.assertIn("songend_drive.decide_prestart(", body)
         self.assertIn("if _prestart_due:", body)
+
+    def test_a_saved_profile_with_the_drives_off_is_switched_on_once_and_a_later_off_is_kept(self):
+        mod = self.main_module()
+        saved = {"songend_drive_prestart": False, "mac_shim_keep_awake": False, "rust_evidence_defaults_migrated": True, "waitlist_snapshot_default_on_migrated": True,
+                 "shell_commands_apply_default_migrated": True, "karafun_web_engine_rust_default_migrated": True}
+        self.assertTrue(mod._migrate_rust_evidence_defaults(saved))
+        for key in ("songend_drive_prestart", "songend_drive_floors", "songend_drive_gates", "mac_shim_keep_awake"):
+            self.assertIs(saved[key], True, key)
+        self.assertIs(saved["songend_gates_default_on_migrated"], True)
+        saved["songend_drive_gates"] = False                    # the operator turns one off afterwards
+        self.assertFalse(mod._migrate_rust_evidence_defaults(saved))
+        self.assertIs(saved["songend_drive_gates"], False)
+
+    def test_every_shadow_and_drive_the_app_has_is_on_by_default(self):
+        mod = self.main_module()
+        off = [k for k in ("transport_shadow", "transport_drive", "transport_drive_media_end", "transport_drive_watchdog", "queue_shadow", "plan_shadow", "plan_shadow_live",
+                           "start_shadow", "start_drive", "settings_shadow", "store_shadow", "wire_shadow", "platform_shadow", "logpack_shadow", "settings_migrate_shadow",
+                           "songend_shadow", "songend_drive_prestart", "songend_drive_floors", "songend_drive_gates", "relay_msg_shadow", "net_slice_shadow", "queue_state_shadow",
+                           "update_shadow", "phrase_shadow", "publish_live_state", "mac_shim_keep_awake", "karafun_prewarm") if mod.DEFAULTS.get(k) is not True]
+        self.assertEqual(off, [])
+        self.assertEqual(mod.DEFAULTS.get("karafun_web_engine"), "rust")
+        self.assertEqual(mod.DEFAULTS.get("shell_commands"), "apply")
 
     def test_the_installers_bundle_the_module(self):
         for spec in ("SingWS-arm64.spec", "SingWS-x86_64.spec"):
