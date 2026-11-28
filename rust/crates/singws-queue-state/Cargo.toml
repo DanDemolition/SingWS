@@ -16,3 +16,4 @@ path = "src/main.rs"
 [dependencies]
 serde_json = { version = "1.0.151", features = ["float_roundtrip"] }
 singws-queue = { path = "../singws-queue" }
+singws-misc = { path = "../singws-misc" }

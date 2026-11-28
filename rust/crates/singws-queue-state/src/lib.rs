@@ -78,6 +78,8 @@ struct Entry {
     /// `singer_id` / `singer_uid` and `singer_session_id` the request row carried (remote adds only).
     sid: String,
     session: i64,
+    /// `host_request_key`: the permanent key a host-created request carries once the server echoed it (empty for every other entry).
+    host_key: String,
 }
 
 impl Entry {
@@ -194,21 +196,9 @@ pub struct State {
 
 const ROUTE_OK: (bool, &str) = (true, "");
 
+/// `_capitalize_singer_name` (2026-11-16: every word's first character upper-case, the rest lower-case); the one implementation, shared with the other ports.
 fn capitalize(name: &str) -> String {
-    let mut out = String::new();
-    let mut at_start = true;
-    for ch in name.chars() {
-        if ch.is_whitespace() {
-            at_start = true;
-            out.push(ch);
-        } else if at_start {
-            out.extend(ch.to_uppercase());
-            at_start = false;
-        } else {
-            out.push(ch);
-        }
-    }
-    out
+    singws_misc::capitalize_singer_name(name)
 }
 
 /// `_queue_limit_name_key`: whitespace collapsed, casefolded.
@@ -578,7 +568,7 @@ impl State {
         let op = ev.get("op").and_then(Value::as_str).unwrap_or("");
         let known = [
             "config", "tick", "add_song", "remote_arrive", "remove_song", "remove_singer", "move_singer", "move_song", "skip_singer",
-            "rotation_advance", "complete_song", "waitlist_add", "waitlist_remove", "waitlist_restore", "rotation_lock", "restart", "load", "set_playing", "flush_deferred", "rename_singer", "rename_merge",
+            "rotation_advance", "complete_song", "waitlist_add", "waitlist_remove", "waitlist_restore", "rotation_lock", "restart", "load", "set_playing", "flush_deferred", "rename_singer", "rename_merge", "set_host_key",
         ];
         if !known.contains(&op) {
             return (false, "unknown_op".into());
@@ -604,6 +594,7 @@ impl State {
             "rotation_advance" => self.op_rotation_advance(ev),
             "complete_song" => self.op_complete_song(ev),
             "restart" => self.op_restart(),
+            "set_host_key" => self.op_set_host_key(ev),
             "rotation_lock" => self.op_rotation_lock(),
             "waitlist_add" => self.op_waitlist_add(ev),
             "waitlist_remove" => self.op_waitlist_remove(ev),
@@ -1127,7 +1118,7 @@ impl State {
         let title = ev.get("title").and_then(Value::as_str).unwrap_or("");
         let key = ev.get("key").and_then(Value::as_i64).unwrap_or(0);
         self.next_local += 1;
-        let entry = Entry { rid: None, local: Some(self.next_local), artist: String::new(), title: title.into(), song_info: format!("/lib/{artist}-{title}.zip"), duet: None, key, tempo: None, skipped: false, order: None, sid: String::new(), session: 0 };
+        let entry = Entry { rid: None, local: Some(self.next_local), artist: String::new(), title: title.into(), song_info: format!("/lib/{artist}-{title}.zip"), duet: None, key, tempo: None, skipped: false, order: None, sid: String::new(), session: 0, host_key: String::new() };
         // artist is stored from the track dict, which carries the event artist; the harness' local entries use it for the song path only
         let mut entry = entry;
         entry.artist = artist.into();
@@ -1170,6 +1161,9 @@ impl State {
             let stamp = |k: &str| to_f64(row.get(k)).map(|f| f.trunc() as i64).unwrap_or(0);
             let (removed_at, completed_at) = (stamp("removed_at"), stamp("completed_at"));
             if matches!(state.as_str(), "removed" | "completed" | "sung") || removed_at > 0 || completed_at > 0 {
+                if self.terminal_conflicts_with_live_host(rid, row) {
+                    continue; // a stale terminal row collided with the id just given to a live host request: the host queue wins
+                }
                 // The server already knows this request is done: the queued copy goes, the id is remembered as terminal together with the
                 // title it carried. No tombstone is written or retired (that is host-action state), and this runs BEFORE the tombstone check.
                 self.remove_local_by_id(rid);
@@ -1273,6 +1267,7 @@ impl State {
                 order: None,
                 sid: String::new(),
                 session: 0,
+                host_key: String::new(),
             };
             if self.process_external(&item, &r.singer, entry, true) {
                 for p in parts {
@@ -1631,7 +1626,7 @@ impl State {
             return false;
         }
         let old = self.queue[si].name.trim().to_string();
-        let new = new_name.trim().to_string();
+        let new = capitalize(new_name).trim().to_string();      // a renamed singer follows the same rule as a new one
         if old.is_empty() || new.is_empty() || new == old {
             return false;
         }
@@ -1658,7 +1653,7 @@ impl State {
         let Some(si) = ev.get("singer").and_then(Value::as_str).and_then(|r| self.singer_by_ref(r)) else {
             return (false, "unknown_singer".into());
         };
-        let name = ev.get("name").and_then(Value::as_str).unwrap_or("").trim().to_string();
+        let name = capitalize(ev.get("name").and_then(Value::as_str).unwrap_or("").trim());
         if name.is_empty() || name.chars().count() > 60 || name.chars().any(|c| c.is_control()) {
             return (false, "bad_name".into());
         }
@@ -1694,7 +1689,7 @@ impl State {
         let int = |k: &str| to_f64(req.get(k)).map(|f| f as i64).unwrap_or(0);
         let key = int("key");
         let tempo = int("tempo").clamp(-30, 30);
-        let entry = Entry { rid: Some(rid), local: None, artist: artist.clone(), title: title.clone(), song_info: format!("/lib/{artist}-{title}.zip"), duet: None, key, tempo: Some(100 + tempo), skipped: false, order: None, sid: String::new(), session: 0 };
+        let entry = Entry { rid: Some(rid), local: None, artist: artist.clone(), title: title.clone(), song_info: format!("/lib/{artist}-{title}.zip"), duet: None, key, tempo: Some(100 + tempo), skipped: false, order: None, sid: String::new(), session: 0, host_key: String::new() };
         if !self.process_external(&req, &singer, entry, true) {
             return (false, "not_added".into());
         }
@@ -1718,7 +1713,7 @@ impl State {
         }
         self.removed_tonight.insert(rid, item);
         self.handled.insert(rid);
-        let entry = Entry { rid: Some(rid), local: None, artist: row_str(&req, "artist"), title: row_str(&req, "title"), song_info: String::new(), duet: None, key: 0, tempo: None, skipped: false, order: None, sid: String::new(), session: 0 };
+        let entry = Entry { rid: Some(rid), local: None, artist: row_str(&req, "artist"), title: row_str(&req, "title"), song_info: String::new(), duet: None, key: 0, tempo: None, skipped: false, order: None, sid: String::new(), session: 0, host_key: String::new() };
         self.tombstone(rid, &entry, &row_str(&req, "singer"), "waiting_for_add_cleared", "removed");
         self.waitlist.remove(&rid);
         (true, "removed".into())
@@ -1926,7 +1921,7 @@ impl State {
                     None
                 };
                 let text = |k: &str| e.get(k).and_then(Value::as_str).unwrap_or("").to_string();
-                songs.push(Entry { rid, local, artist: text("artist"), title: text("title"), song_info: text("song_info"), duet: e.get("duet_display").and_then(Value::as_str).map(String::from), key: e.get("key").and_then(Value::as_i64).unwrap_or(0), tempo: e.get("tempo").and_then(Value::as_i64), skipped: f(&e, "skipped"), order: e.get("request_order").and_then(Value::as_f64), sid: String::new(), session: 0 });
+                songs.push(Entry { rid, local, artist: text("artist"), title: text("title"), song_info: text("song_info"), duet: e.get("duet_display").and_then(Value::as_str).map(String::from), key: e.get("key").and_then(Value::as_i64).unwrap_or(0), tempo: e.get("tempo").and_then(Value::as_i64), skipped: f(&e, "skipped"), order: e.get("request_order").and_then(Value::as_f64), sid: String::new(), session: 0, host_key: String::new() });
             }
             let uid = self.next_uid;
             self.next_uid += 1;
@@ -1972,6 +1967,58 @@ impl State {
             }
         }
         ROUTE_OK.into_pair()
+    }
+
+    /// The harness op `set_host_key`: give an entry the permanent host key a host-created request carries after the server echoed it.
+    fn op_set_host_key(&mut self, ev: &Value) -> (bool, String) {
+        let target = ev.get("entry").and_then(Value::as_str).unwrap_or("").to_string();
+        let key = ev.get("key").map(pystr).unwrap_or_default();
+        for singer in self.queue.iter_mut() {
+            for e in singer.songs.iter_mut() {
+                if !target.is_empty() && e.alias() == target {
+                    e.host_key = key;
+                    return (true, String::new());
+                }
+            }
+        }
+        (false, "unknown_entry".into())
+    }
+
+    /// `_server_terminal_conflicts_with_live_host_request`: a terminal history row that reuses the numeric id of a LIVE host-created request must not remove it.
+    /// The host's own key decides when the row carries one; else a non-host source; else a clearly different title or a different singer.
+    fn terminal_conflicts_with_live_host(&self, rid: u64, row: &Value) -> bool {
+        let norm = |t: &str| -> String { t.to_lowercase().chars().filter(|c| c.is_ascii_lowercase() || c.is_ascii_digit()).collect() };
+        let server_key = first_truthy_str(row, &["idempotency_key", "host_request_key"]).trim().to_string();
+        let server_source = first_truthy_str(row, &["request_source", "source"]).trim().to_lowercase();
+        for singer in &self.queue {
+            for e in &singer.songs {
+                if e.rid != Some(rid) {
+                    continue;
+                }
+                let local_key = e.host_key.trim();
+                if local_key.is_empty() {
+                    return false;
+                }
+                if !server_key.is_empty() {
+                    return server_key != local_key;
+                }
+                if !server_source.is_empty() && server_source != "host_manual" {
+                    return true;
+                }
+                let local_title = e.title.trim();
+                let server_title = row_str(row, "title").trim().to_string();
+                if !local_title.is_empty() && !server_title.is_empty() && singws_queue::titles_conflict(local_title, &server_title) {
+                    return true;
+                }
+                let local_singer = e.duet.clone().filter(|d| !d.is_empty()).unwrap_or_else(|| singer.name.clone()).trim().to_string();
+                let server_singer = row_str(row, "singer").trim().to_string();
+                if !local_singer.is_empty() && !server_singer.is_empty() && norm(&local_singer) != norm(&server_singer) {
+                    return true;
+                }
+                return false;
+            }
+        }
+        false
     }
 
     fn op_restart(&mut self) -> (bool, String) {
@@ -2157,3 +2204,59 @@ mod duet_lock_tests {
         assert_eq!(st.snapshot()["rotation"]["lock_insert_count"], 0);
     }
 }
+
+#[cfg(test)]
+mod host_key_tests {
+    use super::*;
+
+    fn songs(st: &State) -> usize {
+        st.snapshot()["queue"].as_array().unwrap().iter().map(|s| s["songs"].as_array().unwrap().len()).sum()
+    }
+
+    /// A live request R5001 that carries host key K1, then a stale terminal row for the same id with the given extra fields.
+    fn after_terminal(host_key: Option<&str>, extra: Value) -> usize {
+        let mut st = State::new(&json!({"queue_mode": "rotation"}));
+        st.apply(&json!({"op": "remote_arrive", "requests": [{"request_id": 5001, "singer": "Ada", "artist": "Band", "title": "Jam", "key": 0, "tempo": 0}]}));
+        if let Some(k) = host_key {
+            assert_eq!(st.apply(&json!({"op": "set_host_key", "entry": "R5001", "key": k})), (true, String::new()));
+        }
+        let mut row = json!({"request_id": 5001, "singer": "Ada", "artist": "Band", "title": "Jam", "state": "completed"});
+        for (k, v) in extra.as_object().unwrap() {
+            row[k] = v.clone();
+        }
+        st.apply(&json!({"op": "remote_arrive", "requests": [row]}));
+        songs(&st)
+    }
+
+    #[test]
+    fn a_stale_terminal_row_cannot_remove_a_live_host_request() {
+        // no host key on the entry: the row is trusted, the song goes
+        assert_eq!(after_terminal(None, json!({})), 0);
+        // a host key and a row key that differs: the id was reused, the live request stays
+        assert_eq!(after_terminal(Some("K1"), json!({"idempotency_key": "OTHER"})), 1);
+        assert_eq!(after_terminal(Some("K1"), json!({"host_request_key": "OTHER"})), 1);
+        // the same key (spaces ignored): it really is this request, the song goes
+        assert_eq!(after_terminal(Some(" K1 "), json!({"idempotency_key": "K1"})), 0);
+        // the idempotency key wins over the host_request_key when both are given
+        assert_eq!(after_terminal(Some("K1"), json!({"idempotency_key": "K1", "host_request_key": "NOPE"})), 0);
+        // no key on the row: a source that is not the host's own protects the entry (any case, spaces ignored); the host's own does not
+        assert_eq!(after_terminal(Some("K1"), json!({"request_source": "phone"})), 1);
+        assert_eq!(after_terminal(Some("K1"), json!({"source": "Web"})), 1);
+        assert_eq!(after_terminal(Some("K1"), json!({"request_source": " HOST_MANUAL "})), 0);
+        // no key and no source: a clearly different title protects it, a same or similar one does not
+        assert_eq!(after_terminal(Some("K1"), json!({"title": "Completely Different Tune"})), 1);
+        assert_eq!(after_terminal(Some("K1"), json!({"title": "Jam (live)"})), 0);
+        // a different singer protects it; the same singer in another spelling does not
+        assert_eq!(after_terminal(Some("K1"), json!({"singer": "Bob"})), 1);
+        assert_eq!(after_terminal(Some("K1"), json!({"singer": "ADA!"})), 0);
+        // an empty key on the row counts as no key
+        assert_eq!(after_terminal(Some("K1"), json!({"idempotency_key": "  "})), 0);
+    }
+
+    #[test]
+    fn set_host_key_refuses_an_entry_that_is_not_there() {
+        let mut st = State::new(&json!({}));
+        assert_eq!(st.apply(&json!({"op": "set_host_key", "entry": "R9", "key": "K"})), (false, "unknown_entry".into()));
+    }
+}
+

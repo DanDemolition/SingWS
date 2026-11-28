@@ -128,19 +128,39 @@ fn pyfloat_or0(v: Option<&Value>) -> Result<f64, Fl> {
     }
 }
 
-/// Python `repr()` of a str, for printable ASCII only.
+/// Python `repr()` of a str (CPython `unicode_repr`): single quotes unless the text has a `'` and no `"`; `\\`, the quote, `\t` `\n` `\r` and the other control
+/// characters are escaped; a non-ASCII character stays as it is when Python calls it printable (every Unicode category except Cc, Cf, Cs, Co, Cn, Zl, Zp and Zs, the
+/// plain space aside) and is written `\xNN` / `\uNNNN` / `\UNNNNNNNN` otherwise. Non-ASCII titles were declined here until the 2026-11-26 show, where a song titled in
+/// Chinese could not start at all.
 fn repr(s: &str) -> R<String> {
-    if !s.chars().all(|c| (' '..='~').contains(&c)) {
-        return Err("repr of non-ASCII or control text".into());
-    }
+    use unicode_general_category::{get_general_category, GeneralCategory as G};
     let q = if s.contains('\'') && !s.contains('"') { '"' } else { '\'' };
-    let mut out = String::new();
+    let mut out = String::with_capacity(s.len() + 2);
     out.push(q);
     for c in s.chars() {
+        let n = c as u32;
         if c == '\\' || c == q {
             out.push('\\');
+            out.push(c);
+        } else if c == '\t' {
+            out.push_str("\\t");
+        } else if c == '\n' {
+            out.push_str("\\n");
+        } else if c == '\r' {
+            out.push_str("\\r");
+        } else if n < 0x20 || n == 0x7f {
+            out.push_str(&format!("\\x{n:02x}"));
+        } else if n < 0x7f {
+            out.push(c);
+        } else if !matches!(get_general_category(c), G::Control | G::Format | G::Surrogate | G::PrivateUse | G::Unassigned | G::LineSeparator | G::ParagraphSeparator | G::SpaceSeparator) {
+            out.push(c);
+        } else if n <= 0xff {
+            out.push_str(&format!("\\x{n:02x}"));
+        } else if n <= 0xffff {
+            out.push_str(&format!("\\u{n:04x}"));
+        } else {
+            out.push_str(&format!("\\U{n:08x}"));
         }
-        out.push(c);
     }
     out.push(q);
     Ok(out)
@@ -1118,5 +1138,52 @@ mod hold_tests {
         assert!(!has(&h.step(Event::Status(&playing(5.0)), &w, 1025.0).unwrap(), "service_stop"));
         assert!(!has(&h.step(Event::Status(&playing(5.0)), &w, 1030.0).unwrap(), "service_stop"), "only the second stop since the close");
         assert!(has(&h.step(Event::Status(&playing(5.0)), &w, 1035.0).unwrap(), "service_stop"));
+    }
+}
+
+#[cfg(test)]
+mod repr_tests {
+    use super::*;
+
+    /// Expected values made by CPython 3.14.5 (Unicode 16.0.0): `repr(text)` for each input.
+    #[test]
+    fn repr_is_pythons_for_every_kind_of_text() {
+        let cases: [(&str, &str); 32] = [
+            ("plain", "'plain'"),
+            ("it's", "\"it's\""),
+            ("say \"hi\"", "'say \"hi\"'"),
+            ("both ' and \"", "'both \\' and \"'"),
+            ("back\\slash", "'back\\\\slash'"),
+            ("tab\u{9}here", "'tab\\there'"),
+            ("line\u{a}break", "'line\\nbreak'"),
+            ("cr\u{d}x", "'cr\\rx'"),
+            ("\u{0}\u{7}\u{1f}\u{7f}", "'\\x00\\x07\\x1f\\x7f'"),
+            ("Tonghua (\u{7ae5}\u{8bdd})", "'Tonghua (\u{7ae5}\u{8bdd})'"),
+            ("Guang Liang (\u{5149}\u{826f})", "'Guang Liang (\u{5149}\u{826f})'"),
+            ("Jhen\u{e9} Aiko", "'Jhen\u{e9} Aiko'"),
+            ("Se\u{f1}orita", "'Se\u{f1}orita'"),
+            ("Mi Ni\u{f1}a \u{2665}", "'Mi Ni\u{f1}a \u{2665}'"),
+            ("non\u{a0}breaking", "'non\\xa0breaking'"),
+            ("zero\u{200b}width", "'zero\\u200bwidth'"),
+            ("soft\u{ad}hyphen", "'soft\\xadhyphen'"),
+            ("bom\u{feff}", "'bom\\ufeff'"),
+            ("\u{2028}sep", "'\\u2028sep'"),
+            ("\u{2029}para", "'\\u2029para'"),
+            ("priv\u{e000}ate", "'priv\\ue000ate'"),
+            ("unassigned\u{378}", "'unassigned\\u0378'"),
+            ("emoji \u{1f600} \u{1f3a4}", "'emoji \u{1f600} \u{1f3a4}'"),
+            ("astral\u{1d11e}", "'astral\u{1d11e}'"),
+            ("nonchar\u{10ffff}", "'nonchar\\U0010ffff'"),
+            ("tag\u{e0001}", "'tag\\U000e0001'"),
+            ("combining e\u{301}", "'combining e\u{301}'"),
+            ("greek \u{3bb}", "'greek \u{3bb}'"),
+            ("ideographic\u{3000}space", "'ideographic\\u3000space'"),
+            ("\u{1680}ogham", "'\\u1680ogham'"),
+            ("arab \u{627}\u{644}\u{639}\u{631}\u{628}\u{64a}\u{629}", "'arab \u{627}\u{644}\u{639}\u{631}\u{628}\u{64a}\u{629}'"),
+            ("", "''"),
+        ];
+        for (text, expected) in cases {
+            assert_eq!(repr(text).unwrap(), expected, "{text:?}");
+        }
     }
 }

@@ -283,6 +283,20 @@ class World:
         self.app._reconcile_remote_requests(reqs)
         return {"ok": True, "code": ""}
 
+    def op_set_host_key(self, e):
+        """Give an entry the permanent host key a host-created request carries once the server has echoed it (`host_request_key`, with `request_source`), so a stale
+        terminal row that reuses its numeric id meets `_server_terminal_conflicts_with_live_host_request`. State injection: the key is normally made by the sync payload."""
+        eid = self.real_entry_id(e.get("entry"))
+        if not eid:
+            return {"ok": False, "code": "unknown_entry"}
+        for singer in self.app.queue:
+            for entry in singer.get("songs", []) or []:
+                if type(self.app)._ensure_queue_entry_id(entry) == eid:
+                    entry["host_request_key"] = str(e.get("key", ""))
+                    entry["request_source"] = "host_manual"
+                    return {"ok": True, "code": ""}
+        return {"ok": False, "code": "unknown_entry"}
+
     def op_remove_song(self, e):
         eid = self.real_entry_id(e.get("entry"))
         return self._shell_result(self.app.shell_queue_remove_song(eid) if eid else "unknown_entry")
@@ -931,6 +945,8 @@ def generate_stream(seed: int, length: int = 40, profile: str = "full") -> list[
             choices += ["lock", "lock", "lock", "wl_relist", "wl_relist", "wl_as_pending", "wl_flip", "wl_stale", "wl_reuse", "wl_flags", "wl_add_hot", "wl_both", "wl_both"]
             if snap["waitlist"]:
                 choices += ["wl_add_hot"] * 2
+        if profile == "keyed":  # entries that carry a permanent host key, and stale terminal rows that reuse their id with every kind of key/source/title/singer
+            choices += ["hostkey"] * 3 + ["term_keyed"] * 5
         pick = rng.choice(choices)
         if pick == "arrive":
             batch = []
@@ -1047,6 +1063,35 @@ def generate_stream(seed: int, length: int = 40, profile: str = "full") -> list[
             r = rng.choice(arrived)
             emit({"op": "remote_arrive", "requests": [dict(r, state=rng.choice(["completed", "removed"]))]})
             emit({"op": "remote_arrive", "requests": [dict(r, title=rng.choice(TITLES) + "Z", artist="Other")]})
+        elif pick == "hostkey" and entries:
+            remote = [e for e in entries if str(e).startswith("R")]
+            if remote:
+                emit({"op": "set_host_key", "entry": rng.choice(remote), "key": rng.choice(["K1", "K2", " K1 ", "host:3"])})
+        elif pick == "term_keyed" and arrived:
+            r = rng.choice(arrived)
+            row = dict(r, state=rng.choice(["completed", "removed", "sung"]))
+            kind = rng.choice(["none", "idem_same", "idem_other", "hrk_same", "hrk_other", "both", "empty"])
+            if kind == "idem_same":
+                row["idempotency_key"] = rng.choice(["K1", "host:3"])
+            elif kind == "idem_other":
+                row["idempotency_key"] = "OTHER"
+            elif kind == "hrk_same":
+                row["host_request_key"] = rng.choice(["K1", "K2"])
+            elif kind == "hrk_other":
+                row["host_request_key"] = "NOPE"
+            elif kind == "both":
+                row["idempotency_key"] = "K2"
+                row["host_request_key"] = "K1"
+            elif kind == "empty":
+                row["idempotency_key"] = "  "
+            src = rng.choice([None, None, "host_manual", "phone", "Web", " HOST_MANUAL "])
+            if src is not None:
+                row[rng.choice(["request_source", "source"])] = src
+            if rng.random() < 0.4:
+                row["title"] = rng.choice(TITLES) + rng.choice(["", "Z", " (live)"])
+            if rng.random() < 0.3:
+                row["singer"] = rng.choice(SINGERS + [row["singer"].upper(), row["singer"] + "!"])
+            emit({"op": "remote_arrive", "requests": [row]})
         elif pick == "restart":
             emit({"op": "restart"})
         elif pick == "stale_ref":
@@ -1148,7 +1193,7 @@ def main(argv=None):
     c = sub.add_parser("corpus"); c.add_argument("--seeds", type=int, default=20); c.add_argument("--length", type=int, default=40)
     c.add_argument("--fingerprint", action="store_true", help="print only a hash of all snapshots (compare across PYTHONHASHSEED values)")
     q = sub.add_parser("parity", help="Python vs Rust over the in-scope corpus"); q.add_argument("--seeds", type=int, default=100); q.add_argument("--length", type=int, default=40)
-    q.add_argument("--profile", default="full", choices=["core", "full"]); q.add_argument("--stream", help="also compare this JSONL stream (e.g. from extract)")
+    q.add_argument("--profile", default="full", choices=["core", "full", "keyed"]); q.add_argument("--stream", help="also compare this JSONL stream (e.g. from extract)")
     p = sub.add_parser("play"); p.add_argument("file")
     x = sub.add_parser("extract"); x.add_argument("logs", nargs="+"); x.add_argument("--out")
     args = ap.parse_args(argv)

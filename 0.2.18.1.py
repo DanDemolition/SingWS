@@ -4520,6 +4520,7 @@ DEFAULTS = {
     "karaoke_auto_advance": False,         # auto-play the next queued karaoke when a song ends (off = stop after each song)
     "keep_mac_awake": True,                # macOS: prevent App Nap + idle system/display sleep while SingWS runs (stops idle "freezes")
     "mac_shim_keep_awake": False,          # opt-in: the Rust platform shim (singws-mac) holds the keep-awake assertion instead of PyObjC; PyObjC is the fallback
+    "karafun_prewarm": True,               # bring the KaraFun player up and signed in when a KaraFun request enters the queue, so its song does not wait 30-45 s for the sign-in
     "bg_end_silence_trim_enabled": False,  # Background music: skip trailing silence between BG tracks (opt-in)
     "request_poll_interval_sec": 2,        # how often the app checks the server for new requests (seconds)
     # --- Audio processing master switch ---
@@ -46079,6 +46080,40 @@ class KaraokeApp(QWidget):
             pass
 
     def _add_song_to_queue(self, singer_name, song_data, track=None, remote_meta=None, quiet=False):
+        added = self._add_song_to_queue_impl(singer_name, song_data, track=track, remote_meta=remote_meta, quiet=quiet)
+        if added:
+            try:
+                # A KaraFun request is in the queue: start the player and sign it in now, so its song does not wait for that when it is next (setting karafun_prewarm).
+                head = song_data[0] if isinstance(song_data, (tuple, list)) and song_data else song_data
+                if str(head or "").lower().startswith("karafun_streaming:"):
+                    self._karafun_prewarm("queue_add")
+            except Exception:
+                pass
+        return added
+
+    def _karafun_prewarm(self, reason: str = "queue_add") -> None:
+        """Ask the KaraFun player to come up and sign in ahead of its first song. At most once per two minutes; off with karafun_prewarm=false; a no-op for the
+        Python host (it has no warm-up) and when KaraFun is disabled."""
+        state = self.__dict__
+        settings = state.get("settings") or {}
+        if not bool(settings.get("karafun_prewarm", True)) or not bool(settings.get("karafun_provider_enabled", True)):
+            return
+        now = time.monotonic()
+        if now - float(state.get("_karafun_prewarm_at", -1e9)) < 120.0:
+            return
+        self._karafun_prewarm_at = now
+
+        def _go():
+            try:
+                warm = getattr(self._karafun_web_host(), "warm", None)
+                if callable(warm) and warm():
+                    _diag(f"[KARAFUN-WEB] prewarm requested reason={reason}")
+            except Exception as exc:
+                _diag(f"[KARAFUN-WEB] prewarm failed: {exc!r}")
+
+        QTimer.singleShot(1000, _go)         # after the add has finished, off its path
+
+    def _add_song_to_queue_impl(self, singer_name, song_data, track=None, remote_meta=None, quiet=False):
         """`quiet=True` is the Rust shell / phone add: the same queue logic as the operator's Add, but it never touches the operator's screen (does not clear what
         they are typing, reset the key selector or move the selection), never bypasses the song limit (it refuses, and says so in `_quiet_add_outcome`), and reports
         a duplicate instead of silently swallowing it."""

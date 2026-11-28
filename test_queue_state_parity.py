@@ -41,6 +41,21 @@ class QueueStateParityTests(unittest.TestCase):
         stream, _cov = qr.extract_stream([str(log)])
         self.check("log", stream)
 
+    def test_seeded_keyed_streams_are_identical(self):
+        # entries that carry a permanent host key, and stale terminal rows that reuse their id with every kind of key / source / title / singer
+        for seed in range(40):
+            self.check(f"keyed-seed{seed}", qr.generate_stream(seed, 60, "keyed"))
+
+    def test_a_stale_terminal_row_cannot_remove_a_live_host_request(self):
+        arrive = {"op": "remote_arrive", "requests": [qr._req(5001, "Ada", "Jam")]}
+        for extra, survives in (({}, False), ({"idempotency_key": "OTHER"}, True), ({"idempotency_key": "K1"}, False), ({"request_source": "phone"}, True),
+                                ({"request_source": "host_manual", "singer": "Bob"}, True), ({"title": "Completely Different Tune"}, True)):
+            stream = [{"op": "config", "queue_mode": "rotation"}, arrive, {"op": "set_host_key", "entry": "R5001", "key": "K1"},
+                      {"op": "remote_arrive", "requests": [dict(qr._req(5001, "Ada", "Jam"), state="completed", **extra)]}]
+            self.check(f"terminal-{extra}", stream)
+            left = sum(len(s["songs"]) for s in qr.run_stream(qr.PythonImpl(), stream)[-1]["snapshot"]["queue"])
+            self.assertEqual(left, 1 if survives else 0, extra)
+
     def test_seeded_waitlist_streams_are_identical(self):
         for seed in range(40):
             self.check(f"waitlist-seed{seed}", qr.generate_stream(seed, 60, "full"))

@@ -100,6 +100,24 @@ class RustHostQtTests(unittest.TestCase):
         self.host._stop_frames = mock.Mock()
         self.assertTrue(self.host.start(self.entry, song_path="kf_3241559"))
 
+    def test_warm_brings_the_player_up_and_signed_in_without_asking_for_a_song(self):
+        """The pre-warm (a KaraFun request entered the queue): the real driver starts the service and the (scripted) player signs in; no song is ever asked."""
+        self.assertIsNone(self.host.asked)
+        self.assertTrue(self.host.warm())
+        self.assertTrue(pump(lambda: self.host.service.state == "ready", 25), f"state={self.host.service.state} logs={self.logs[-6:]}")
+        self.assertIsNone(self.host.asked)
+        self.assertEqual([s for s in self.app.statuses if s[0] in ("playing", "failed")], [])
+        sent = Path(self.log).read_text()
+        self.assertNotIn('"cmd":"play"', sent.replace(" ", ""))          # nothing was played
+        # asking again while it is ready changes nothing, and a song asked afterwards still starts normally
+        self.assertTrue(self.host.warm())
+        self.host._start_frames = mock.Mock()
+        self.host._stop_frames = mock.Mock()
+        self.assertTrue(self.host.start(self.entry, song_path="kf_3241559"))
+        self.assertTrue(pump(lambda: any("started after" in line for line in self.logs), 25), f"logs={self.logs[-6:]}")      # the song starts normally on the warm player
+        self.assertIsNotNone(self.host.asked)
+        self.assertFalse(self.host.warm())                               # a song is asked now: nothing to warm
+
     def test_declining_the_chromium_download_in_the_real_dialog_fails_the_song_plainly(self):
         click_dialog("No")
         self._start_missing()

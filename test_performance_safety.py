@@ -238,7 +238,7 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertIn("QProgressDialog", start)
 
     def test_queue_add_defers_metadata_lookup_during_playback(self):
-        source = function_source("_add_song_to_queue")
+        source = function_source("_add_song_to_queue_impl")
         self.assertIn("karaoke_playing", source)
         self.assertIn("[QUEUE-ADD] metadata lookup deferred during playback", source)
         self.assertLess(source.index("karaoke_playing"), source.index("self.lookup_display_name(fallback_path)"))
@@ -1758,7 +1758,7 @@ class PerformanceSafetyTests(unittest.TestCase):
         match = function_source("_queue_singer_match_index")
         self.assertIn("display-name identity collision reused existing row", match)
         self.assertNotIn("existing_server_id != singer_id:\n                    continue", match)
-        add = function_source("_add_song_to_queue")
+        add = function_source("_add_song_to_queue_impl")
         self.assertIn("preserved existing row identity while attaching request", add)
 
     def test_queue_uses_model_backed_view_with_identity_roles(self):

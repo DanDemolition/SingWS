@@ -254,6 +254,21 @@ class KaraFunWebHostRust(KaraFunWebHost):
     def _retry_service(self) -> None:
         self._send({"op": "retry_service"})
 
+    def warm(self) -> bool:
+        """Bring the player up and signed in BEFORE a song asks for it (a KaraFun request just entered the queue): the first song of a night waited 33-44 s for the
+        sign-in (2026-11-22 and 11-26 shows), the next ones 7-10 s. The driver's `retry_service` starts the set-up only when the service is idle / failed / waiting for
+        a browser, so asking again while it is coming up, ready or playing does nothing. Never while a song is already asked (its own start does this)."""
+        try:
+            if not self.enabled() or self.asked is not None:
+                return False
+            if not self._ensure_proc():
+                return False
+            self._send({"op": "retry_service"})          # no `seq` for this request: _send answers 0 for a request that went through, too
+            proc = self._proc
+            return proc is not None and proc.poll() is None
+        except Exception:
+            return False
+
     # ---- what the process says
     def _handle_event(self, ev: dict) -> None:
         kind = ev.get("ev")
